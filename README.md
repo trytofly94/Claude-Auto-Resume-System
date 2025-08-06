@@ -12,23 +12,43 @@ Dieses Projekt erweitert zwei wichtige Open-Source-Tools um robuste Automatisier
 
 ### 🔗 Zugrundeliegende Repositories
 
-1. **[Claude CLI](https://github.com/anthropics/claude-code)** - Die offizielle Anthropic Claude Command Line Interface
-   - Basis für alle Claude-Interaktionen und AI-assistierte Entwicklung
-   - Stellt die Core-Funktionalität für Code-Integration bereit
+1. **[claude-auto-resume](https://github.com/terryso/claude-auto-resume)** - Original Claude Auto-Resume System
+   - Automatische Wiederherstellung von Claude CLI Sessions
+   - Usage-Limit-Detection und Recovery-Mechanismen
+   - Grundlage für die erweiterte Monitoring-Funktionalität
 
-2. **[claunch](https://github.com/eeshugerman/claunch)** - Claude Launch Utility  
+2. **[claunch](https://github.com/0xkaz/claunch)** - Claude Launch Utility  
    - Projektbasiertes Session-Management für Claude CLI
    - tmux-Integration und organisierte Workflow-Verwaltung
    - Foundation für den in diesem Projekt implementierten Hybrid-Ansatz
 
 ## 🚀 Überblick
 
-Claude Auto-Resume implementiert einen **erweiterten Hybrid-Ansatz**, der die Stärken von `claunch` und `tmux` kombiniert und um intelligente Automatisierung erweitert:
+**Claude Auto-Resume System** ist eine erweiterte Kombination zweier bewährter Ansätze:
 
-- **Automatische Recovery-Mechanismen** für Usage-Limits und Verbindungsabbrüche
-- **Robuste Fehlerbehandlung** mit strukturiertem Logging
-- **Cross-Platform-Unterstützung** für verschiedene Terminal-Umgebungen  
-- **Production-Ready-Architektur** mit umfassender Test-Suite
+### 🔄 Innovation durch Kombination
+
+Dieses Projekt vereint die besten Eigenschaften beider Grundlagen:
+
+**Von [terryso/claude-auto-resume](https://github.com/terryso/claude-auto-resume):**
+- ✅ Automatische Usage-Limit-Detection
+- ✅ Recovery-Mechanismen nach Verbindungsabbrüchen
+- ✅ Intelligent Wait-Time-Berechnung
+
+**Von [0xkaz/claunch](https://github.com/0xkaz/claunch):**
+- ✅ Projektbasiertes Session-Management
+- ✅ tmux-Integration für Session-Persistenz
+- ✅ Organisierte Workflow-Verwaltung
+
+### 🚀 Erweiterte Features
+
+**Zusätzliche Innovationen in diesem System:**
+- 🏗️ **Modulare Architektur** mit unabhängig testbaren Komponenten
+- 🔧 **Cross-Platform-Support** für macOS und Linux
+- 📊 **Strukturiertes Logging** mit JSON-Support und Log-Rotation
+- 🧪 **Umfassende Test-Suite** mit BATS-Integration
+- 🛡️ **Production-Ready-Fehlerbehandlung** mit robusten Fallback-Mechanismen
+- ⚡ **Automatische Setup-Scripts** für einfache Installation und Konfiguration
 
 ### ✨ Kern-Features
 
