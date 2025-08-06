@@ -60,8 +60,8 @@ Claude Auto-Resume implementiert einen **erweiterten Hybrid-Ansatz**, der die St
 ### Automatische Installation
 ```bash
 # Repository klonen
-git clone https://github.com/LennartZi/Claude-Auto-Resume.git
-cd Claude-Auto-Resume
+git clone https://github.com/trytofly94/Claude-Auto-Resume-System.git
+cd Claude-Auto-Resume-System
 
 # Vollständige Installation mit Dependencies
 ./scripts/setup.sh
