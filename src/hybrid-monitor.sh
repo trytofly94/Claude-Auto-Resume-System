@@ -55,7 +55,12 @@ cleanup_on_exit() {
     CLEANUP_DONE=true
     MONITORING_ACTIVE=false
     
-    log_info "Hybrid monitor shutting down (exit code: $exit_code)"
+    # Don't log the exit code for help/version commands that exit 0
+    if [[ $exit_code -eq 0 ]]; then
+        log_debug "Hybrid monitor shutting down normally"
+    else
+        log_info "Hybrid monitor shutting down (exit code: $exit_code)"
+    fi
     
     # Stoppe Hintergrund-Prozesse
     pkill -P $$ 2>/dev/null || true
@@ -66,7 +71,7 @@ cleanup_on_exit() {
         stop_managed_session "$MAIN_SESSION_ID" >/dev/null 2>&1 || true
     fi
     
-    log_info "Hybrid monitor cleanup completed"
+    log_debug "Hybrid monitor cleanup completed"
 }
 
 # Signal-Handler
@@ -76,6 +81,20 @@ interrupt_handler() {
     cleanup_on_exit
     exit 130
 }
+
+# Frühe Logging-Initialisierung vor Signal-Handlern
+init_early_logging() {
+    # Fallback-Logging falls Module noch nicht geladen
+    if ! declare -f log_info >/dev/null 2>&1; then
+        log_debug() { [[ "${DEBUG_MODE:-false}" == "true" ]] && echo "[DEBUG] $*" >&2 || true; }
+        log_info() { echo "[INFO] $*" >&2; }
+        log_warn() { echo "[WARN] $*" >&2; }
+        log_error() { echo "[ERROR] $*" >&2; }
+    fi
+}
+
+# Initialisiere frühe Logging-Funktionen
+init_early_logging
 
 # Signal-Handler registrieren
 trap cleanup_on_exit EXIT
@@ -110,16 +129,6 @@ load_dependencies() {
     done
 }
 
-# Frühe Logging-Initialisierung
-init_early_logging() {
-    # Fallback-Logging falls Module noch nicht geladen
-    if ! declare -f log_info >/dev/null 2>&1; then
-        log_debug() { [[ "$DEBUG_MODE" == "true" ]] && echo "[DEBUG] $*" >&2; }
-        log_info() { echo "[INFO] $*" >&2; }
-        log_warn() { echo "[WARN] $*" >&2; }
-        log_error() { echo "[ERROR] $*" >&2; }
-    fi
-}
 
 # ===============================================================================
 # KONFIGURATION UND VALIDIERUNG
@@ -519,21 +528,19 @@ show_version() {
     echo ""
     echo "Dependencies:"
     
-    if has_command claude; then
+    if command -v claude >/dev/null 2>&1; then
         echo "  Claude CLI: $(claude --version 2>/dev/null | head -1 || echo "installed")"
     else
         echo "  Claude CLI: not found"
     fi
     
-    if has_command claunch; then
+    if command -v claunch >/dev/null 2>&1; then
         echo "  claunch: $(claunch --version 2>/dev/null | head -1 || echo "installed")"
-    elif detect_claunch >/dev/null 2>&1; then
-        echo "  claunch: found at $CLAUNCH_PATH"
     else
         echo "  claunch: not found"
     fi
     
-    if has_command tmux; then
+    if command -v tmux >/dev/null 2>&1; then
         echo "  tmux: $(tmux -V 2>/dev/null || echo "installed")"
     else
         echo "  tmux: not found"
@@ -634,9 +641,6 @@ parse_arguments() {
 # ===============================================================================
 
 main() {
-    # Frühe Initialisierung
-    init_early_logging
-    
     log_info "Hybrid Claude Monitor v$VERSION starting up"
     log_debug "Script directory: $SCRIPT_DIR"
     log_debug "Working directory: $WORKING_DIR"
