@@ -41,6 +41,15 @@ TEST_MODE=false
 TEST_WAIT_SECONDS=30
 
 # ===============================================================================
+# UTILITY-FUNKTIONEN (früh definiert für Validierung)
+# ===============================================================================
+
+# Prüfe ob Kommando verfügbar ist
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# ===============================================================================
 # SIGNAL-HANDLER UND CLEANUP
 # ===============================================================================
 
@@ -329,7 +338,8 @@ start_or_continue_claude_session() {
             open_claude_in_terminal "${CLAUDE_ARGS[@]}"
         else
             # Direkte Ausführung
-            claude --dangerously-skip-permissions "${CLAUDE_ARGS[@]}"
+            # Direct execution without bypass flags for security
+            claude "${CLAUDE_ARGS[@]}"
         fi
     fi
 }
