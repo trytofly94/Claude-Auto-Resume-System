@@ -1,0 +1,10 @@
+Usage limit exceeded for Claude API. Please wait before making additional requests.
+
+Claude AI usage limit reached. Please try again later.
+
+Rate limit exceeded. Current usage: 150/100 requests per hour.
+Next reset: 2025-08-05 14:30:00 UTC (1722869400)
+
+Please wait 1800 seconds before retrying.
+
+You can continue working with other tools while waiting for the limit to reset.

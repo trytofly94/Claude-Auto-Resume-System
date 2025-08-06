@@ -1,0 +1,17 @@
+Active claunch sessions:
+
+Session ID: test-project-1722869400-12345
+Project: test-project
+Directory: /tmp/test-project
+Status: running
+Created: 2025-08-05 12:30:00
+tmux Session: claude-test-test-project
+
+Session ID: example-app-1722869500-67890  
+Project: example-app
+Directory: /home/user/projects/example-app
+Status: usage_limited
+Created: 2025-08-05 12:31:40
+tmux Session: claude-test-example-app
+
+Total sessions: 2

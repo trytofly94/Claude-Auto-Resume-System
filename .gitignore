@@ -1,0 +1,161 @@
+# Claude Auto-Resume - Git Ignore File
+
+# ===============================================================================
+# LOG FILES AND RUNTIME DATA
+# ===============================================================================
+
+# Log-Verzeichnis und alle Log-Dateien
+logs/
+*.log
+*.log.*
+
+# Session-Daten und temporäre Dateien
+*.session
+*.tmp
+*.temp
+.session_*
+
+# Backup-Dateien
+*.bak
+*.backup
+*~
+
+# ===============================================================================
+# SYSTEM-SPEZIFISCHE DATEIEN
+# ===============================================================================
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ===============================================================================
+# ENTWICKLUNGS-ARTEFAKTE
+# ===============================================================================
+
+# IDE/Editor-Dateien
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.vim/
+*~
+
+# Node.js (falls für Setup-Tools verwendet)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (falls für erweiterte Tools verwendet)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv
+
+# ===============================================================================
+# KONFIGURATION & CREDENTIALS
+# ===============================================================================
+
+# Lokale Konfigurationsüberschreibungen
+config/local.conf
+config/*.local.conf
+config/production.conf
+
+# Sensitive Daten
+*.key
+*.pem
+*.cert
+.env.local
+.env.production
+secrets/
+
+# API-Keys und Session-Tokens
+.claude_session_*
+.anthropic_*
+auth_tokens
+
+# ===============================================================================
+# BUILD & DISTRIBUTION
+# ===============================================================================
+
+# Build-Artefakte
+build/
+dist/
+target/
+out/
+
+# Package-Dateien
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+
+# ===============================================================================
+# TESTING & DEBUGGING
+# ===============================================================================
+
+# Test-Ausgaben
+test-results/
+coverage/
+*.coverage
+.nyc_output/
+
+# Debug-Dumps
+core.*
+*.dmp
+*.trace
+
+# Performance-Profile
+*.prof
+*.profile
+
+# ===============================================================================
+# tmux UND SESSION-MANAGEMENT
+# ===============================================================================
+
+# tmux Session-Sicherungen
+.tmux_sessions/
+tmux-client-*.log
+
+# claunch Session-Daten
+.claunch/
+.claunch_*
+
+# Session-Locks
+*.lock
+.pid
+
+# ===============================================================================
+# TEMPORÄRE VERZEICHNISSE
+# ===============================================================================
+
+# Temporäre Arbeitsverzeichnisse
+tmp/
+temp/
+.tmp/
+
+# Cache-Verzeichnisse
+.cache/
+cache/
+
+# Socket-Dateien
+*.sock
+*.socket

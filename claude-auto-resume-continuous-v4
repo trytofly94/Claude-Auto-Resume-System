@@ -1,0 +1,604 @@
+#!/bin/bash
+
+# Simplified Continuous Auto-resume script for Claude CLI tasks
+# Vereinfachte Version mit nur periodischen Limit-Checks
+# Depends on standard shell commands and claude CLI
+
+# Version information
+VERSION="4.0.0"
+
+# Array to hold pass-through arguments for Claude
+CLAUDE_PASSTHROUGH_ARGS=()
+# Test mode for simulating usage limits
+TEST_MODE=false
+TEST_WAIT_SECONDS=0
+# Debug mode
+DEBUG_MODE=false
+# Claude test mode - skip initial checks and go directly to terminal opening
+CLAUDE_TEST_MODE=false
+# Continuous monitoring mode
+CONTINUOUS_MODE=false
+# Check interval in minutes
+CHECK_INTERVAL_MINUTES=5
+# Maximum number of restart attempts
+MAX_RESTARTS=50
+# Current restart count
+RESTART_COUNT=0
+# Original command to restart with
+ORIGINAL_COMMAND=""
+# Working directory
+ORIGINAL_DIR=""
+# Use new terminal window for Claude
+USE_NEW_TERMINAL=false
+# Terminal application to use (auto-detect by default)
+TERMINAL_APP=""
+
+# Global flag to prevent double cleanup
+CLEANUP_DONE=false
+
+# Cleanup function for graceful termination
+cleanup_on_exit() {
+    local exit_code=$?
+    
+    # Always perform cleanup, regardless of exit code
+    cleanup_resources
+    
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "[INFO] Script terminated (exit code: $exit_code)"
+        echo "[HINT] Use --help to see usage examples"
+    fi
+}
+
+# Interrupt handler for SIGINT (Ctrl+C)
+interrupt_handler() {
+    echo ""
+    echo "[INFO] Script interrupted by user (Ctrl+C)"
+    echo "[INFO] Cleaning up and exiting gracefully..."
+    
+    # Perform cleanup
+    cleanup_resources
+    
+    # Exit with appropriate code for interrupted processes
+    exit 130
+}
+
+# Cleanup resources and temporary state
+cleanup_resources() {
+    # Prevent double cleanup
+    if [ "$CLEANUP_DONE" = true ]; then
+        return
+    fi
+    
+    echo "[INFO] Cleaning up resources..."
+    
+    # Kill any potential background processes started by this script
+    pkill -f "timeout.*claude" 2>/dev/null
+    
+    # Mark cleanup as done
+    CLEANUP_DONE=true
+    
+    echo "[INFO] Cleanup completed"
+}
+
+# Set up signal handlers for graceful cleanup
+trap cleanup_on_exit EXIT
+trap interrupt_handler INT TERM
+
+# Function for debug output
+debug_echo() {
+    if [ "$DEBUG_MODE" = true ]; then
+        echo "[DEBUG] $@"
+    fi
+}
+
+# Function to detect available terminal applications
+detect_terminal_app() {
+    if [ -n "$TERMINAL_APP" ]; then
+        debug_echo "Using specified terminal app: $TERMINAL_APP"
+        return 0
+    fi
+    
+    # Check for iTerm2 first (preferred on macOS)
+    if [ -d "/Applications/iTerm.app" ]; then
+        TERMINAL_APP="iterm"
+        debug_echo "Detected iTerm2"
+        return 0
+    fi
+    
+    # Check for Terminal.app (default on macOS)
+    if [ -d "/Applications/Utilities/Terminal.app" ] || [ -d "/System/Applications/Utilities/Terminal.app" ]; then
+        TERMINAL_APP="terminal"
+        debug_echo "Detected Terminal.app"
+        return 0
+    fi
+    
+    # Check for other terminal emulators on Linux
+    if command -v gnome-terminal >/dev/null 2>&1; then
+        TERMINAL_APP="gnome-terminal"
+        debug_echo "Detected gnome-terminal"
+        return 0
+    fi
+    
+    if command -v konsole >/dev/null 2>&1; then
+        TERMINAL_APP="konsole"
+        debug_echo "Detected konsole"
+        return 0
+    fi
+    
+    if command -v xterm >/dev/null 2>&1; then
+        TERMINAL_APP="xterm"
+        debug_echo "Detected xterm"
+        return 0
+    fi
+    
+    echo "[ERROR] No supported terminal application found."
+    echo "[SUGGESTION] Install iTerm2, use Terminal.app, or specify --terminal-app"
+    return 1
+}
+
+# Function to open Claude in a new terminal window
+open_claude_in_new_terminal() {
+    local working_dir="$1"
+    shift
+    local claude_args=("$@")
+    
+    # Safely quote arguments for the command string
+    local claude_cmd_args
+    printf -v claude_cmd_args '%q ' "${claude_args[@]}"
+
+    debug_echo "Opening Claude in new terminal: dir='$working_dir', args=$claude_cmd_args"
+    
+    # Detect terminal application if not specified
+    if ! detect_terminal_app; then
+        return 1
+    fi
+    
+    # Prepare Claude command, which will be executed by a shell
+    local claude_cmd="claude --dangerously-skip-permissions $claude_cmd_args"
+    
+    debug_echo "Using specified terminal app: $TERMINAL_APP"
+    debug_echo "Claude command for shell: $claude_cmd"
+    debug_echo "Working directory: $working_dir"
+    
+    case "$TERMINAL_APP" in
+        "iterm")
+            # For iTerm, write separate commands. This simulates typing.
+            # Escape for AppleScript string literals.
+            local cd_cmd_for_as="cd '$working_dir'"
+            cd_cmd_for_as=${cd_cmd_for_as//\\/\\\\}
+            cd_cmd_for_as=${cd_cmd_for_as//\"/\\\"}
+            
+            local claude_cmd_for_as="$claude_cmd"
+            claude_cmd_for_as=${claude_cmd_for_as//\\/\\\\}
+            claude_cmd_for_as=${claude_cmd_for_as//\"/\\\"}
+
+            osascript <<EOF
+tell application "iTerm"
+    create window with default profile
+    tell current session of current window
+        write text "$cd_cmd_for_as"
+        write text "$claude_cmd_for_as"
+    end tell
+end tell
+EOF
+            ;;
+        "terminal")
+            # For Terminal.app, run a single command string to preserve the directory context.
+            # This is the only reliable method without requiring special accessibility permissions.
+            local full_command="cd '$working_dir' && $claude_cmd"
+            
+            # Escape for AppleScript 'do script' which uses double quotes.
+            full_command=${full_command//\\/\\\\} # Must escape backslashes first
+            full_command=${full_command//\"/\\\"} # Then escape double quotes
+
+            osascript <<EOF
+tell application "Terminal"
+    activate
+    do script "$full_command"
+end tell
+EOF
+            ;;
+        "gnome-terminal")
+            # GNOME Terminal - use working directory option and separate command
+            gnome-terminal --working-directory="$working_dir" -- bash -c "$claude_cmd; exec bash" &
+            ;;
+        "konsole")
+            # KDE Konsole - use workdir option and separate command
+            konsole --workdir "$working_dir" -e bash -c "$claude_cmd; exec bash" &
+            ;;
+        "xterm")
+            # XTerm - change to working directory first
+            cd "$working_dir"
+            xterm -e bash -c "$claude_cmd; exec bash" &
+            ;;
+        *)
+            echo "[ERROR] Unsupported terminal application: $TERMINAL_APP"
+            return 1
+            ;;
+    esac
+    
+    debug_echo "New terminal opened successfully"
+    return 0
+}
+
+# Function to check Claude usage limits
+check_claude_limits() {
+    debug_echo "Checking Claude usage limits..."
+    
+    local claude_output
+    local ret_code
+    
+    # Test mode: simulate usage limit
+    if [ "$TEST_MODE" = true ]; then
+        echo "[TEST MODE] Simulating usage limit with ${TEST_WAIT_SECONDS} seconds wait time..."
+        local now_timestamp=$(date +%s)
+        local resume_timestamp=$((now_timestamp + TEST_WAIT_SECONDS))
+        claude_output="Claude AI usage limit reached|$resume_timestamp"
+        ret_code=1
+        debug_echo "Test mode enabled. Simulated output: '$claude_output'"
+    else
+        # Run Claude check with timeout
+        claude_output=$(timeout 30s claude -p 'check' 2>&1)
+        ret_code=$?
+    fi
+    
+    debug_echo "Claude check completed with exit code: $ret_code"
+    
+    # Check for timeout
+    if [ $ret_code -eq 124 ]; then
+        echo "[WARNING] Claude CLI operation timed out after 30 seconds."
+        return 2
+    fi
+    
+    # Check for usage limit
+    local limit_msg=$(echo "$claude_output" | grep "Claude AI usage limit reached")
+    
+    if [ -n "$limit_msg" ]; then
+        debug_echo "Usage limit detected: $limit_msg"
+        
+        # Extract timestamp
+        local resume_timestamp=$(echo "$claude_output" | awk -F'|' '{print $2}')
+        if [[ "$resume_timestamp" =~ ^[0-9]+$ ]] && [ "$resume_timestamp" -gt 0 ]; then
+            local now_timestamp=$(date +%s)
+            local wait_seconds=$((resume_timestamp - now_timestamp))
+            
+            if [ $wait_seconds -gt 0 ]; then
+                echo "Claude usage limit detected. Waiting $wait_seconds seconds..."
+                
+                # Live countdown
+                while [ $wait_seconds -gt 0 ]; do
+                    printf "\rResuming in %02d:%02d:%02d..." \
+                        $((wait_seconds/3600)) $(( (wait_seconds%3600)/60 )) $((wait_seconds%60))
+                    sleep 1
+                    now_timestamp=$(date +%s)
+                    wait_seconds=$((resume_timestamp - now_timestamp))
+                done
+                printf "\rResume time has arrived. Continuing...           \n"
+            fi
+        fi
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to check network connectivity
+check_network_connectivity() {
+    local connectivity_failed=true
+    
+    # Try multiple connectivity checks for better reliability
+    if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+        connectivity_failed=false
+    elif ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
+        connectivity_failed=false
+    elif command -v curl >/dev/null 2>&1 && curl -s --max-time 5 --connect-timeout 3 https://www.google.com >/dev/null 2>&1; then
+        connectivity_failed=false
+    elif command -v wget >/dev/null 2>&1 && wget -q --timeout=5 --tries=1 -O /dev/null https://www.google.com 2>/dev/null; then
+        connectivity_failed=false
+    fi
+    
+    if [ "$connectivity_failed" = true ]; then
+        echo "[ERROR] Network connectivity check failed."
+        echo "[HINT] Claude CLI requires internet connection to function properly."
+        echo "[SUGGESTION] Please check your internet connection and try again."
+        return 3
+    fi
+    
+    return 0
+}
+
+# Function to validate Claude CLI environment
+validate_claude_cli() {
+    # Check if Claude CLI is installed and accessible
+    if ! command -v claude &> /dev/null; then
+        echo "[ERROR] Claude CLI not found. Please install Claude CLI first."
+        echo "[SUGGESTION] Visit https://claude.ai/code for installation instructions."
+        exit 1
+    fi
+    
+    # Check if --dangerously-skip-permissions flag is supported
+    if ! claude --help | grep -q "dangerously-skip-permissions"; then
+        echo "[WARNING] Your Claude CLI version may not support --dangerously-skip-permissions flag."
+        echo "[SUGGESTION] This script requires a recent version of Claude CLI. Please consider updating."
+        echo "The script will continue but may fail during execution."
+    fi
+}
+
+# Simplified continuous monitoring loop - no process monitoring!
+simplified_continuous_loop() {
+    echo "Starting simplified continuous monitoring mode..."
+    echo "Check interval: $CHECK_INTERVAL_MINUTES minutes"
+    echo "Working directory: $ORIGINAL_DIR"
+    echo "Max restarts: $MAX_RESTARTS"
+    echo "Use new terminal: $USE_NEW_TERMINAL"
+    echo "Terminal app: $TERMINAL_APP"
+    if [ "$CLAUDE_TEST_MODE" = true ]; then
+        echo "Claude test mode: Skipping initial limit check"
+    fi
+    echo ""
+    
+    local check_interval_seconds=$((CHECK_INTERVAL_MINUTES * 60))
+    
+    while [ $RESTART_COUNT -lt $MAX_RESTARTS ]; do
+        echo "=== Check cycle $((RESTART_COUNT + 1))/$MAX_RESTARTS ==="
+        echo "$(date): Checking Claude usage limits..."
+        
+        # Check for usage limits (skip on first iteration if CLAUDE_TEST_MODE is true)
+        local limit_status=0
+        if [ "$CLAUDE_TEST_MODE" = true ] && [ $RESTART_COUNT -eq 0 ]; then
+            echo "[CLAUDE_TEST_MODE] Skipping initial limit check - assuming no limits"
+            limit_status=0
+        else
+            check_claude_limits
+            limit_status=$?
+        fi
+        
+        if [ $limit_status -eq 2 ]; then
+            echo "[WARNING] Timeout during limit check. Retrying in 1 minute..."
+            sleep 60
+            continue
+        elif [ $limit_status -eq 1 ]; then
+            echo "Usage limit detected and waited. Will check again in $CHECK_INTERVAL_MINUTES minutes."
+        else
+            echo "No usage limit detected. Starting Claude in new terminal..."
+            
+            # Check network connectivity
+            if ! check_network_connectivity; then
+                echo "[ERROR] Network connectivity failed. Retrying in 1 minute..."
+                sleep 60
+                continue
+            fi
+            
+            # Start Claude session in new terminal
+            if [ "$USE_NEW_TERMINAL" = true ]; then
+                open_claude_in_new_terminal "$ORIGINAL_DIR" "${CLAUDE_PASSTHROUGH_ARGS[@]}"
+                local start_status=$?
+                
+                if [ $start_status -eq 0 ]; then
+                    echo "✓ Claude started successfully in new terminal"
+                    echo "  Terminal läuft jetzt unabhängig und kann verwendet werden."
+                    echo "  Das Skript überwacht weiterhin alle $CHECK_INTERVAL_MINUTES Minuten."
+                else
+                    echo "✗ Failed to start Claude in new terminal"
+                fi
+            else
+                echo "Starting Claude in current terminal..."
+                claude --dangerously-skip-permissions "${CLAUDE_PASSTHROUGH_ARGS[@]}"
+            fi
+        fi
+        
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        
+        if [ $RESTART_COUNT -lt $MAX_RESTARTS ]; then
+            echo ""
+            echo "Waiting $CHECK_INTERVAL_MINUTES minutes before next check..."
+            echo "Next check at: $(date -d "+$CHECK_INTERVAL_MINUTES minutes" 2>/dev/null || date -v+${CHECK_INTERVAL_MINUTES}M 2>/dev/null || echo "in $CHECK_INTERVAL_MINUTES minutes")"
+            sleep $check_interval_seconds
+        fi
+    done
+    
+    if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+        echo "[INFO] Maximum check cycles ($MAX_RESTARTS) reached."
+        echo "[INFO] Script completed."
+    fi
+}
+
+# Function to show help
+show_help() {
+    cat << EOF
+Usage: claude-auto-resume-continuous-v4 [WRAPPER_OPTIONS] [CLAUDE_ARGS...]
+
+Simplified continuous monitoring for Claude CLI that passes through any standard Claude flags.
+
+This script acts as a wrapper. It handles the continuous monitoring and usage
+limit checks, then executes the 'claude' command with any arguments you provide.
+
+WRAPPER OPTIONS:
+    --continuous            Enable continuous monitoring mode
+    --check-interval N      Check interval in minutes (default: 5)
+    --max-restarts N        Maximum number of check cycles (default: 50)
+    --new-terminal         Open Claude in new terminal windows
+    --terminal-app APP      Specify terminal app (iterm, terminal, etc.)
+    --test-mode SECONDS     [DEV] Simulate usage limit with specified wait time
+    --debug                Enable debug output for this script
+    --claudetest           [TEST] Skip initial checks for direct terminal opening
+    -h, --help             Show this help
+    -v, --version          Show wrapper script version information
+
+CLAUDE_ARGS:
+    Any valid 'claude' command arguments are passed through.
+    Example: "my prompt", -c, --model <name>, --verbose, -p, etc.
+    If no arguments are provided, the script defaults to 'claude "continue"'.
+
+EXAMPLES:
+    # Continuous monitoring with a specific prompt and model
+    claude-auto-resume-continuous-v4 --continuous --new-terminal "implement feature" --model claude-3-opus-20240229
+    
+    # Continue the last session with a 10-minute check interval
+    claude-auto-resume-continuous-v4 --continuous --new-terminal --check-interval 10 -c "continue previous task"
+    
+    # Run a simple 'print' command with verbose output from Claude
+    claude-auto-resume-continuous-v4 -p "what is the capital of germany" --verbose
+    
+    # Using test mode to simulate a 30-second wait
+    claude-auto-resume-continuous-v4 --test-mode 30 --continuous --new-terminal "test"
+
+SIMPLIFIED APPROACH:
+    ✓ No complex process monitoring
+    ✓ Simple periodic limit checks every N minutes
+    ✓ One Claude start per unrestricted period
+    ✓ Independent terminal windows
+    ✓ Reliable and predictable behavior
+
+⚠️  Uses --dangerously-skip-permissions. Use only in trusted environments.
+
+EOF
+}
+
+# Parse command line arguments
+# Store original command and directory for restarts
+ORIGINAL_COMMAND="$0 $@"
+ORIGINAL_DIR="$(pwd)"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --continuous)
+            CONTINUOUS_MODE=true
+            shift
+            ;;
+        --check-interval)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "[ERROR] Option $1 requires a valid number of minutes." >&2
+                exit 1
+            fi
+            CHECK_INTERVAL_MINUTES="$2"
+            shift 2
+            ;;
+        --max-restarts)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "[ERROR] Option $1 requires a valid number." >&2
+                exit 1
+            fi
+            MAX_RESTARTS="$2"
+            shift 2
+            ;;
+        --new-terminal)
+            USE_NEW_TERMINAL=true
+            shift
+            ;;
+        --terminal-app)
+            if [ -z "$2" ]; then
+                echo "[ERROR] Option $1 requires a terminal app name." >&2
+                exit 1
+            fi
+            TERMINAL_APP="$2"
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -v|--version)
+            echo "claude-auto-resume-continuous-v4 v${VERSION}"
+            exit 0
+            ;;
+        --test-mode)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "[ERROR] Option $1 requires a valid number of seconds." >&2
+                exit 1
+            fi
+            TEST_MODE=true
+            TEST_WAIT_SECONDS="$2"
+            shift 2
+            ;;
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
+        --claudetest)
+            CLAUDE_TEST_MODE=true
+            shift
+            ;;
+        -*)
+            # This is a pass-through argument for Claude
+            CLAUDE_PASSTHROUGH_ARGS+=("$1")
+            shift
+            ;;
+        *)
+            # This is a non-flag argument for Claude (e.g., the prompt)
+            CLAUDE_PASSTHROUGH_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# If no arguments for Claude were provided, use the default prompt "continue"
+if [ ${#CLAUDE_PASSTHROUGH_ARGS[@]} -eq 0 ]; then
+    debug_echo "No Claude arguments provided, defaulting to 'continue'"
+    CLAUDE_PASSTHROUGH_ARGS+=("continue")
+fi
+
+debug_echo "Wrapper script arguments parsed."
+debug_echo "CONTINUOUS_MODE=$CONTINUOUS_MODE"
+debug_echo "USE_NEW_TERMINAL=$USE_NEW_TERMINAL"
+debug_echo "Claude pass-through args: ${CLAUDE_PASSTHROUGH_ARGS[*]}"
+
+
+# Check if new terminal is requested but no terminal app available
+if [ "$USE_NEW_TERMINAL" = true ]; then
+    if ! detect_terminal_app; then
+        echo "[ERROR] No supported terminal application found for --new-terminal option."
+        echo "[SUGGESTION] Install a supported terminal app or remove --new-terminal flag."
+        exit 1
+    fi
+    echo "[INFO] Using new terminal windows with $TERMINAL_APP."
+fi
+
+# Validate Claude CLI environment
+debug_echo "Validating Claude CLI environment..."
+validate_claude_cli
+
+# Check network connectivity before proceeding
+echo "Checking network connectivity..."
+if ! check_network_connectivity; then
+    exit 3
+fi
+echo "Network connectivity confirmed."
+
+# Main execution logic
+if [ "$CONTINUOUS_MODE" = true ]; then
+    echo "Starting simplified continuous monitoring mode..."
+    simplified_continuous_loop
+else
+    echo "Running in single-execution mode..."
+    
+    # Check for usage limits
+    echo "Checking for usage limits..."
+    check_claude_limits
+    limit_status=$?
+    
+    if [ $limit_status -eq 1 ]; then
+        echo "Usage limit wait completed. Starting Claude..."
+    elif [ $limit_status -eq 2 ]; then
+        echo "[ERROR] Timeout during limit check."
+        exit 3
+    fi
+    
+    # Start Claude
+    if [ "$USE_NEW_TERMINAL" = true ]; then
+        echo "Opening Claude in new terminal window..."
+        open_claude_in_new_terminal "$ORIGINAL_DIR" "${CLAUDE_PASSTHROUGH_ARGS[@]}"
+        if [ $? -eq 0 ]; then
+            echo "New terminal opened successfully."
+            echo ""
+            echo "HINWEIS: Für kontinuierliche Überwachung verwenden Sie die Option --continuous."
+        fi
+    else
+        echo "Starting Claude with args: ${CLAUDE_PASSTHROUGH_ARGS[*]}"
+        claude --dangerously-skip-permissions "${CLAUDE_PASSTHROUGH_ARGS[@]}"
+    fi
+fi
+
+echo "Script completed successfully."
+exit 0

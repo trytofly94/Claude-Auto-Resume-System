@@ -1,0 +1,7 @@
+Hello! I'm Claude, an AI assistant created by Anthropic.
+
+I'm ready to help you with your tasks. What would you like to work on?
+
+You can ask me questions, request help with coding, writing, analysis, math, or many other tasks. I'll do my best to provide helpful, accurate, and thoughtful responses.
+
+How can I assist you today?
