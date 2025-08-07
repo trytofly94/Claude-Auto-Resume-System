@@ -479,22 +479,137 @@ install_claunch() {
 }
 
 # ===============================================================================
+# PATH AND ENVIRONMENT MANAGEMENT
+# ===============================================================================
+
+# Refresh shell PATH environment (addresses GitHub issue #4)
+refresh_shell_path() {
+    log_debug "Refreshing shell PATH environment"
+    
+    # Add install target to current PATH if not already present
+    if [[ ":$PATH:" != *":$INSTALL_TARGET:"* ]]; then
+        export PATH="$INSTALL_TARGET:$PATH"
+        log_debug "Added $INSTALL_TARGET to current PATH"
+    fi
+    
+    # Source common shell configuration files to pick up PATH changes
+    local shell_configs=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.profile")
+    
+    for config in "${shell_configs[@]}"; do
+        if [[ -f "$config" ]]; then
+            log_debug "Sourcing $config"
+            # shellcheck disable=SC1090
+            source "$config" 2>/dev/null || true
+        fi
+    done
+    
+    # Allow a moment for environment changes to take effect
+    sleep 1
+}
+
+# Ensure PATH is configured in shell configuration files
+ensure_path_configuration() {
+    log_info "Ensuring PATH configuration for claunch"
+    
+    # Check if INSTALL_TARGET is already in PATH configuration
+    local shell_configs=("$HOME/.bashrc" "$HOME/.zshrc")
+    local path_configured=false
+    
+    for config in "${shell_configs[@]}"; do
+        if [[ -f "$config" ]] && grep -q "$INSTALL_TARGET" "$config" 2>/dev/null; then
+            log_info "PATH already configured in $config"
+            path_configured=true
+            break
+        fi
+    done
+    
+    # If not configured, add to appropriate shell config
+    if [[ "$path_configured" == "false" ]]; then
+        local target_config=""
+        
+        # Determine which shell config to use
+        if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+            target_config="$HOME/.zshrc"
+        elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+            target_config="$HOME/.bashrc"
+        else
+            target_config="$HOME/.profile"
+        fi
+        
+        # Create config file if it doesn't exist
+        if [[ ! -f "$target_config" ]]; then
+            touch "$target_config"
+            log_info "Created shell configuration file: $target_config"
+        fi
+        
+        # Add PATH export
+        log_info "Adding $INSTALL_TARGET to PATH in $target_config"
+        echo "" >> "$target_config"
+        echo "# Added by claunch installer ($(date))" >> "$target_config"
+        echo "export PATH=\"$INSTALL_TARGET:\$PATH\"" >> "$target_config"
+        
+        log_info "PATH configuration added. Please restart your terminal or run: source $target_config"
+    fi
+}
+
+# ===============================================================================
 # INSTALLATION-VERIFIZIERUNG
 # ===============================================================================
 
-# Verifiziere claunch-Installation
+# Enhanced claunch installation verification (addresses GitHub issue #4)
 verify_installation() {
-    log_info "Verifying claunch installation"
+    log_info "Verifying claunch installation with enhanced detection"
     
-    # Prüfe ob claunch-Kommando verfügbar ist
+    # First, try to refresh PATH environment
+    refresh_shell_path
+    
+    # Multi-strategy verification
     local claunch_path=""
+    local verification_attempts=3
+    local attempt=1
     
-    if has_command claunch; then
-        claunch_path=$(command -v claunch)
-    elif [[ -x "$INSTALL_TARGET/claunch" ]]; then
-        claunch_path="$INSTALL_TARGET/claunch"
-    else
-        log_error "claunch command not found after installation"
+    while [[ $attempt -le $verification_attempts ]]; do
+        log_info "Verification attempt $attempt/$verification_attempts"
+        
+        if has_command claunch; then
+            claunch_path=$(command -v claunch)
+            log_info "Found claunch via command: $claunch_path"
+            break
+        elif [[ -x "$INSTALL_TARGET/claunch" ]]; then
+            claunch_path="$INSTALL_TARGET/claunch"
+            log_info "Found claunch at install target: $claunch_path"
+            break
+        else
+            # Check common paths
+            local common_paths=("$HOME/.local/bin/claunch" "$HOME/bin/claunch" "/usr/local/bin/claunch")
+            local found_alt=false
+            
+            for path in "${common_paths[@]}"; do
+                if [[ -x "$path" ]]; then
+                    claunch_path="$path"
+                    log_info "Found claunch at alternative path: $claunch_path"
+                    found_alt=true
+                    break
+                fi
+            done
+            
+            if [[ "$found_alt" == "true" ]]; then
+                break
+            fi
+        fi
+        
+        if [[ $attempt -lt $verification_attempts ]]; then
+            log_info "claunch not found, waiting 2s and refreshing environment..."
+            sleep 2
+            refresh_shell_path
+        fi
+        
+        ((attempt++))
+    done
+    
+    if [[ -z "$claunch_path" ]]; then
+        log_error "claunch command not found after installation and verification attempts"
+        log_error "Please check if $INSTALL_TARGET is in your PATH or restart your terminal"
         return 1
     fi
     
@@ -665,6 +780,9 @@ main() {
         log_error "claunch installation failed"
         exit 1
     fi
+    
+    # Ensure PATH configuration (addresses GitHub issue #4)
+    ensure_path_configuration
     
     # Verifiziere Installation
     if [[ "$VERIFY_INSTALLATION" == "true" ]]; then
