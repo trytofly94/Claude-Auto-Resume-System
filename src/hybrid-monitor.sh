@@ -8,13 +8,25 @@
 set -euo pipefail
 
 # ===============================================================================
-# GLOBALE VARIABLEN UND KONSTANTEN
+# BASH VERSION VALIDATION (ADDRESSES GITHUB ISSUE #6)
 # ===============================================================================
 
 # Script-Informationen
 readonly SCRIPT_NAME="hybrid-monitor"
 readonly VERSION="1.0.0-alpha"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source bash version check utility
+source "$SCRIPT_DIR/utils/bash-version-check.sh"
+
+# Validate bash version before proceeding with session management
+if ! check_bash_version "hybrid-monitor.sh"; then
+    exit 1
+fi
+
+# ===============================================================================
+# GLOBALE VARIABLEN UND KONSTANTEN
+# ===============================================================================
 WORKING_DIR="$(pwd)"
 CONFIG_FILE="config/default.conf"
 

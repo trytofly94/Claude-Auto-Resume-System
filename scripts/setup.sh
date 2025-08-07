@@ -8,12 +8,24 @@
 set -euo pipefail
 
 # ===============================================================================
-# GLOBALE VARIABLEN UND KONSTANTEN
+# SCRIPT SETUP AND BASH VERSION VALIDATION (ADDRESSES GITHUB ISSUE #6)
 # ===============================================================================
 
 readonly SCRIPT_NAME="setup"
 readonly VERSION="1.0.0-alpha"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source bash version check utility
+source "$SCRIPT_DIR/../src/utils/bash-version-check.sh"
+
+# Validate bash version before proceeding with setup
+if ! check_bash_version "setup.sh"; then
+    exit 1
+fi
+
+# ===============================================================================
+# GLOBALE VARIABLEN UND KONSTANTEN
+# ===============================================================================
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Setup-Optionen

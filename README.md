@@ -75,6 +75,47 @@ Dieses Projekt vereint die besten Eigenschaften beider Grundlagen:
 - Linux (Ubuntu 18.04+, CentOS 7+, Debian 10+)
 - WSL2 (Windows Subsystem for Linux)
 
+## ⚠️ Systemanforderungen
+
+### Wichtig: Bash-Version 4.0+ erforderlich
+
+Dieses Projekt nutzt erweiterte Bash-Features (assoziative Arrays, erweiterte Regex) und benötigt **Bash 4.0 oder höher**.
+
+**Aktuelle Version prüfen:**
+```bash
+bash --version
+```
+
+**macOS-Benutzer (Häufiges Problem):**
+macOS verwendet standardmäßig Bash 3.2. Upgrade erforderlich:
+
+```bash
+# Moderne Bash über Homebrew installieren
+brew install bash
+
+# Zu verfügbaren Shells hinzufügen
+echo '/opt/homebrew/bin/bash' | sudo tee -a /etc/shells
+
+# Als Standard-Shell setzen (optional)
+chsh -s /opt/homebrew/bin/bash
+
+# Terminal neu starten und verifizieren
+bash --version  # Sollte 5.x oder höher anzeigen
+```
+
+**Linux-Benutzer:**
+Bash 4.0+ sollte bereits verfügbar sein:
+```bash
+# Ubuntu/Debian: sudo apt update && sudo apt install bash
+# CentOS/RHEL: sudo yum update bash
+# Fedora: sudo dnf update bash
+```
+
+### Weitere Systemanforderungen
+- **Claude CLI**: Von [claude.ai/download](https://claude.ai/download) installieren
+- **Standard-Tools**: Git, curl, jq, tmux
+- **Empfohlen**: claunch für erweiterte Session-Verwaltung
+
 ## 🛠️ Installation
 
 ### Automatische Installation
