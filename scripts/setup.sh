@@ -31,6 +31,56 @@ if ! check_bash_version "setup.sh"; then
     exit 1
 fi
 
+# ===============================================================================  
+# PERMISSION FIXING FUNCTIONALITY (ADDRESSES GITHUB ISSUE #5)
+# ===============================================================================
+
+# Function to fix script permissions for all project scripts
+fix_script_permissions() {
+    log_info "Checking and fixing script permissions..."
+    
+    local scripts_fixed=0
+    local total_scripts=0
+    
+    # List of all executable scripts in the project
+    local script_files=(
+        "scripts/setup.sh"
+        "scripts/run-tests.sh"
+        "scripts/install-claunch.sh" 
+        "scripts/dev-setup.sh"
+        "src/hybrid-monitor.sh"
+        "src/claunch-integration.sh"
+        "src/session-manager.sh"
+        "src/utils/bash-version-check.sh"
+        "src/utils/logging.sh"
+        "src/utils/network.sh"
+        "src/utils/terminal.sh"
+        "claude-auto-resume-continuous-v4"
+    )
+    
+    for script_path in "${script_files[@]}"; do
+        local full_path="$PROJECT_ROOT/$script_path"
+        if [[ -f "$full_path" ]]; then
+            total_scripts=$((total_scripts + 1))
+            
+            # Check if file is executable
+            if [[ ! -x "$full_path" ]]; then
+                log_info "  Fixing permissions for: $script_path"
+                chmod +x "$full_path"
+                scripts_fixed=$((scripts_fixed + 1))
+            fi
+        else
+            log_debug "  Script not found (will be created later): $script_path"
+        fi
+    done
+    
+    if [[ $scripts_fixed -gt 0 ]]; then
+        log_success "Fixed execute permissions for $scripts_fixed out of $total_scripts scripts"
+    else
+        log_success "All $total_scripts scripts already have correct permissions"
+    fi
+}
+
 # ===============================================================================
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
@@ -939,6 +989,7 @@ OPTIONS:
     --force                 Force reinstallation of components
     --dry-run               Preview actions without executing them
     --non-interactive       Run without user interaction (use defaults)
+    --fix-permissions       Fix script permissions and exit (useful after git clone)
     --debug                 Enable debug output
     -h, --help              Show this help message
     --version               Show version information
@@ -1014,6 +1065,11 @@ parse_arguments() {
             --non-interactive)
                 INTERACTIVE_MODE=false
                 shift
+                ;;
+            --fix-permissions)
+                log_info "Running permission fix only"
+                fix_script_permissions
+                exit 0
                 ;;
             --debug)
                 DEBUG=true
