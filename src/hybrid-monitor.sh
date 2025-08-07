@@ -32,6 +32,19 @@ if ! check_bash_version "hybrid-monitor.sh"; then
     exit 1
 fi
 
+# Check if this script has execute permissions (addresses GitHub issue #5)
+if [[ ! -x "${BASH_SOURCE[0]}" ]]; then
+    echo "[ERROR] This script is not executable!" >&2
+    echo "        This usually happens after 'git clone' which doesn't preserve execute permissions." >&2
+    echo "" >&2
+    echo "To fix this issue, run:" >&2
+    echo "  chmod +x \"${BASH_SOURCE[0]}\"" >&2
+    echo "  # Or fix all project scripts at once:" >&2
+    echo "  bash scripts/setup.sh --fix-permissions" >&2
+    echo "" >&2
+    exit 1
+fi
+
 # ===============================================================================
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
