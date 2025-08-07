@@ -24,6 +24,7 @@ STOP_ON_FAILURE=false
 PARALLEL_TESTS=false
 TEST_TIMEOUT=300
 DRY_RUN=false
+SKIP_BATS_TESTS=false
 
 # Test-Statistiken
 TOTAL_TESTS=0
@@ -124,12 +125,31 @@ validate_test_environment() {
     # Prüfe BATS
     if ! has_command bats; then
         log_error "BATS (Bash Automated Testing System) not found"
-        log_error "Install with: brew install bats-core (macOS) or see README.md"
+        log_error ""
+        log_error "BATS is required for unit and integration tests."
+        log_error "To install BATS:"
+        log_error "  Quick setup:   ./scripts/setup.sh --dev"
+        log_error "  macOS:         brew install bats-core"
+        log_error "  Ubuntu:        sudo apt-get install bats"
+        log_error "  CentOS:        sudo yum install bats"
+        log_error "  Manual:        git clone https://github.com/bats-core/bats-core.git && ./bats-core/install.sh ~/.local"
+        log_error ""
+        log_info "Without BATS, only syntax and linting tests will run."
+        log_info "This provides limited test coverage."
         ((issues++))
     else
         local bats_version
         bats_version=$(bats --version 2>/dev/null | head -1 || echo "unknown")
         log_info "BATS version: $bats_version"
+        
+        # Prüfe BATS-Funktionalität
+        if ! bats --help >/dev/null 2>&1; then
+            log_warn "BATS command found but not functioning properly"
+            log_warn "Try reinstalling BATS: ./scripts/setup.sh --dev --force"
+            ((issues++))
+        else
+            log_success "BATS is functional and ready for testing"
+        fi
     fi
     
     # Prüfe Test-Verzeichnisse
@@ -161,6 +181,14 @@ validate_test_environment() {
     
     if [[ $issues -gt 0 ]]; then
         log_error "$issues issue(s) found in test environment"
+        
+        # Prüfe ob nur BATS fehlt
+        if [[ $issues -eq 1 ]] && ! has_command bats; then
+            log_warn "Only BATS is missing - will run available tests only"
+            log_warn "BATS-based unit and integration tests will be skipped"
+            return 2  # Special return code for partial test environment
+        fi
+        
         return 1
     fi
     
@@ -217,9 +245,83 @@ run_syntax_tests() {
     fi
 }
 
+# Führe einfache Funktionstests durch (Fallback ohne BATS)
+run_basic_functional_tests() {
+    log_step "Running basic functional tests (BATS fallback)"
+    
+    local basic_errors=0
+    local tested_scripts=0
+    
+    # Test 1: Hauptskript-Hilfe
+    log_info "Testing main script help command"
+    if [[ -f "$PROJECT_ROOT/src/hybrid-monitor.sh" ]]; then
+        if "$PROJECT_ROOT/src/hybrid-monitor.sh" --help >/dev/null 2>&1; then
+            log_success "Main script help command works"
+            ((tested_scripts++))
+        else
+            log_error "Main script help command failed"
+            ((basic_errors++))
+        fi
+    fi
+    
+    # Test 2: Konfigurationsdatei-Validierung
+    log_info "Testing configuration file validity"
+    if [[ -f "$PROJECT_ROOT/config/default.conf" ]]; then
+        # Einfache Konfigurationsvalidierung
+        if grep -q "CHECK_INTERVAL_MINUTES" "$PROJECT_ROOT/config/default.conf" && \
+           grep -q "USE_CLAUNCH" "$PROJECT_ROOT/config/default.conf"; then
+            log_success "Default configuration appears valid"
+            ((tested_scripts++))
+        else
+            log_error "Default configuration missing required settings"
+            ((basic_errors++))
+        fi
+    fi
+    
+    # Test 3: Utility-Funktionen
+    log_info "Testing utility script loading"
+    local utils_dir="$PROJECT_ROOT/src/utils"
+    if [[ -d "$utils_dir" ]]; then
+        local util_files=("logging.sh" "network.sh" "terminal.sh")
+        for util in "${util_files[@]}"; do
+            if [[ -f "$utils_dir/$util" ]]; then
+                if bash -n "$utils_dir/$util"; then
+                    log_debug "Utility script $util has valid syntax"
+                    ((tested_scripts++))
+                else
+                    log_error "Utility script $util has syntax errors"
+                    ((basic_errors++))
+                fi
+            fi
+        done
+    fi
+    
+    if [[ $basic_errors -eq 0 ]]; then
+        log_success "All $tested_scripts basic functional tests passed"
+        return 0
+    else
+        log_error "$basic_errors basic functional test(s) failed"
+        return 1
+    fi
+}
+
 # Führe Unit-Tests durch
 run_unit_tests() {
     log_step "Running unit tests"
+    
+    # Prüfe ob BATS verfügbar ist
+    if [[ "$SKIP_BATS_TESTS" == "true" ]] || ! has_command bats; then
+        log_warn "BATS not available - running basic functional tests instead"
+        log_info "For complete unit tests, install BATS: './scripts/setup.sh --dev'"
+        
+        # Führe einfache Funktionstests als Fallback aus
+        if run_basic_functional_tests; then
+            ((SKIPPED_TESTS++))  # Eigentliche Unit-Tests wurden übersprungen
+            return 0
+        else
+            return 1
+        fi
+    fi
     
     local unit_test_dir="$PROJECT_ROOT/tests/unit"
     
@@ -286,6 +388,14 @@ run_unit_tests() {
 # Führe Integration-Tests durch
 run_integration_tests() {
     log_step "Running integration tests"
+    
+    # Prüfe ob BATS verfügbar ist
+    if [[ "$SKIP_BATS_TESTS" == "true" ]] || ! has_command bats; then
+        log_warn "BATS not available - skipping integration tests"
+        log_info "Integration tests require BATS framework - run './scripts/setup.sh --dev' to install"
+        ((SKIPPED_TESTS++))
+        return 0
+    fi
     
     local integration_test_dir="$PROJECT_ROOT/tests/integration"
     
@@ -672,10 +782,21 @@ main() {
     START_TIME=$(date +%s)
     
     # Validiere Test-Umgebung
-    if ! validate_test_environment; then
-        log_error "Test environment validation failed"
-        exit 1
-    fi
+    local env_result
+    env_result=$(validate_test_environment; echo $?)
+    case $env_result in
+        0)
+            log_debug "Full test environment available"
+            ;;
+        1)
+            log_error "Test environment validation failed"
+            exit 1
+            ;;
+        2)
+            log_warn "Partial test environment - BATS tests will be skipped"
+            SKIP_BATS_TESTS=true
+            ;;
+    esac
     
     # Entdecke verfügbare Tests
     discover_tests
