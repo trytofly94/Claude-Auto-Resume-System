@@ -79,7 +79,12 @@ Dieses Projekt vereint die besten Eigenschaften beider Grundlagen:
 
 ### Wichtig: Bash-Version 4.0+ erforderlich
 
-Dieses Projekt nutzt erweiterte Bash-Features (assoziative Arrays, erweiterte Regex) und benötigt **Bash 4.0 oder höher**.
+Dieses Projekt nutzt erweiterte Bash-Features und benötigt **Bash 4.0 oder höher**.
+
+**Warum Bash 4.0+?**
+- **Assoziative Arrays** (`declare -A`) für Session-Verwaltung
+- **Erweiterte Regex-Unterstützung** für robuste Pattern-Matching
+- **Verbesserte Parameter-Expansion** für sichere String-Verarbeitung
 
 **Aktuelle Version prüfen:**
 ```bash

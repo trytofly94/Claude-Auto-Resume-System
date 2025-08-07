@@ -16,8 +16,16 @@ readonly SCRIPT_NAME="hybrid-monitor"
 readonly VERSION="1.0.0-alpha"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Source bash version check utility
-source "$SCRIPT_DIR/utils/bash-version-check.sh"
+# Source bash version check utility - use absolute path resolution
+BASH_VERSION_CHECK_SCRIPT="$SCRIPT_DIR/utils/bash-version-check.sh"
+if [[ -f "$BASH_VERSION_CHECK_SCRIPT" && -r "$BASH_VERSION_CHECK_SCRIPT" ]]; then
+    # shellcheck disable=SC1090
+    source "$BASH_VERSION_CHECK_SCRIPT"
+else
+    echo "[ERROR] Cannot find bash version check utility at: $BASH_VERSION_CHECK_SCRIPT" >&2
+    echo "        Please ensure the script is run from the correct directory" >&2
+    exit 1
+fi
 
 # Validate bash version before proceeding with session management
 if ! check_bash_version "hybrid-monitor.sh"; then
