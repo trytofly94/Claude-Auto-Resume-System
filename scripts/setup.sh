@@ -584,11 +584,31 @@ run_setup_tests() {
         ((missing_deps++))
     fi
     
+    # Enhanced claunch verification (addresses GitHub issue #4)
     if [[ "$SKIP_CLAUNCH" != "true" ]]; then
-        if verify_claunch_installation; then
-            log_success "claunch is properly installed and functional"
+        if has_command claunch; then
+            # Test if claunch actually works
+            if claunch --help >/dev/null 2>&1; then
+                log_info "claunch is available and functional"
+            else
+                log_warn "claunch found but may not be functional"
+            fi
         else
-            log_warn "claunch verification failed - check installation"
+            # Check common installation paths before warning
+            local claunch_found=false
+            local common_paths=("$HOME/.local/bin/claunch" "$HOME/bin/claunch" "/usr/local/bin/claunch")
+            
+            for path in "${common_paths[@]}"; do
+                if [[ -x "$path" ]] && "$path" --help >/dev/null 2>&1; then
+                    log_info "claunch found at $path (may need PATH update)"
+                    claunch_found=true
+                    break
+                fi
+            done
+            
+            if [[ "$claunch_found" == "false" ]]; then
+                log_warn "claunch not found - install with: ./scripts/install-claunch.sh"
+            fi
         fi
     fi
     
