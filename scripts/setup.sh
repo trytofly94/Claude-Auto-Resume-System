@@ -8,12 +8,32 @@
 set -euo pipefail
 
 # ===============================================================================
-# GLOBALE VARIABLEN UND KONSTANTEN
+# SCRIPT SETUP AND BASH VERSION VALIDATION (ADDRESSES GITHUB ISSUE #6)
 # ===============================================================================
 
 readonly SCRIPT_NAME="setup"
 readonly VERSION="1.0.0-alpha"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source bash version check utility - use absolute path resolution
+BASH_VERSION_CHECK_SCRIPT="$SCRIPT_DIR/../src/utils/bash-version-check.sh"
+if [[ -f "$BASH_VERSION_CHECK_SCRIPT" && -r "$BASH_VERSION_CHECK_SCRIPT" ]]; then
+    # shellcheck disable=SC1090
+    source "$BASH_VERSION_CHECK_SCRIPT"
+else
+    echo "[ERROR] Cannot find bash version check utility at: $BASH_VERSION_CHECK_SCRIPT" >&2
+    echo "        Please run this script from the project root directory" >&2
+    exit 1
+fi
+
+# Validate bash version before proceeding with setup
+if ! check_bash_version "setup.sh"; then
+    exit 1
+fi
+
+# ===============================================================================
+# GLOBALE VARIABLEN UND KONSTANTEN
+# ===============================================================================
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Setup-Optionen
