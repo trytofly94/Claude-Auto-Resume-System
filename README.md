@@ -123,7 +123,7 @@ chmod +x src/*.sh scripts/*.sh
 ```bash
 # In Ihrem Projekt-Verzeichnis
 cd /path/to/your/project
-/path/to/Claude-Auto-Resume/src/hybrid-monitor.sh --continuous --claunch-mode tmux
+/path/to/Claude-Auto-Resume-System/src/hybrid-monitor.sh --continuous --claunch-mode tmux
 
 # Das System erkennt automatisch das Projekt und erstellt separate Sessions
 ```
@@ -238,15 +238,41 @@ DEBUG_CLAUNCH=1 ./src/hybrid-monitor.sh --continuous
 
 ## 🧪 Testing
 
+### Test-Dependencies
+Das Projekt verwendet **BATS** (Bash Automated Testing System) für Unit- und Integration-Tests:
+
+```bash
+# BATS automatisch installieren (empfohlen)
+./scripts/setup.sh --dev
+
+# Manuelle BATS-Installation
+# macOS
+brew install bats-core
+
+# Ubuntu/Debian
+sudo apt-get install bats
+
+# Manual installation
+git clone https://github.com/bats-core/bats-core.git
+cd bats-core && ./install.sh ~/.local
+```
+
 ### Test-Suite ausführen
 ```bash
-# Vollständige Tests
+# Vollständige Tests (benötigt BATS)
 ./scripts/run-tests.sh
 
 # Spezifische Test-Kategorien
-./scripts/run-tests.sh unit           # Unit-Tests
+./scripts/run-tests.sh unit           # Unit-Tests (mit BATS fallback)
 ./scripts/run-tests.sh integration    # Integration-Tests
-./scripts/run-tests.sh e2e            # End-to-End-Tests
+./scripts/run-tests.sh syntax         # Nur Syntax-Tests
+./scripts/run-tests.sh lint          # Nur Linting
+
+# Tests ohne BATS (fallback mode)
+# Wenn BATS nicht installiert ist, laufen automatisch:
+# - Syntax-Checks aller Shell-Skripte
+# - Basis-Funktionstests
+# - Konfigurationsvalidierung
 ```
 
 ### Test-Modus für Entwicklung

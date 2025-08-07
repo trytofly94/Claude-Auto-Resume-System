@@ -507,6 +507,30 @@ create_user_config() {
 }
 
 # ===============================================================================
+# CLAUNCH-VALIDIERUNG
+# ===============================================================================
+
+# Überprüfe claunch-Installation
+verify_claunch_installation() {
+    log_debug "Verifying claunch installation"
+    
+    # Prüfe ob claunch verfügbar ist
+    if ! has_command claunch; then
+        log_warn "claunch command not found in PATH"
+        return 1
+    fi
+    
+    # Teste claunch-Funktionalität
+    if claunch --help >/dev/null 2>&1; then
+        log_debug "claunch help command works"
+        return 0
+    else
+        log_warn "claunch found but help command fails"
+        return 1
+    fi
+}
+
+# ===============================================================================
 # TESTING UND VALIDIERUNG
 # ===============================================================================
 
@@ -560,8 +584,12 @@ run_setup_tests() {
         ((missing_deps++))
     fi
     
-    if ! has_command claunch && [[ "$SKIP_CLAUNCH" != "true" ]]; then
-        log_warn "claunch not found (may be in custom location)"
+    if [[ "$SKIP_CLAUNCH" != "true" ]]; then
+        if verify_claunch_installation; then
+            log_success "claunch is properly installed and functional"
+        else
+            log_warn "claunch verification failed - check installation"
+        fi
     fi
     
     if [[ $missing_deps -gt 0 ]]; then
@@ -639,6 +667,73 @@ run_demo() {
 # DEVELOPMENT-TOOLS
 # ===============================================================================
 
+# Manuelle BATS-Installation
+install_bats_manually() {
+    log_info "Attempting manual BATS installation"
+    
+    local bats_dir="/tmp/bats-core"
+    local install_prefix="${HOME}/.local"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would install BATS manually to $install_prefix"
+        return 0
+    fi
+    
+    # Erstelle lokales bin-Verzeichnis
+    mkdir -p "$install_prefix/bin"
+    
+    # Entferne eventuell vorhandene BATS-Installation
+    rm -rf "$bats_dir"
+    
+    # Clone BATS repository
+    if has_command git; then
+        log_info "Cloning BATS repository"
+        if git clone https://github.com/bats-core/bats-core.git "$bats_dir"; then
+            cd "$bats_dir" || return 1
+            
+            # Installiere BATS
+            log_info "Installing BATS to $install_prefix"
+            if bash install.sh "$install_prefix"; then
+                log_success "BATS installed manually to $install_prefix/bin"
+                
+                # Prüfe ob BATS in PATH ist
+                if [[ ":$PATH:" != *":$install_prefix/bin:"* ]]; then
+                    log_info "Add $install_prefix/bin to your PATH:"
+                    log_info "  echo 'export PATH=\"$install_prefix/bin:\$PATH\"' >> ~/.${SHELL_TYPE}rc"
+                    
+                    if ask_yes_no "Add to PATH automatically?" "y"; then
+                        local shell_rc="$HOME/.${SHELL_TYPE}rc"
+                        echo "" >> "$shell_rc"
+                        echo "# Added by Claude Auto-Resume setup for BATS" >> "$shell_rc"
+                        echo "export PATH=\"$install_prefix/bin:\$PATH\"" >> "$shell_rc"
+                        log_success "Added $install_prefix/bin to PATH in $shell_rc"
+                        
+                        # Aktualisiere PATH für aktuelle Session
+                        export PATH="$install_prefix/bin:$PATH"
+                    fi
+                fi
+                
+                # Cleanup
+                cd - >/dev/null || true
+                rm -rf "$bats_dir"
+                
+                return 0
+            else
+                log_error "BATS manual installation failed"
+                rm -rf "$bats_dir"
+                return 1
+            fi
+        else
+            log_error "Failed to clone BATS repository"
+            return 1
+        fi
+    else
+        log_error "Git not available for manual BATS installation"
+        log_info "Please install BATS manually from: https://github.com/bats-core/bats-core"
+        return 1
+    fi
+}
+
 # Installiere Development-Tools
 install_dev_tools() {
     if [[ "$INSTALL_DEV_TOOLS" != "true" ]]; then
@@ -675,18 +770,77 @@ install_dev_tools() {
     # BATS für Bash-Testing
     if ! has_command bats; then
         log_info "Installing BATS (Bash Automated Testing System)"
+        log_info "BATS is required for running the test suite"
+        
         case "$PACKAGE_MANAGER" in
             "brew")
                 if [[ "$DRY_RUN" == "true" ]]; then
                     log_info "[DRY RUN] Would run: brew install bats-core"
                 else
-                    brew install bats-core
+                    if brew install bats-core; then
+                        log_success "BATS installed successfully via brew"
+                    else
+                        log_warn "Failed to install BATS via brew, trying manual installation"
+                        install_bats_manually
+                    fi
+                fi
+                ;;
+            "apt")
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    log_info "[DRY RUN] Would run: sudo apt-get install bats"
+                else
+                    if sudo apt-get install -y bats; then
+                        log_success "BATS installed successfully via apt"
+                    else
+                        log_warn "Failed to install BATS via apt, trying manual installation"
+                        install_bats_manually
+                    fi
+                fi
+                ;;
+            "yum"|"dnf")
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    log_info "[DRY RUN] Would run: sudo $PACKAGE_MANAGER install bats"
+                else
+                    if sudo "$PACKAGE_MANAGER" install -y bats; then
+                        log_success "BATS installed successfully via $PACKAGE_MANAGER"
+                    else
+                        log_warn "Failed to install BATS via $PACKAGE_MANAGER, trying manual installation"
+                        install_bats_manually
+                    fi
                 fi
                 ;;
             *)
-                log_info "BATS auto-install not available - install manually if needed"
+                log_warn "BATS auto-install not available for $PACKAGE_MANAGER - trying manual installation"
+                install_bats_manually
                 ;;
         esac
+        
+        # Verify installation after attempt
+        if [[ "$DRY_RUN" != "true" ]]; then
+            if has_command bats; then
+                log_success "BATS installation verification successful"
+                local bats_version
+                bats_version=$(bats --version 2>/dev/null | head -1 || echo "unknown")
+                log_info "BATS version: $bats_version"
+            else
+                log_error "BATS installation failed - tests will not work properly"
+                log_error "You can install BATS manually using:"
+                log_error "  macOS:     brew install bats-core"
+                log_error "  Ubuntu:    sudo apt-get install bats"
+                log_error "  Manual:    git clone https://github.com/bats-core/bats-core.git && ./bats-core/install.sh ~/.local"
+            fi
+        fi
+    else
+        local bats_version
+        bats_version=$(bats --version 2>/dev/null | head -1 || echo 'version unknown')
+        log_info "BATS already installed: $bats_version"
+        
+        # Verify BATS functionality
+        if bats --help >/dev/null 2>&1; then
+            log_success "BATS is functional and ready for testing"
+        else
+            log_warn "BATS found but may not be functioning properly"
+        fi
     fi
     
     # Erstelle Dev-Scripts

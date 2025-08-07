@@ -1,0 +1,25 @@
+{
+  "test_run": {
+    "timestamp": "2025-08-06T22:21:58+02:00",
+    "test_type": "unit",
+    "duration": 0,
+    "results": {
+      "total": 2,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 1
+    },
+    "environment": {
+      "os": "Darwin",
+      "shell": "/bin/zsh",
+      "bats_available": false,
+      "shellcheck_available": false
+    },
+    "configuration": {
+      "verbose": true,
+      "stop_on_failure": false,
+      "parallel": false,
+      "timeout": 300
+    }
+  }
+}
