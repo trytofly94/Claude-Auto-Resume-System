@@ -158,4 +158,4 @@ cache/
 
 # Socket-Dateien
 *.sock
-*.socket
+*.socketlogs/
