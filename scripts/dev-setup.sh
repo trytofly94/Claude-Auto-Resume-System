@@ -27,8 +27,9 @@ DRY_RUN=false
 INTERACTIVE_MODE=true
 
 # Pre-commit-Hook-Konfiguration
-ENABLE_PRECOMMIT_HOOKS=true
-HOOK_TYPES=("shellcheck" "syntax-check" "test-runner")
+# TODO: Implement configurable hook types
+# ENABLE_PRECOMMIT_HOOKS=true
+# HOOK_TYPES=("shellcheck" "syntax-check" "test-runner")
 
 # ===============================================================================
 # HILFSFUNKTIONEN
