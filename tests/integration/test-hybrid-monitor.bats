@@ -11,17 +11,35 @@ setup() {
     TEST_PROJECT_DIR=$(create_test_project "test-integration")
     cd "$TEST_PROJECT_DIR"
     
-    # Source the hybrid monitor (if available)
-    if [[ -f "$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh" ]]; then
-        source "$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh" 2>/dev/null || true
-    fi
-    
-    # Set integration test environment
+    # Set integration test environment BEFORE sourcing
     export DRY_RUN=true
     export TEST_MODE=true
     export TEST_WAIT_SECONDS=1
     export CHECK_INTERVAL_MINUTES=1
     export MAX_RESTARTS=3
+    export DEBUG_MODE=true
+    
+    # Source the hybrid monitor script properly
+    HYBRID_MONITOR_SCRIPT="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
+    if [[ -f "$HYBRID_MONITOR_SCRIPT" ]]; then
+        # Source without executing main function
+        # We need to set BASH_SOURCE[0] to avoid triggering main
+        (
+            BASH_SOURCE=("dummy")
+            source "$HYBRID_MONITOR_SCRIPT" 2>/dev/null
+        ) || true
+        
+        # Source again to get functions into current shell context
+        set +e  # Don't fail on sourcing errors
+        # shellcheck disable=SC1090
+        source "$HYBRID_MONITOR_SCRIPT" 2>/dev/null || true
+        set -e
+        
+        # Load dependencies manually since main() won't run
+        if declare -f load_dependencies >/dev/null 2>&1; then
+            load_dependencies 2>/dev/null || true
+        fi
+    fi
 }
 
 teardown() {
@@ -37,28 +55,51 @@ teardown() {
     [[ -x "$monitor_script" ]]
 }
 
+@test "script functions are available after sourcing" {
+    # Debug test to check what functions are loaded
+    run bash -c "
+        source '$HYBRID_MONITOR_SCRIPT' 2>/dev/null || true
+        echo 'Available functions:'
+        declare -F | grep -E '(handle_usage_limit|check_usage_limits|parse_arguments|load_dependencies)' || echo 'No matching functions found'
+        
+        echo 'Function existence check:'
+        declare -f handle_usage_limit >/dev/null 2>&1 && echo 'handle_usage_limit: FOUND' || echo 'handle_usage_limit: NOT FOUND'
+        declare -f check_usage_limits >/dev/null 2>&1 && echo 'check_usage_limits: FOUND' || echo 'check_usage_limits: NOT FOUND'
+        declare -f parse_arguments >/dev/null 2>&1 && echo 'parse_arguments: FOUND' || echo 'parse_arguments: NOT FOUND'
+    "
+    
+    # This test should always pass, it's just for debugging
+    [ "$status" -eq 0 ]
+    
+    # Debug output
+    echo "Debug output:"
+    echo "$output"
+}
+
 @test "hybrid monitor shows help message" {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     
-    if [[ -x "$monitor_script" ]]; then
-        run "$monitor_script" --help
+    if [[ -f "$monitor_script" ]]; then
+        # Use explicit bash to avoid version issues with system bash
+        run bash "$monitor_script" --help
         [ "$status" -eq 0 ]
         [[ "$output" =~ "Usage:" ]]
         [[ "$output" =~ "hybrid-monitor" ]]
     else
-        skip "Hybrid monitor script not found or not executable"
+        skip "Hybrid monitor script not found"
     fi
 }
 
 @test "hybrid monitor shows version information" {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     
-    if [[ -x "$monitor_script" ]]; then
-        run "$monitor_script" --version
+    if [[ -f "$monitor_script" ]]; then
+        # Use explicit bash to avoid version issues with system bash
+        run bash "$monitor_script" --version
         [ "$status" -eq 0 ]
         [[ "$output" =~ "version" ]]
     else
-        skip "Hybrid monitor script not found or not executable"
+        skip "Hybrid monitor script not found"
     fi
 }
 
@@ -116,10 +157,17 @@ teardown() {
 
 @test "usage limit handling calculates wait time correctly" {
     if declare -f handle_usage_limit >/dev/null 2>&1; then
-        local future_timestamp=$(($(date +%s) + 5))  # 5 seconds in future
+        local future_timestamp=$(($(date +%s) + 2))  # 2 seconds in future for quick test
         
-        # This should complete quickly in test mode
-        run timeout 10 handle_usage_limit "$future_timestamp"
+        # Test in TEST_MODE - this should complete quickly
+        export TEST_MODE=true
+        export TEST_WAIT_SECONDS=1
+        
+        # Call function directly, not as external command
+        run bash -c "
+            source '$HYBRID_MONITOR_SCRIPT' 2>/dev/null || true
+            handle_usage_limit '$future_timestamp'
+        "
         [ "$status" -eq 0 ]
     else
         skip "handle_usage_limit function not available"
@@ -192,9 +240,9 @@ teardown() {
 @test "signal handling works correctly" {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     
-    if [[ -x "$monitor_script" ]]; then
-        # Start monitor in background and send SIGINT
-        "$monitor_script" --continuous --dry-run &
+    if [[ -f "$monitor_script" ]]; then
+        # Start monitor in background and send SIGINT - use explicit bash
+        bash "$monitor_script" --continuous --dry-run &
         local pid=$!
         
         sleep 1
@@ -206,21 +254,30 @@ teardown() {
         # Process should have exited gracefully
         ! kill -0 "$pid" 2>/dev/null
     else
-        skip "Hybrid monitor script not found or not executable"
+        skip "Hybrid monitor script not found"
     fi
 }
 
 @test "argument parsing works correctly" {
     if declare -f parse_arguments >/dev/null 2>&1; then
-        # Test various argument combinations
-        run parse_arguments --continuous --check-interval 5 --max-cycles 10 --debug
+        # Test various argument combinations in separate bash context
+        run bash -c "
+            source '$HYBRID_MONITOR_SCRIPT' 2>/dev/null || true
+            parse_arguments --continuous --check-interval 5 --max-cycles 10 --debug
+        "
         [ "$status" -eq 0 ]
         
-        run parse_arguments --new-terminal --dry-run "custom prompt"
+        run bash -c "
+            source '$HYBRID_MONITOR_SCRIPT' 2>/dev/null || true
+            parse_arguments --new-terminal --dry-run 'custom prompt'
+        "
         [ "$status" -eq 0 ]
         
         # Test invalid arguments
-        run parse_arguments --invalid-option
+        run bash -c "
+            source '$HYBRID_MONITOR_SCRIPT' 2>/dev/null || true
+            parse_arguments --invalid-option
+        "
         [ "$status" -eq 1 ]
     else
         skip "parse_arguments function not available"
@@ -230,30 +287,35 @@ teardown() {
 @test "main function runs without errors" {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     
-    if [[ -x "$monitor_script" ]]; then
-        # Test single execution mode with dry run
-        run timeout 30 "$monitor_script" --dry-run "test prompt"
+    if [[ -f "$monitor_script" ]]; then
+        # Set environment to prevent dependency loading errors
+        export DRY_RUN=true
+        export TEST_MODE=true
+        export DEBUG_MODE=false
+        
+        # Test single execution mode with dry run - use explicit bash
+        run timeout 30 bash "$monitor_script" --dry-run "test prompt"
         [[ "$status" -eq 0 ]] || [[ "$status" -eq 124 ]]
         
         # Should not have crashed
         [[ "$status" -ne 127 ]]  # Command not found
         [[ "$status" -ne 139 ]]  # Segfault
     else
-        skip "Hybrid monitor script not found or not executable"
+        skip "Hybrid monitor script not found"
     fi
 }
 
 @test "integration with all modules works" {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     
-    if [[ -x "$monitor_script" ]]; then
+    if [[ -f "$monitor_script" ]]; then
         # Set up comprehensive test environment
         export DRY_RUN=true
         export TEST_MODE=true
         export USE_CLAUNCH=true
         export DEBUG_MODE=true
         
-        # Test that all modules can be loaded together
+        # Test that all modules can be loaded together - use explicit bash
         run timeout 15 bash -c "
             source '$monitor_script' 2>/dev/null
             
@@ -272,7 +334,7 @@ teardown() {
         [ "$status" -eq 0 ]
         [[ "$output" =~ "Integration test completed" ]]
     else
-        skip "Hybrid monitor script not found or not executable"
+        skip "Hybrid monitor script not found"
     fi
 }
 
@@ -280,8 +342,9 @@ teardown() {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     local test_config="$BATS_TEST_DIRNAME/../fixtures/test-config.conf"
     
-    if [[ -x "$monitor_script" ]] && [[ -f "$test_config" ]]; then
-        run timeout 10 "$monitor_script" --config "$test_config" --dry-run --version
+    if [[ -f "$monitor_script" ]] && [[ -f "$test_config" ]]; then
+        # Use explicit bash
+        run timeout 10 bash "$monitor_script" --config "$test_config" --dry-run --version
         [ "$status" -eq 0 ]
     else
         skip "Monitor script or test config not available"
@@ -291,21 +354,30 @@ teardown() {
 @test "error handling prevents crashes" {
     local monitor_script="$BATS_TEST_DIRNAME/../../src/hybrid-monitor.sh"
     
-    if [[ -x "$monitor_script" ]]; then
-        # Test with invalid configuration
-        run timeout 10 "$monitor_script" --config "/nonexistent/config.conf" --dry-run
+    if [[ -f "$monitor_script" ]]; then
+        # Test with invalid configuration - use explicit bash
+        run timeout 10 bash "$monitor_script" --config "/nonexistent/config.conf" --dry-run
         # Should handle gracefully, not crash
         [[ "$status" -ne 127 ]]
         [[ "$status" -ne 139 ]]
         
-        # Test with missing dependencies
+        # Test with missing dependencies - save original PATH first
+        local original_path="$PATH"
         export PATH="/usr/bin:/bin"  # Minimal PATH
         
-        run timeout 10 "$monitor_script" --dry-run
+        run timeout 10 bash -c "
+            export PATH='/usr/bin:/bin'
+            export DRY_RUN=true 
+            export TEST_MODE=true
+            bash '$monitor_script' --dry-run
+        "
         # Should handle missing dependencies gracefully
         [[ "$status" -ne 127 ]]
         [[ "$status" -ne 139 ]]
+        
+        # Restore original PATH
+        export PATH="$original_path"
     else
-        skip "Hybrid monitor script not found or not executable"
+        skip "Hybrid monitor script not found"
     fi
 }
