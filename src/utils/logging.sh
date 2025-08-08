@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Logging Utilities
 # Strukturiertes Logging-System für das claunch-basierte Session-Management

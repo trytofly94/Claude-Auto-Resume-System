@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Comprehensive Test Runner
 # Führt alle Tests aus mit detaillierter Berichterstattung

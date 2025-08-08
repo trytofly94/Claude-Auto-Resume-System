@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Terminal Utilities
 # Terminal-Detection und -Integration für das claunch-basierte Session-Management

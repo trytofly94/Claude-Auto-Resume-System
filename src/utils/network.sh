@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Network Utilities
 # Netzwerk-Utilities für das claunch-basierte Session-Management
