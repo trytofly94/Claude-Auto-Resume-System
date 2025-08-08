@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - claunch Integration
 # claunch-Wrapper und Session-Management für das Claude Auto-Resume System

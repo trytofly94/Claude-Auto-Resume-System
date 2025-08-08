@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Bash version check utility for Claude Auto-Resume
 # This function ensures bash 4.0+ compatibility across all scripts
 

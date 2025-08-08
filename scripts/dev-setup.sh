@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Development Environment Setup Script
 # Entwicklungsumgebung-Setup für das Claude Auto-Resume System
@@ -415,7 +415,7 @@ create_precommit_hook() {
     log_info "Creating pre-commit hook: $precommit_hook"
     
     cat > "$precommit_hook" << 'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Pre-commit Hook
 # Automatische Code-Qualitätsprüfungen vor jedem Commit
@@ -526,7 +526,7 @@ create_postcommit_hook() {
     log_info "Creating post-commit hook: $postcommit_hook"
     
     cat > "$postcommit_hook" << 'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Post-commit Hook
 # Automatische Aktionen nach erfolgreichem Commit
@@ -563,7 +563,7 @@ create_dev_scripts() {
     else
         log_info "Creating lint script: $lint_script"
         cat > "$lint_script" << 'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Lint Script
 # Führt alle Linting-Tools aus
@@ -606,7 +606,7 @@ EOF
     else
         log_info "Creating test runner script: $test_script"
         cat > "$test_script" << 'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Test Runner Script
 # Führt alle Tests aus
@@ -665,7 +665,7 @@ EOF
     else
         log_info "Creating format script: $format_script"
         cat > "$format_script" << 'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Format Script
 # Formatiert alle Shell-Skripte

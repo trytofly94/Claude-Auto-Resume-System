@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Hybrid Monitor
 # Haupt-Monitoring-System für das claunch-basierte Claude Auto-Resume System

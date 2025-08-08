@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - Main Setup Script
 # Vollständiges Setup für das claunch-basierte Claude Auto-Resume System
@@ -938,7 +938,7 @@ install_dev_tools() {
     if [[ ! -f "$dev_script" ]] && [[ "$DRY_RUN" != "true" ]]; then
         log_info "Creating development setup script"
         cat > "$dev_script" << 'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 # Development environment setup for Claude Auto-Resume
 
 set -euo pipefail

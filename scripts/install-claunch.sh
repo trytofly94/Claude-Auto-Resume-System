@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Claude Auto-Resume - claunch Installation Script
 # Automatische Installation von claunch für das Claude Auto-Resume System
