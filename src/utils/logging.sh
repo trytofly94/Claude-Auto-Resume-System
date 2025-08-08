@@ -49,6 +49,7 @@ get_log_level_numeric() {
     case "$(echo "$1" | tr '[:lower:]' '[:upper:]')" in
         "DEBUG") echo $LOG_LEVEL_DEBUG ;;
         "INFO")  echo $LOG_LEVEL_INFO ;;
+        "SUCCESS") echo $LOG_LEVEL_INFO ;;  # Same level as INFO
         "WARN")  echo $LOG_LEVEL_WARN ;;
         "ERROR") echo $LOG_LEVEL_ERROR ;;
         *) echo $LOG_LEVEL_INFO ;;
@@ -60,6 +61,15 @@ should_log() {
     local level="$1"
     local current_level_num
     local target_level_num
+    
+    # Special handling for DEBUG_MODE variable (backward compatibility)
+    if [[ "$level" == "DEBUG" ]]; then
+        if [[ "${DEBUG_MODE:-}" == "false" ]]; then
+            return 1
+        elif [[ "${DEBUG_MODE:-}" == "true" ]]; then
+            return 0
+        fi
+    fi
     
     current_level_num=$(get_log_level_numeric "$LOG_LEVEL")
     target_level_num=$(get_log_level_numeric "$level")
@@ -114,23 +124,30 @@ rotate_log() {
     
     local base_name="${LOG_FILE%.*}"
     local extension="${LOG_FILE##*.}"
+    local max_archives="${MAX_LOG_ARCHIVES:-5}"
     local i
     
     # Rotiere bestehende Archive
-    for ((i = MAX_LOG_ARCHIVES - 1; i >= 1; i--)); do
+    for ((i = max_archives - 1; i >= 1; i--)); do
         local old_file="${base_name}.${i}.${extension}"
         local new_file="${base_name}.$((i + 1)).${extension}"
         
-        [[ -f "$old_file" ]] && mv "$old_file" "$new_file"
+        if [[ -f "$old_file" ]]; then
+            mv "$old_file" "$new_file" || return 1
+        fi
     done
     
     # Rotiere aktuelle Log-Datei
-    mv "$LOG_FILE" "${base_name}.1.${extension}"
+    mv "$LOG_FILE" "${base_name}.1.${extension}" || return 1
     
     # Entferne alte Archive
-    local oldest_archive=$((MAX_LOG_ARCHIVES + 1))
+    local oldest_archive=$((max_archives + 1))
     local oldest_file="${base_name}.${oldest_archive}.${extension}"
-    [[ -f "$oldest_file" ]] && rm -f "$oldest_file"
+    if [[ -f "$oldest_file" ]]; then
+        rm -f "$oldest_file" || return 1
+    fi
+    
+    return 0
 }
 
 # Generiert Timestamp für Log-Einträge
@@ -208,9 +225,14 @@ log_message() {
         log_entry="[$timestamp] [$level] [$SCRIPT_NAME] [$caller_info]: $message"
     fi
     
-    # Schreibe in Log-Datei und optional zu stderr
+    # Schreibe in Log-Datei und optional zu stderr/stdout
     {
         echo "$log_entry" >> "$LOG_FILE"
+        
+        # In TEST_MODE auch zu stdout ausgeben für BATS-Tests
+        if [[ "${TEST_MODE:-false}" == "true" ]]; then
+            echo "$log_entry"
+        fi
         
         # Bei ERROR und WARN auch zu stderr ausgeben
         if [[ "$level" == "ERROR" || "$level" == "WARN" ]]; then
@@ -244,6 +266,11 @@ log_warn() {
 # Error-Level Logging
 log_error() {
     log_message "ERROR" "$*"
+}
+
+# Success-Level Logging
+log_success() {
+    log_message "SUCCESS" "$*"
 }
 
 # ===============================================================================
@@ -380,7 +407,7 @@ cleanup_logs() {
 # ===============================================================================
 
 # Nur ausführen wenn Skript direkt aufgerufen wird
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
     # Test-Modus
     init_logging
     
