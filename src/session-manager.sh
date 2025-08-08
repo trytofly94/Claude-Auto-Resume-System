@@ -182,11 +182,11 @@ cleanup_sessions() {
             if [[ "$state" == "$SESSION_STATE_STOPPED" ]] || [[ "$state" == "$SESSION_STATE_ERROR" ]]; then
                 log_info "Cleaning up old session: $session_id (age: ${age}s, state: $state)"
                 
-                unset SESSIONS["$session_id"]
-                unset SESSION_STATES["$session_id"]
-                unset SESSION_RESTART_COUNTS["$session_id"]
-                unset SESSION_RECOVERY_COUNTS["$session_id"]
-                unset SESSION_LAST_SEEN["$session_id"]
+                unset "SESSIONS[$session_id]"
+                unset "SESSION_STATES[$session_id]"
+                unset "SESSION_RESTART_COUNTS[$session_id]"
+                unset "SESSION_RECOVERY_COUNTS[$session_id]"
+                unset "SESSION_LAST_SEEN[$session_id]"
                 
                 ((cleaned_count++))
             fi

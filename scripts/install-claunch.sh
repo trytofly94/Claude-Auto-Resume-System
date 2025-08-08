@@ -13,7 +13,7 @@ set -euo pipefail
 
 readonly SCRIPT_NAME="install-claunch"
 readonly VERSION="1.0.0-alpha"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR was unused and removed
 
 # claunch-Installationsoptionen
 INSTALL_METHOD="auto"
