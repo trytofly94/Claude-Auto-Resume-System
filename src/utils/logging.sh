@@ -172,7 +172,7 @@ create_json_log() {
     local caller="$4"
     
     cat <<EOF
-{"timestamp":"$(json_escape "$timestamp)","level":"$(json_escape "$level")","message":"$(json_escape "$message")","caller":"$(json_escape "$caller")","script":"$(json_escape "$SCRIPT_NAME")","pid":$LOG_PID}
+{"timestamp":"$(json_escape "$timestamp")","level":"$(json_escape "$level")","message":"$(json_escape "$message")","caller":"$(json_escape "$caller")","script":"$(json_escape "$SCRIPT_NAME")","pid":$LOG_PID}
 EOF
 }
 
