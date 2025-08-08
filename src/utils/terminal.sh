@@ -18,17 +18,19 @@ TERMINAL_TITLE="${TERMINAL_TITLE:-Claude Auto-Resume}"
 AUTO_CLOSE_TERMINAL="${AUTO_CLOSE_TERMINAL:-false}"
 APPLESCRIPT_INTEGRATION="${APPLESCRIPT_INTEGRATION:-true}"
 
-# Terminal-App-Definitionen
-readonly TERMINAL_APPS=(
-    "iterm2:iTerm.app"
-    "iterm:iTerm.app"
-    "terminal:Terminal.app"
-    "gnome-terminal:gnome-terminal"
-    "konsole:konsole"
-    "xterm:xterm"
-    "alacritty:alacritty"
-    "kitty:kitty"
-)
+# Terminal-App-Definitionen - only declare as readonly if not already set
+if [[ -z "${TERMINAL_APPS:-}" ]]; then
+    readonly TERMINAL_APPS=(
+        "iterm2:iTerm.app"
+        "iterm:iTerm.app"
+        "terminal:Terminal.app"
+        "gnome-terminal:gnome-terminal"
+        "konsole:konsole"
+        "xterm:xterm"
+        "alacritty:alacritty"
+        "kitty:kitty"
+    )
+fi
 
 # Erkannte Terminal-Informationen
 DETECTED_TERMINAL=""

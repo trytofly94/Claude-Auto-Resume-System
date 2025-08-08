@@ -11,11 +11,13 @@ set -euo pipefail
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
 
-# Log-Level Konstanten
-readonly LOG_LEVEL_DEBUG=0
-readonly LOG_LEVEL_INFO=1
-readonly LOG_LEVEL_WARN=2
-readonly LOG_LEVEL_ERROR=3
+# Log-Level Konstanten - only declare as readonly if not already set
+if [[ -z "${LOG_LEVEL_DEBUG:-}" ]]; then
+    readonly LOG_LEVEL_DEBUG=0
+    readonly LOG_LEVEL_INFO=1
+    readonly LOG_LEVEL_WARN=2
+    readonly LOG_LEVEL_ERROR=3
+fi
 
 # Standard-Konfiguration (wird von config/default.conf überschrieben)
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
@@ -27,7 +29,15 @@ JSON_LOGGING="${JSON_LOGGING:-false}"
 LOG_TIMESTAMP_FORMAT="${LOG_TIMESTAMP_FORMAT:-%Y-%m-%dT%H:%M:%S%z}"
 
 # Interne Variablen
-SCRIPT_NAME=$(basename "$0")
+# Use conditional assignment to avoid readonly variable conflicts when sourced multiple times
+# Check if SCRIPT_NAME is already set (and possibly readonly) before trying to assign
+if [[ -z "${SCRIPT_NAME:-}" ]]; then
+    SCRIPT_NAME=$(basename "$0")
+elif ! readonly -p 2>/dev/null | grep -q "SCRIPT_NAME="; then
+    # SCRIPT_NAME is set but not readonly, so we can update it if needed
+    SCRIPT_NAME="${SCRIPT_NAME:-$(basename "$0")}"
+fi
+# If SCRIPT_NAME is readonly, we leave it as is
 LOG_PID=$$
 
 # ===============================================================================

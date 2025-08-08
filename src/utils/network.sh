@@ -17,19 +17,23 @@ NETWORK_RETRY_COUNT="${NETWORK_RETRY_COUNT:-3}"
 NETWORK_RETRY_DELAY="${NETWORK_RETRY_DELAY:-5}"
 CONNECTIVITY_TEST_URL="${CONNECTIVITY_TEST_URL:-https://api.anthropic.com/v1/health}"
 
-# Zusätzliche Test-URLs für Redundanz
-readonly FALLBACK_URLS=(
-    "https://www.google.com"
-    "https://1.1.1.1"
-    "https://8.8.8.8"
-)
+# Zusätzliche Test-URLs für Redundanz - only declare as readonly if not already set
+if [[ -z "${FALLBACK_URLS:-}" ]]; then
+    readonly FALLBACK_URLS=(
+        "https://www.google.com"
+        "https://1.1.1.1"
+        "https://8.8.8.8"
+    )
+fi
 
-# DNS-Server für Tests
-readonly DNS_SERVERS=(
-    "8.8.8.8"
-    "1.1.1.1"
-    "9.9.9.9"
-)
+# DNS-Server für Tests - only declare as readonly if not already set
+if [[ -z "${DNS_SERVERS:-}" ]]; then
+    readonly DNS_SERVERS=(
+        "8.8.8.8"
+        "1.1.1.1"
+        "9.9.9.9"
+    )
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN
