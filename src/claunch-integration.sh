@@ -241,10 +241,10 @@ start_claunch_in_new_terminal() {
     fi
     
     # Baue claunch-Kommando für Terminal zusammen
-    local claunch_cmd="$CLAUNCH_PATH"
+    local claunch_cmd=("$CLAUNCH_PATH")
     
     if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
-        claunch_cmd="$claunch_cmd --tmux"
+        claunch_cmd+=("--tmux")
     fi
     
     # Füge Claude-Argumente hinzu
@@ -254,12 +254,12 @@ start_claunch_in_new_terminal() {
         for arg in "${claude_args[@]}"; do
             escaped_args+=("$(printf '%q' "$arg")")
         done
-        claunch_cmd="$claunch_cmd -- ${escaped_args[*]}"
+        claunch_cmd+=("--" "${escaped_args[@]}")
     fi
     
     # Öffne in Terminal
     cd "$working_dir"
-    open_terminal_window "$claunch_cmd" "$working_dir" "Claude - $PROJECT_NAME"
+    open_terminal_window "${claunch_cmd[*]}" "$working_dir" "Claude - $PROJECT_NAME"
 }
 
 # Sende Kommando an bestehende Session
