@@ -261,7 +261,7 @@ check_usage_limits() {
     log_debug "Checking for Claude usage limits"
     
     local limit_detected=false
-    local wait_time=0
+# Removed unused wait_time variable
     local resume_timestamp=0
     
     # Test-Modus für Entwicklung

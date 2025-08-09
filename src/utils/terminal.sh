@@ -113,18 +113,18 @@ detect_current_terminal() {
                 DETECTED_TERMINAL="iterm2"
                 DETECTED_TERMINAL_PATH="/Applications/iTerm.app"
                 ;;
+            *gnome-terminal*) 
+                DETECTED_TERMINAL="gnome-terminal"
+                DETECTED_TERMINAL_PATH="gnome-terminal"
+                ;;
             *Terminal*|*terminal*) 
                 if [[ "$(get_os)" == "macos" ]]; then
                     DETECTED_TERMINAL="terminal"
                     DETECTED_TERMINAL_PATH="/Applications/Utilities/Terminal.app"
                 else
-                    DETECTED_TERMINAL="gnome-terminal"
-                    DETECTED_TERMINAL_PATH="gnome-terminal"
+                    DETECTED_TERMINAL="terminal"
+                    DETECTED_TERMINAL_PATH="terminal"
                 fi
-                ;;
-            *gnome-terminal*) 
-                DETECTED_TERMINAL="gnome-terminal"
-                DETECTED_TERMINAL_PATH="gnome-terminal"
                 ;;
             *konsole*) 
                 DETECTED_TERMINAL="konsole"

@@ -19,7 +19,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Test-Konfiguration
 TEST_TYPE="all"
 VERBOSE_OUTPUT=false
-GENERATE_COVERAGE=false
+# TODO: Implement coverage generation functionality
+# GENERATE_COVERAGE=false
 STOP_ON_FAILURE=false
 PARALLEL_TESTS=false
 TEST_TIMEOUT=300
@@ -340,7 +341,8 @@ run_unit_tests() {
     
     log_info "Running unit tests..."
     
-    local unit_start_time=$(date +%s)
+    local unit_start_time
+    unit_start_time=$(date +%s)
     local unit_result=0
     
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -373,7 +375,8 @@ run_unit_tests() {
         fi
     fi
     
-    local unit_end_time=$(date +%s)
+    local unit_end_time
+    unit_end_time=$(date +%s)
     local unit_duration=$((unit_end_time - unit_start_time))
     
     if [[ $unit_result -eq 0 ]]; then
@@ -698,7 +701,8 @@ parse_arguments() {
                 shift
                 ;;
             --coverage)
-                GENERATE_COVERAGE=true
+                # TODO: Implement coverage generation
+                log_warn "Coverage generation not yet implemented"
                 shift
                 ;;
             --stop-on-failure)
