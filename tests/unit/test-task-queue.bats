@@ -127,7 +127,11 @@ teardown() {
         skip "Init tests disabled in this environment"
     fi
     
-    run timeout 10s test_init_task_queue
+    # Set PROJECT_ROOT properly for this test  
+    export PROJECT_ROOT="$TEST_PROJECT_DIR"
+    
+    # Call test_init_task_queue directly (no timeout for now to debug)
+    run test_init_task_queue
     
     if [[ $status -eq 124 ]]; then
         skip "Init test timed out - likely environment issue"
@@ -145,7 +149,11 @@ teardown() {
     # Remove jq mock to simulate missing dependency
     unmock_command "jq"
     
-    run timeout 5s test_init_task_queue
+    # Set PROJECT_ROOT properly for dependency test
+    export PROJECT_ROOT="$TEST_PROJECT_DIR"
+    
+    # Call test_init_task_queue directly for dependency test
+    run test_init_task_queue
     
     if [[ $status -eq 124 ]]; then
         skip "Dependency test timed out"
