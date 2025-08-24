@@ -638,7 +638,8 @@ add_task_to_queue() {
     
     # Check queue size limit
     local current_size=0
-    if [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null || [[ "${!TASK_STATES[@]}" != "" ]] 2>/dev/null; then
+    # Check if TASK_STATES has elements for queue limit
+    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
         current_size=${#TASK_STATES[@]}
     fi
     
@@ -857,7 +858,8 @@ list_queue_tasks() {
     log_debug "Listing tasks (filter: $status_filter, sort: $sort_by)"
     
     local task_count=0
-    if [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null || [[ "${!TASK_STATES[@]}" != "" ]] 2>/dev/null; then
+    # Check if TASK_STATES has elements for listing
+    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
         task_count=${#TASK_STATES[@]}
     fi
     
@@ -959,7 +961,7 @@ clear_task_queue() {
     log_warn "Clearing entire task queue (backup: $create_backup)"
     
     local current_size=0
-    if [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null || [[ "${!TASK_STATES[@]}" != "" ]] 2>/dev/null; then
+    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
         current_size=${#TASK_STATES[@]}
     fi
     
@@ -1198,8 +1200,10 @@ get_task_duration() {
     fi
     
     # Calculate duration (basic implementation - could be improved)
-    local created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$created" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
-    local end_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$end_time" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
+    local created_epoch
+    local end_epoch
+    created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$created" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
+    end_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$end_time" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
     
     if [[ $created_epoch -gt 0 && $end_epoch -gt 0 ]]; then
         local duration=$((end_epoch - created_epoch))
@@ -1214,7 +1218,8 @@ get_task_duration() {
 # Hole Queue-Statistiken
 get_queue_statistics() {
     local total_tasks=0
-    if [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null || [[ "${!TASK_STATES[@]}" != "" ]] 2>/dev/null; then
+    # Check if TASK_STATES has elements
+    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
         total_tasks=${#TASK_STATES[@]}
     fi
     local pending_tasks=0
@@ -1222,7 +1227,8 @@ get_queue_statistics() {
     local completed_tasks=0
     local failed_tasks=0
     local timeout_tasks=0
-    local total_duration=0
+    # total_duration is calculated but not used in final output
+    # local total_duration=0
     local completed_duration=0
     
     for task_id in "${!TASK_STATES[@]}"; do
@@ -1277,7 +1283,8 @@ cleanup_old_tasks() {
     
     log_info "Cleaning up tasks older than $max_age_days days"
     
-    local current_time=$(date +%s)
+    local current_time
+    current_time=$(date +%s)
     local max_age_seconds=$((max_age_days * 24 * 3600))
     local cleaned_count=0
     
@@ -1297,7 +1304,8 @@ cleanup_old_tasks() {
         fi
         
         # Calculate age (basic implementation)
-        local created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$created" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
+        local created_epoch
+        created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$created" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
         if [[ $created_epoch -gt 0 ]]; then
             local age=$((current_time - created_epoch))
             if [[ $age -gt $max_age_seconds ]]; then
@@ -1417,7 +1425,8 @@ init_task_queue() {
     }
     
     # Initialize arrays if not already done
-    if [[ ${#TASK_STATES[@]} -eq 0 ]] 2>/dev/null && [[ "${!TASK_STATES[@]}" == "" ]] 2>/dev/null; then
+    # Use a safer check for array initialization
+    if ! declare -p TASK_STATES >/dev/null 2>&1 || [[ ${#TASK_STATES[@]} -eq 0 ]] 2>/dev/null; then
         declare -gA TASK_STATES
         declare -gA TASK_METADATA
         declare -gA TASK_RETRY_COUNTS
@@ -1434,7 +1443,7 @@ init_task_queue() {
     
     log_info "Task queue system initialized successfully"
     local task_count=0
-    if [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null || [[ "${!TASK_STATES[@]}" != "" ]] 2>/dev/null; then
+    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
         task_count=${#TASK_STATES[@]}
     fi
     log_info "Queue state: $task_count tasks loaded"
