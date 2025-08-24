@@ -639,7 +639,7 @@ add_task_to_queue() {
     # Check queue size limit
     local current_size=0
     # Check if TASK_STATES has elements for queue limit
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
+    if declare -p TASK_STATES >/dev/null 2>&1; then
         current_size=${#TASK_STATES[@]}
     fi
     
