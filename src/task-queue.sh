@@ -185,7 +185,136 @@ validate_task_data() {
 }
 
 # ===============================================================================
-# FILE-LOCKING FÜR ATOMIC OPERATIONS
+# ENHANCED ATOMIC LOCKING SYSTEM - Phase 1 Implementation
+# ===============================================================================
+
+# Comprehensive stale lock detection and cleanup
+cleanup_stale_lock() {
+    local lock_dir="$1"
+    local pid_file="$lock_dir/pid"
+    local timestamp_file="$lock_dir/timestamp"
+    local hostname_file="$lock_dir/hostname"
+    
+    [[ -d "$lock_dir" ]] || return 0
+    
+    # Multi-criteria validation
+    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
+    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "")
+    
+    local should_cleanup=false
+    
+    # Check 1: Process exists and is running
+    if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_debug "Lock process $lock_pid is dead - cleaning up"
+        should_cleanup=true
+    fi
+    
+    # Check 2: Age-based cleanup (locks older than 5 minutes)
+    if [[ -n "$lock_timestamp" ]]; then
+        local current_time=$(date +%s)
+        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        local age=$((current_time - lock_time))
+        
+        if [[ $age -gt 300 ]]; then  # 5 minutes
+            log_debug "Lock older than 5 minutes (age: ${age}s) - cleaning up"
+            should_cleanup=true
+        fi
+    fi
+    
+    # Check 3: Different hostname (network filesystems)
+    if [[ -n "$lock_hostname" && "$lock_hostname" != "$HOSTNAME" ]]; then
+        log_debug "Lock from different host ($lock_hostname vs $HOSTNAME) - validating"
+        # For now, we don't auto-cleanup cross-host locks without additional validation
+    fi
+    
+    if [[ "$should_cleanup" == "true" ]]; then
+        rm -rf "$lock_dir" 2>/dev/null && log_debug "Cleaned up stale lock directory"
+    fi
+}
+
+# Atomic directory-based lock acquisition
+acquire_queue_lock_atomic() {
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    local attempts=0
+    local max_attempts=$([[ "${CLI_MODE:-false}" == "true" ]] && echo 5 || echo "$QUEUE_LOCK_TIMEOUT")
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            # Successfully acquired lock - write metadata
+            echo $$ > "$lock_dir/pid" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write PID to lock directory"
+                return 1
+            }
+            
+            date -Iseconds > "$lock_dir/timestamp" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write timestamp to lock directory"
+                return 1
+            }
+            
+            echo "$HOSTNAME" > "$lock_dir/hostname" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write hostname to lock directory"
+                return 1
+            }
+            
+            log_debug "Acquired atomic queue lock (pid: $$, attempt: $attempts)"
+            return 0
+        fi
+        
+        # Stale lock cleanup before retry
+        cleanup_stale_lock "$lock_dir"
+        
+        # Exponential backoff with jitter
+        local base_delay=0.1
+        local delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
+        local jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
+        local wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
+        
+        # Cap wait time at 2 seconds for CLI operations
+        if [[ "${CLI_MODE:-false}" == "true" ]]; then
+            wait_time=$(echo "if ($wait_time > 1.0) 1.0 else $wait_time" | bc -l 2>/dev/null || echo "1")
+        fi
+        
+        log_debug "Lock attempt $((attempts + 1))/$max_attempts failed, waiting ${wait_time}s"
+        sleep "$wait_time" 2>/dev/null || sleep 1
+        
+        ((attempts++))
+    done
+    
+    log_error "Failed to acquire atomic queue lock after $max_attempts attempts"
+    return 1
+}
+
+# Release atomic directory-based lock
+release_queue_lock_atomic() {
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    
+    if [[ -d "$lock_dir" ]]; then
+        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+        
+        if [[ "$lock_pid" == "$$" ]]; then
+            rm -rf "$lock_dir" 2>/dev/null && {
+                log_debug "Released atomic queue lock (pid: $$)"
+                return 0
+            } || {
+                log_warn "Failed to remove atomic lock directory"
+                return 1
+            }
+        else
+            log_warn "Attempted to release lock not owned by this process (lock pid: $lock_pid, current pid: $$)"
+            return 1
+        fi
+    else
+        log_debug "No atomic lock directory to release"
+        return 0
+    fi
+}
+
+# ===============================================================================
+# FILE-LOCKING FÜR ATOMIC OPERATIONS - Updated to use Enhanced System
 # ===============================================================================
 
 # Acquire queue lock für sichere Operationen
@@ -214,55 +343,8 @@ acquire_queue_lock() {
             return 1
         fi
     else
-        # Alternative locking for macOS/systems without flock
-        local pid_file="$lock_file.pid"
-        
-        # Clean up any stale locks first
-        if [[ -f "$pid_file" ]]; then
-            local lock_pid
-            lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-            
-            if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
-                log_debug "Removing stale lock file (dead process: $lock_pid)"
-                rm -f "$pid_file" "$lock_file" 2>/dev/null || true
-            fi
-        fi
-        
-        while [[ $attempts -lt $max_attempts ]]; do
-            # Try to acquire lock immediately
-            if (set -C; echo $$ > "$pid_file") 2>/dev/null; then
-                # Create main lock file
-                touch "$lock_file" || {
-                    rm -f "$pid_file" 2>/dev/null
-                    log_error "Failed to create lock file"
-                    return 1
-                }
-                log_debug "Acquired queue lock (alternative method, pid: $$, attempts: $attempts)"
-                return 0
-            fi
-            
-            # Check if another process still holds the lock
-            if [[ -f "$pid_file" ]]; then
-                local lock_pid
-                lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-                
-                if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-                    log_debug "Queue lock held by process $lock_pid (attempt $((attempts + 1))/$max_attempts)"
-                else
-                    log_debug "Removing stale lock file (dead process: $lock_pid)"
-                    rm -f "$pid_file" "$lock_file" 2>/dev/null || true
-                    continue  # Try again immediately
-                fi
-            fi
-            
-            ((attempts++))
-            if [[ $attempts -lt $max_attempts ]]; then
-                sleep 1
-            fi
-        done
-        
-        log_error "Failed to acquire queue lock within ${max_attempts}s (alternative method)"
-        return 1
+        # Use atomic directory-based locking for systems without flock (macOS, etc.)
+        acquire_queue_lock_atomic
     fi
 }
 
@@ -282,49 +364,64 @@ release_queue_lock() {
         
         log_debug "Released queue lock (flock, fd: $lock_fd)"
     else
-        # Release alternative lock
-        local pid_file="$lock_file.pid"
-        
-        if [[ -f "$pid_file" ]]; then
-            local lock_pid
-            lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-            
-            if [[ "$lock_pid" == "$$" ]]; then
-                rm -f "$pid_file" "$lock_file" 2>/dev/null || {
-                    log_warn "Failed to remove lock files"
-                }
-                log_debug "Released queue lock (alternative method, pid: $$)"
-            else
-                log_warn "Lock file belongs to different process: $lock_pid (current: $$)"
-            fi
-        else
-            log_debug "No lock file to release"
-        fi
+        # Use atomic directory-based lock release for systems without flock (macOS, etc.)
+        release_queue_lock_atomic
     fi
 }
 
-# Wrapper für sichere Queue-Operationen
-with_queue_lock() {
+# Enhanced lock wrapper with monitoring and nested lock prevention
+with_queue_lock_enhanced() {
     local operation="$1"
     shift
+    local start_time=$(date +%s.%N 2>/dev/null || date +%s)
     local result=0
     
-    log_debug "Starting locked operation: $operation"
+    # Check if we already hold a lock (prevent nested locking)
+    if [[ "${QUEUE_LOCK_HELD:-false}" == "true" ]]; then
+        log_debug "Lock already held - executing $operation directly"
+        "$operation" "$@"
+        return $?
+    fi
+    
+    log_debug "Starting enhanced lock operation: $operation"
+    
+    export QUEUE_LOCK_HELD=true
     
     if acquire_queue_lock; then
-        # Execute operation with lock held
+        # Execute operation with monitoring
+        local exec_start_time=$(date +%s.%N 2>/dev/null || date +%s)
         "$operation" "$@"
         result=$?
+        local exec_end_time=$(date +%s.%N 2>/dev/null || date +%s)
+        
+        # Log performance metrics if bc is available
+        if command -v bc >/dev/null 2>&1; then
+            local exec_duration=$(echo "$exec_end_time - $exec_start_time" | bc 2>/dev/null || echo "N/A")
+            log_debug "Operation $operation completed in ${exec_duration}s (exit code: $result)"
+        else
+            log_debug "Operation $operation completed (exit code: $result)"
+        fi
         
         # Always release lock
         release_queue_lock
         
-        log_debug "Completed locked operation: $operation (exit code: $result)"
+        if command -v bc >/dev/null 2>&1; then
+            local total_duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $start_time" | bc 2>/dev/null || echo "N/A")
+            log_debug "Total lock duration: ${total_duration}s"
+        fi
+        
+        export QUEUE_LOCK_HELD=false
         return $result
     else
-        log_error "Cannot execute operation without lock: $operation"
+        log_error "Cannot execute operation without enhanced lock: $operation"
+        export QUEUE_LOCK_HELD=false
         return 1
     fi
+}
+
+# Legacy wrapper - now redirects to enhanced version for better compatibility
+with_queue_lock() {
+    with_queue_lock_enhanced "$@"
 }
 
 # ===============================================================================
@@ -1676,6 +1773,106 @@ init_task_queue() {
     return 0
 }
 
+# Read-only initialization without locking for CLI operations
+init_task_queue_readonly() {
+    local config_file="${1:-config/default.conf}"
+    
+    log_debug "Initializing task queue system (readonly mode)"
+    
+    # Load configuration (but preserve environment variables)
+    if [[ -f "$config_file" ]]; then
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            
+            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            
+            case "$key" in
+                TASK_QUEUE_ENABLED|TASK_QUEUE_DIR|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|TASK_QUEUE_MAX_SIZE|TASK_AUTO_CLEANUP_DAYS|TASK_BACKUP_RETENTION_DAYS|QUEUE_LOCK_TIMEOUT)
+                    # Only set from config if not already set in environment
+                    if [[ -z "${!key:-}" ]]; then
+                        eval "$key='$value'"
+                    fi
+                    ;;
+            esac
+        done < <(grep -E '^[^#]*=' "$config_file" || true)
+        
+        log_debug "Task queue configured from: $config_file (readonly)"
+    fi
+    
+    # Check if task queue is enabled
+    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+        log_debug "Task queue is disabled in configuration"
+        return 1
+    fi
+    
+    # Ensure directories exist
+    ensure_queue_directories || {
+        log_error "Failed to create queue directories"
+        return 1
+    }
+    
+    # Initialize arrays from JSON without acquiring locks
+    if [[ -f "$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json" ]]; then
+        load_queue_state_readonly
+        return $?
+    else
+        # Initialize empty arrays
+        declare -gA TASK_METADATA=()
+        declare -gA TASK_STATES=()
+        declare -ga TASK_QUEUE=()
+        declare -gA TASK_RETRY_COUNTS=()
+        declare -gA TASK_TIMESTAMPS=()
+        declare -gA TASK_PRIORITIES=()
+        log_debug "Initialized empty task arrays (readonly)"
+        return 0
+    fi
+}
+
+# Load queue state from JSON file without locking (read-only)
+load_queue_state_readonly() {
+    local queue_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+    
+    if [[ ! -f "$queue_file" ]]; then
+        log_debug "No existing queue file found: $queue_file (readonly)"
+        return 0
+    fi
+    
+    log_debug "Loading queue state from: $queue_file (readonly)"
+    
+    # Validate JSON first
+    if ! jq empty "$queue_file" 2>/dev/null; then
+        log_error "Queue file contains invalid JSON: $queue_file"
+        return 1
+    fi
+    
+    # Initialize empty arrays
+    declare -gA TASK_STATES=()
+    declare -gA TASK_METADATA=()
+    declare -ga TASK_QUEUE=()
+    declare -gA TASK_RETRY_COUNTS=()
+    declare -gA TASK_TIMESTAMPS=()
+    declare -gA TASK_PRIORITIES=()
+    
+    # Load tasks from JSON
+    while IFS=$'\t' read -r task_id status priority created metadata retry_count; do
+        [[ -z "$task_id" ]] && continue
+        
+        TASK_STATES["$task_id"]="$status"
+        TASK_PRIORITIES["$task_id"]="$priority"
+        TASK_TIMESTAMPS["$task_id"]="$created"
+        TASK_RETRY_COUNTS["$task_id"]="${retry_count:-0}"
+        TASK_METADATA["$task_id"]="$metadata"
+        TASK_QUEUE+=("$task_id")
+        
+    done < <(jq -r '.tasks[]? | [.id, .status, .priority, .created, (.metadata | tostring), (.retry_count // 0)] | @tsv' "$queue_file" 2>/dev/null)
+    
+    local task_count=${#TASK_STATES[@]}
+    log_debug "Loaded $task_count tasks from queue (readonly)"
+    
+    return 0
+}
+
 # Task-Queue-Status anzeigen
 show_queue_status() {
     if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
@@ -1701,16 +1898,23 @@ show_queue_status() {
 # CLI OPERATION WRAPPER (für Array-Persistenz)
 # ===============================================================================
 
-# Wrapper für alle CLI-Operationen mit automatischer JSON-Synchronisation
+# Enhanced CLI operation wrapper with deadlock prevention
 cli_operation_wrapper() {
     local operation="$1"
     shift
     
-    # Set CLI mode flag for shorter lock timeouts
-    export CLI_MODE=true
+    # Check if we already hold a lock (prevent nested locking)
+    if [[ "${QUEUE_LOCK_HELD:-false}" == "true" ]]; then
+        log_debug "Lock already held - executing $operation directly"
+        "$operation" "$@"
+        return $?
+    fi
     
-    # Initialize und State aus JSON laden
-    init_task_queue || {
+    export CLI_MODE=true
+    export QUEUE_LOCK_HELD=false
+    
+    # Initialize without locking (use read-only methods)
+    init_task_queue_readonly || {
         log_error "Failed to initialize task queue for CLI operation"
         export CLI_MODE=false
         return 1
@@ -1718,28 +1922,13 @@ cli_operation_wrapper() {
     
     log_debug "CLI Operation: $operation with args: $*"
     
-    # Operation ausführen
-    "$operation" "$@"
-    local result=$?
-    
-    # State automatisch nach JSON speichern für state-changing operations
-    local state_changing_ops=("add_task_cmd" "remove_task_cmd" "clear_queue_cmd" "github_issue_cmd" "cleanup_cmd")
-    local op_name
-    for op_name in "${state_changing_ops[@]}"; do
-        if [[ "$operation" == "$op_name" ]]; then
-            if [[ $result -eq 0 ]]; then
-                with_queue_lock save_queue_state || {
-                    log_error "Failed to save queue state after $operation"
-                    export CLI_MODE=false
-                    return 1
-                }
-                log_debug "Queue state saved after $operation"
-            fi
-            break
-        fi
-    done
+    # Execute with proper lock management
+    local result
+    with_queue_lock_enhanced "$operation" "$@"
+    result=$?
     
     export CLI_MODE=false
+    export QUEUE_LOCK_HELD=false
     return $result
 }
 
