@@ -117,6 +117,13 @@ except:
         declare -gA TASK_PRIORITIES
         log_debug "Cleared and re-initialized global task arrays"
         
+        # Clear BATS file-based tracking for fresh test state
+        local bats_state_file="${TEST_PROJECT_DIR}/queue/bats_task_states.txt"
+        if [[ -f "$bats_state_file" ]]; then
+            rm -f "$bats_state_file"
+            log_debug "Cleared BATS file-based task tracking"
+        fi
+        
         log_info "Test task queue system initialized"
         return 0
     }

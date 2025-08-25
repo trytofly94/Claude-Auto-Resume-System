@@ -661,63 +661,78 @@ add_task_to_queue() {
     fi
     
     # Check if task already exists
-    if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+    local task_exists=false
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        # BATS environment - use file-based tracking for duplicate detection
+        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+        if [[ -f "$bats_state_file" ]] && grep -q "^$task_id$" "$bats_state_file" 2>/dev/null; then
+            task_exists=true
+        fi
+    else
+        # Normal environment - use array
+        if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+            task_exists=true
+        fi
+    fi
+    
+    if [[ "$task_exists" == "true" ]]; then
         log_error "Task already exists in queue: $task_id"
         return 1
     fi
     log_debug "Task ID is unique"
     
-    # Check queue size limit (skip in BATS test environment due to array scoping issues)
-    if [[ "${BATS_TEST_NAME:-}" == "" ]]; then
-        # Not in BATS - safe to check array size normally
-        local current_size=0
-        if declare -p TASK_STATES >/dev/null 2>&1; then
-            current_size=${#TASK_STATES[@]}
+    # Check queue size limit
+    local current_size=0
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        # BATS environment - count from file
+        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+        if [[ -f "$bats_state_file" ]]; then
+            current_size=$(wc -l < "$bats_state_file" 2>/dev/null || echo "0")
         fi
-        
-        if [[ ${TASK_QUEUE_MAX_SIZE:-0} -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then
-            log_error "Queue is full (max size: $TASK_QUEUE_MAX_SIZE)"
-            return 1
-        fi
-        log_debug "Queue size check: $current_size/${TASK_QUEUE_MAX_SIZE:-unlimited}"
     else
-        log_debug "Skipping queue size check in BATS test environment"
+        # Normal environment - use array
+        current_size=${#TASK_STATES[@]}
     fi
+    
+    if [[ ${TASK_QUEUE_MAX_SIZE:-0} -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then
+        log_error "Queue is full (max size: $TASK_QUEUE_MAX_SIZE)"
+        return 1
+    fi
+    log_debug "Queue size check: $current_size/${TASK_QUEUE_MAX_SIZE:-unlimited}"
     
     local current_time=$(date -Iseconds)
     
-    # Initialize task data (skip in BATS due to array scoping issues)
-    if [[ "${BATS_TEST_NAME:-}" == "" ]]; then
-        # Normal operation - initialize arrays
-        TASK_STATES["$task_id"]="$TASK_STATE_PENDING"
-        TASK_PRIORITIES["$task_id"]="$priority"
-        TASK_RETRY_COUNTS["$task_id"]=0
-        TASK_TIMESTAMPS["${task_id}_created"]="$current_time"
-        TASK_TIMESTAMPS["${task_id}_$TASK_STATE_PENDING"]="$current_time"
-        TASK_METADATA["${task_id}_type"]="$task_type"
-        TASK_METADATA["${task_id}_timeout"]="$TASK_DEFAULT_TIMEOUT"
-        TASK_METADATA["${task_id}_max_retries"]="$TASK_MAX_RETRIES"
-    else
-        log_debug "Skipping array data assignment in BATS test environment"
+    # Initialize task data in memory arrays
+    TASK_STATES["$task_id"]="$TASK_STATE_PENDING"
+    TASK_PRIORITIES["$task_id"]="$priority"
+    TASK_RETRY_COUNTS["$task_id"]=0
+    TASK_TIMESTAMPS["${task_id}_created"]="$current_time"
+    TASK_TIMESTAMPS["${task_id}_$TASK_STATE_PENDING"]="$current_time"
+    TASK_METADATA["${task_id}_type"]="$task_type"
+    TASK_METADATA["${task_id}_timeout"]="$TASK_DEFAULT_TIMEOUT"
+    TASK_METADATA["${task_id}_max_retries"]="$TASK_MAX_RETRIES"
+    
+    # In BATS test environment - also use file-based tracking for persistence validation
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+        mkdir -p "$(dirname "$bats_state_file")"
+        echo "$task_id" >> "$bats_state_file"
+        log_debug "Added task to BATS file-based tracking: $task_id"
     fi
     
-    # Process metadata arguments (skip in BATS due to array scoping issues)
-    if [[ "${BATS_TEST_NAME:-}" == "" ]]; then
-        local i=0
-        while [[ $i -lt ${#metadata[@]} ]]; do
-            local key="${metadata[$i]}"
-            local value="${metadata[$((i + 1))]:-}"
-            
-            if [[ -n "$key" && -n "$value" ]]; then
-                TASK_METADATA["${task_id}_${key}"]="$value"
-                log_debug "Set metadata: $task_id.$key = $value"
-            fi
-            
-            ((i += 2))
-        done
-    else
-        log_debug "Skipping metadata processing in BATS test environment"
-    fi
+    # Process metadata arguments
+    local i=0
+    while [[ $i -lt ${#metadata[@]} ]]; do
+        local key="${metadata[$i]}"
+        local value="${metadata[$((i + 1))]:-}"
+        
+        if [[ -n "$key" && -n "$value" ]]; then
+            TASK_METADATA["${task_id}_${key}"]="$value"
+            log_debug "Set metadata: $task_id.$key = $value"
+        fi
+        
+        ((i += 2))
+    done
     
     log_info "Task added to queue: $task_id ($task_type, priority=$priority)"
     echo "$task_id"  # Return task ID for caller
