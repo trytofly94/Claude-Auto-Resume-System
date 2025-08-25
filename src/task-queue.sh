@@ -542,13 +542,252 @@ smart_operation_wrapper() {
     fi
 }
 
-# Placeholder for robust_lock_wrapper (will be implemented in Step 2)
+# ===============================================================================
+# ROBUST LOCK ACQUISITION (Exponential Backoff & Operation-Specific Timeouts)
+# ===============================================================================
+
+# Get operation-specific timeout
+get_operation_timeout() {
+    local operation="$1"
+    case "$operation" in
+        "add_task_cmd"|"remove_task_cmd")         echo "10" ;;   # Quick operations  
+        "batch_add"|"batch_remove"|"batch_operation_cmd") echo "30" ;; # Batch operations need more time
+        "import_queue_data"|"clear_queue_cmd")    echo "60" ;;   # Heavy operations
+        "interactive"|"start_interactive_mode")   echo "5" ;;    # Interactive needs fast response
+        *)                                        echo "15" ;;   # Default timeout
+    esac
+}
+
+# Acquire lock with exponential backoff retry logic
+acquire_lock_with_backoff() {
+    local operation="$1"
+    local max_attempts=10
+    local base_delay=0.1
+    local max_delay=5.0
+    local attempt=1
+    local start_time=$(date +%s.%3N)
+    
+    # Get operation-specific timeout
+    local operation_timeout
+    operation_timeout=$(get_operation_timeout "$operation")
+    
+    # Override max_attempts based on timeout
+    max_attempts=$(( operation_timeout > 10 ? operation_timeout / 2 : 5 ))
+    
+    log_debug "Attempting to acquire lock for $operation (timeout: ${operation_timeout}s, max_attempts: $max_attempts)"
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if acquire_queue_lock_atomic "$operation"; then
+            local end_time=$(date +%s.%3N)
+            local wait_time=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
+            log_debug "Lock acquired for $operation (attempt $attempt, wait: ${wait_time}s)"
+            return 0
+        fi
+        
+        # Calculate exponential backoff with jitter
+        local delay
+        if command -v bc >/dev/null 2>&1; then
+            delay=$(echo "$base_delay * (2 ^ ($attempt - 1))" | bc -l 2>/dev/null)
+            if (( $(echo "$delay > $max_delay" | bc -l 2>/dev/null) )); then
+                delay=$max_delay
+            fi
+            
+            # Add random jitter (±25%)
+            local jitter_factor=$(echo "$RANDOM" | awk '{print $1/32767.0 * 0.5 + 0.75}')
+            delay=$(echo "$delay * $jitter_factor" | bc -l 2>/dev/null)
+        else
+            # Fallback without bc: simple doubling with cap
+            delay=$(( attempt < 5 ? attempt : 5 ))
+        fi
+        
+        log_debug "Lock acquisition failed for $operation (attempt $attempt/$max_attempts), retrying in ${delay}s"
+        
+        # Use sleep with decimal if supported, fallback to integer
+        if sleep "$delay" 2>/dev/null; then
+            : # decimal sleep worked
+        else
+            sleep "${delay%.*}" # fallback to integer part
+        fi
+        
+        ((attempt++))
+    done
+    
+    local end_time=$(date +%s.%3N) 
+    local total_wait=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "$operation_timeout")
+    log_error "Failed to acquire lock for $operation after $max_attempts attempts (${total_wait}s)"
+    return 1
+}
+
+# Atomic lock acquisition (enhanced version of acquire_queue_lock)
+acquire_queue_lock_atomic() {
+    local operation="$1"
+    local lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
+    local lock_fd=200
+    local timeout
+    timeout=$(get_operation_timeout "$operation")
+    
+    # For CLI operations, use a shorter timeout to prevent hanging
+    if [[ "${CLI_MODE:-false}" == "true" ]]; then
+        timeout=$((timeout < 8 ? timeout : 8))  # Cap CLI timeout at 8s
+    fi
+    
+    ensure_queue_directories || return 1
+    
+    if has_command flock; then
+        # Use flock if available (Linux)
+        exec 200>"$lock_file" 2>/dev/null || {
+            log_error "Cannot open lock file: $lock_file"
+            return 1
+        }
+        
+        if flock -x -w "$timeout" 200 2>/dev/null; then
+            log_debug "Acquired queue lock (flock, fd: $lock_fd, timeout: ${timeout}s, operation: $operation)"
+            return 0
+        else
+            log_debug "Failed to acquire queue lock within ${timeout}s (flock, operation: $operation)"
+            return 1
+        fi
+    else
+        # Enhanced alternative locking for macOS/systems without flock
+        acquire_macos_lock_atomic "$lock_file" "$operation" "$timeout"
+    fi
+}
+
+# Enhanced macOS lock alternative (will be improved in Step 4)
+acquire_macos_lock_atomic() {
+    local lock_file="$1"
+    local operation="$2"
+    local timeout="${3:-15}"
+    local pid_file="$lock_file.pid"
+    local info_file="$lock_file.info"
+    
+    local attempts=0
+    local max_attempts=$timeout
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        # Clean up any stale locks first
+        cleanup_stale_locks_basic "$lock_file" && sleep 0.1
+        
+        # Try atomic PID file creation
+        if (
+            set -C  # noclobber
+            exec 3>"$pid_file" && 
+            echo $$ >&3 && 
+            exec 3>&-
+        ) 2>/dev/null; then
+            
+            # Create main lock file
+            if touch "$lock_file" 2>/dev/null; then
+                # Create basic lock info
+                create_lock_info_basic "$info_file" "$operation" $$
+                
+                # Verify we still own the lock
+                local check_pid
+                check_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+                if [[ "$check_pid" == "$$" ]]; then
+                    log_debug "Acquired macOS lock: $operation (PID: $$)"
+                    return 0
+                else
+                    # Race condition - cleanup and retry
+                    rm -f "$lock_file" "$info_file" 2>/dev/null || true
+                    log_debug "Lock race detected, retrying..."
+                fi
+            else
+                # Couldn't create main lock file
+                rm -f "$pid_file" 2>/dev/null || true
+            fi
+        fi
+        
+        ((attempts++))
+        if [[ $attempts -lt $max_attempts ]]; then
+            # Simple backoff with jitter
+            local delay_ms=$(( (RANDOM % 200) + 100 + (attempts * 200) ))
+            local delay_sec="0.$(printf "%03d" $delay_ms)"
+            sleep "$delay_sec" 2>/dev/null || sleep 1
+        fi
+    done
+    
+    log_debug "Failed to acquire macOS lock after $max_attempts attempts: $operation"
+    return 1
+}
+
+# Basic stale lock cleanup (enhanced version will come in Step 3)
+cleanup_stale_locks_basic() {
+    local lock_file="$1"
+    local pid_file="$lock_file.pid"
+    local info_file="$lock_file.info"
+    
+    if [[ ! -f "$pid_file" ]]; then
+        return 0  # No lock to clean up
+    fi
+    
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    
+    if [[ -z "$lock_pid" ]]; then
+        log_debug "Cleaning invalid lock: empty PID"
+        rm -f "$pid_file" "$lock_file" "$info_file" 2>/dev/null || true
+        return 0
+    fi
+    
+    # Check if process exists
+    if ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_debug "Cleaning stale lock: dead process $lock_pid"
+        rm -f "$pid_file" "$lock_file" "$info_file" 2>/dev/null || true
+        return 0
+    fi
+    
+    return 1  # Lock is valid and active
+}
+
+# Basic lock info creation (enhanced version will come in Step 3)
+create_lock_info_basic() {
+    local info_file="$1"
+    local operation="$2"
+    local pid="$3"
+    
+    cat > "$info_file" 2>/dev/null <<EOF || true
+{
+    "pid": $pid,
+    "timestamp": $(date +%s),
+    "operation": "$operation",
+    "cli_mode": ${CLI_MODE:-false}
+}
+EOF
+}
+
+# Enhanced robust lock wrapper
 robust_lock_wrapper() {
     local operation="$1"
     shift
+    local result=0
+    local start_time=$(date +%s.%3N)
     
-    # For now, use the existing with_queue_lock wrapper
-    with_queue_lock "$operation" "$@"
+    log_debug "Starting robust locked operation: $operation"
+    
+    if acquire_lock_with_backoff "$operation"; then
+        local acquire_time=$(date +%s.%3N)
+        local wait_time=$(echo "$acquire_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        # Execute operation with lock held
+        "$operation" "$@"
+        result=$?
+        
+        # Always release lock
+        release_queue_lock
+        
+        local end_time=$(date +%s.%3N)
+        local hold_time=$(echo "$end_time - $acquire_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_debug "Completed robust locked operation: $operation (wait: ${wait_time}s, hold: ${hold_time}s, exit: $result)"
+        return $result
+    else
+        local fail_time=$(date +%s.%3N)
+        local wait_time=$(echo "$fail_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_error "Cannot execute operation without lock: $operation (waited: ${wait_time}s)"
+        return 1
+    fi
 }
 
 # ===============================================================================
