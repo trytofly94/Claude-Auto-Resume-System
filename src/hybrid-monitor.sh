@@ -865,6 +865,11 @@ parse_arguments() {
                     log_error "Option $1 requires an issue number or URL"
                     exit 1
                 fi
+                # Validate that issue number is numeric
+                if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Error: Invalid issue number '$2'. Issue numbers must be numeric."
+                    exit 1
+                fi
                 ADD_ISSUE="$2"
                 shift 2
                 ;;
@@ -873,12 +878,17 @@ parse_arguments() {
                     log_error "Option $1 requires a PR number or URL"
                     exit 1
                 fi
+                # Validate that PR number is numeric
+                if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Error: Invalid PR number '$2'. PR numbers must be numeric."
+                    exit 1
+                fi
                 ADD_PR="$2"
                 shift 2
                 ;;
             --add-custom)
                 if [[ -z "${2:-}" ]]; then
-                    log_error "Option $1 requires a task description"
+                    log_error "Error: --add-custom requires a task description"
                     exit 1
                 fi
                 ADD_CUSTOM="$2"

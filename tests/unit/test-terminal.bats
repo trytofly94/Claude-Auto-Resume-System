@@ -205,7 +205,7 @@ setup() {
         
         # Output shouldn't contain ANSI color codes when NO_COLOR is set
         # This test depends on implementation details
-        ! [[ "$output" =~ \033\[[0-9;]*m ]]
+        ! [[ "$output" =~ $'\033\[[0-9;]*m' ]]
         
         unset NO_COLOR
     else
