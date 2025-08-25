@@ -26,6 +26,7 @@ PARALLEL_TESTS=false
 TEST_TIMEOUT=300
 DRY_RUN=false
 SKIP_BATS_TESTS=false
+INCLUDE_GITHUB_TESTS=false
 
 # Test-Statistiken
 TOTAL_TESTS=0
@@ -460,6 +461,64 @@ run_integration_tests() {
     return $integration_result
 }
 
+# Führe GitHub Integration Tests durch
+run_github_integration_tests() {
+    log_step "Running GitHub Integration tests"
+    
+    # Delegiere an spezialisierten GitHub Integration Test Runner
+    local github_test_runner="$PROJECT_ROOT/scripts/run-github-integration-tests.sh"
+    
+    if [[ ! -f "$github_test_runner" ]]; then
+        log_error "GitHub Integration test runner not found: $github_test_runner"
+        return 1
+    fi
+    
+    if [[ ! -x "$github_test_runner" ]]; then
+        log_warn "Making GitHub Integration test runner executable"
+        chmod +x "$github_test_runner"
+    fi
+    
+    log_info "Running specialized GitHub Integration test suite..."
+    
+    local github_start_time=$(date +%s)
+    local github_result=0
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would run GitHub Integration tests via: $github_test_runner"
+        return 0
+    fi
+    
+    # Konfiguriere GitHub Test Environment
+    local github_options=()
+    
+    if [[ "$VERBOSE_OUTPUT" == "true" ]]; then
+        github_options+=("--verbose")
+    fi
+    
+    # Führe GitHub Integration Tests aus mit Timeout
+    if timeout "$TEST_TIMEOUT" "$github_test_runner" "${github_options[@]}" all; then
+        github_result=0
+    else
+        github_result=$?
+        if [[ $github_result -eq 124 ]]; then
+            log_error "GitHub Integration tests timed out after $TEST_TIMEOUT seconds"
+        else
+            log_error "GitHub Integration tests failed with exit code: $github_result"
+        fi
+    fi
+    
+    local github_end_time=$(date +%s)
+    local github_duration=$((github_end_time - github_start_time))
+    
+    if [[ $github_result -eq 0 ]]; then
+        log_success "GitHub Integration tests passed in $(format_duration $github_duration)"
+    else
+        log_error "GitHub Integration tests failed in $(format_duration $github_duration)"
+    fi
+    
+    return $github_result
+}
+
 # Führe Linting-Tests durch
 run_lint_tests() {
     log_step "Running linting tests"
@@ -644,6 +703,7 @@ TEST_TYPES:
     all             Run all available tests (default)
     unit            Run only unit tests
     integration     Run only integration tests
+    github          Run GitHub Integration tests
     syntax          Run only syntax/linting tests
     lint            Run only linting checks
 
@@ -654,6 +714,7 @@ OPTIONS:
     --parallel          Run tests in parallel (if supported)
     --timeout SECONDS   Set test timeout (default: $TEST_TIMEOUT)
     --dry-run           Preview what would be run without executing
+    --include-github    Include GitHub Integration tests in 'all' mode
     --help, -h          Show this help message
     --version           Show version information
 
@@ -725,6 +786,10 @@ parse_arguments() {
                 DRY_RUN=true
                 shift
                 ;;
+            --include-github)
+                INCLUDE_GITHUB_TESTS=true
+                shift
+                ;;
             --version)
                 show_version
                 exit 0
@@ -733,7 +798,7 @@ parse_arguments() {
                 show_help
                 exit 0
                 ;;
-            unit|integration|syntax|lint|all)
+            unit|integration|github|syntax|lint|all)
                 TEST_TYPE="$1"
                 shift
                 ;;
@@ -830,6 +895,11 @@ main() {
                 ((failed_suites++))
             fi
             ;;
+        "github")
+            if ! run_github_integration_tests; then
+                ((failed_suites++))
+            fi
+            ;;
         "all"|*)
             # Führe alle Test-Typen aus
             log_info "Running comprehensive test suite"
@@ -856,6 +926,13 @@ main() {
             fi
             
             if [[ $test_result -eq 0 ]] && ! run_integration_tests; then
+                ((failed_suites++))
+                if [[ "$STOP_ON_FAILURE" == "true" ]]; then
+                    test_result=1
+                fi
+            fi
+            
+            if [[ $test_result -eq 0 ]] && [[ "$INCLUDE_GITHUB_TESTS" == "true" ]] && ! run_github_integration_tests; then
                 ((failed_suites++))
                 if [[ "$STOP_ON_FAILURE" == "true" ]]; then
                     test_result=1
