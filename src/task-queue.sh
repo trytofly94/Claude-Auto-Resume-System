@@ -1553,74 +1553,746 @@ show_queue_status() {
 }
 
 # ===============================================================================
+# CLI OPERATION WRAPPER (für Array-Persistenz)
+# ===============================================================================
+
+# Wrapper für alle CLI-Operationen mit automatischer JSON-Synchronisation
+cli_operation_wrapper() {
+    local operation="$1"
+    shift
+    
+    # Initialize und State aus JSON laden
+    init_task_queue || {
+        log_error "Failed to initialize task queue for CLI operation"
+        return 1
+    }
+    
+    log_debug "CLI Operation: $operation with args: $*"
+    
+    # Operation ausführen
+    "$operation" "$@"
+    local result=$?
+    
+    # State automatisch nach JSON speichern für state-changing operations
+    local state_changing_ops=("add_task_cmd" "remove_task_cmd" "clear_queue_cmd" "github_issue_cmd" "cleanup_cmd")
+    local op_name
+    for op_name in "${state_changing_ops[@]}"; do
+        if [[ "$operation" == "$op_name" ]]; then
+            if [[ $result -eq 0 ]]; then
+                with_queue_lock save_queue_state || {
+                    log_error "Failed to save queue state after $operation"
+                    return 1
+                }
+                log_debug "Queue state saved after $operation"
+            fi
+            break
+        fi
+    done
+    
+    return $result
+}
+
+# CLI Command Implementations (mit verbesserter Fehlerbehandlung)
+add_task_cmd() {
+    if [[ $# -ge 2 ]]; then
+        local task_id
+        task_id=$(with_queue_lock add_task_to_queue "$1" "$2" "${3:-}" "${@:4}")
+        if [[ $? -eq 0 && -n "$task_id" ]]; then
+            echo "Task added: $task_id"
+            return 0
+        else
+            echo "Failed to add task" >&2
+            return 1
+        fi
+    else
+        echo "Usage: add <type> <priority> [task_id] [metadata...]" >&2
+        return 1
+    fi
+}
+
+remove_task_cmd() {
+    if [[ $# -ge 1 ]]; then
+        if with_queue_lock remove_task_from_queue "$1"; then
+            echo "Task removed: $1"
+            return 0
+        else
+            echo "Failed to remove task: $1" >&2
+            return 1
+        fi
+    else
+        echo "Usage: remove <task_id>" >&2
+        return 1
+    fi
+}
+
+clear_queue_cmd() {
+    if with_queue_lock clear_task_queue; then
+        echo "Queue cleared"
+        return 0
+    else
+        echo "Failed to clear queue" >&2
+        return 1
+    fi
+}
+
+github_issue_cmd() {
+    if [[ $# -ge 1 ]]; then
+        local task_id
+        task_id=$(with_queue_lock create_github_issue_task "$1" "${2:-5}" "${3:-}" "${4:-}")
+        if [[ $? -eq 0 && -n "$task_id" ]]; then
+            echo "GitHub issue task added: $task_id"
+            return 0
+        else
+            echo "Failed to add GitHub issue task" >&2
+            return 1
+        fi
+    else
+        echo "Usage: github-issue <number> [priority] [title] [labels]" >&2
+        return 1
+    fi
+}
+
+cleanup_cmd() {
+    with_queue_lock cleanup_old_tasks
+    with_queue_lock cleanup_old_backups
+    echo "Cleanup completed"
+    return 0
+}
+
+# Status-only operations (no state changes, load-only)
+status_cmd() {
+    show_queue_status
+}
+
+list_tasks_cmd() {
+    list_queue_tasks "${1:-all}" "${2:-priority}"
+}
+
+stats_cmd() {
+    get_queue_statistics
+}
+
+# ===============================================================================
+# ENHANCED STATUS DASHBOARD
+# ===============================================================================
+
+# Erweiterte Status-Anzeige mit Farben und detaillierteren Informationen
+show_enhanced_status() {
+    local use_colors="${1:-true}"
+    local output_format="${2:-text}" # text, json, compact
+    
+    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+        if [[ "$output_format" == "json" ]]; then
+            echo '{"status": "disabled", "message": "Task Queue is disabled"}'
+        else
+            echo "Task Queue: DISABLED"
+        fi
+        return 0
+    fi
+    
+    # Color definitions
+    local RED='' GREEN='' YELLOW='' BLUE='' CYAN='' RESET=''
+    if [[ "$use_colors" == "true" ]] && [[ -t 1 ]]; then
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        YELLOW='\033[0;33m'
+        BLUE='\033[0;34m'
+        CYAN='\033[0;36m'
+        RESET='\033[0m'
+    fi
+    
+    # Gather statistics
+    local total_tasks=0 pending_tasks=0 active_tasks=0 completed_tasks=0 failed_tasks=0
+    local task_id
+    
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        for task_id in "${!TASK_STATES[@]}"; do
+            case "${TASK_STATES[$task_id]}" in
+                "$TASK_STATE_PENDING") ((pending_tasks++)) ;;
+                "$TASK_STATE_IN_PROGRESS") ((active_tasks++)) ;;
+                "$TASK_STATE_COMPLETED") ((completed_tasks++)) ;;
+                "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") ((failed_tasks++)) ;;
+            esac
+            ((total_tasks++))
+        done
+    fi
+    
+    if [[ "$output_format" == "json" ]]; then
+        cat <<EOF
+{
+  "status": "enabled",
+  "queue_directory": "$PROJECT_ROOT/$TASK_QUEUE_DIR",
+  "configuration": {
+    "max_queue_size": $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "null" || echo $TASK_QUEUE_MAX_SIZE),
+    "default_timeout": $TASK_DEFAULT_TIMEOUT,
+    "max_retries": $TASK_MAX_RETRIES,
+    "auto_cleanup_days": $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo $TASK_AUTO_CLEANUP_DAYS || echo "null")
+  },
+  "statistics": {
+    "total_tasks": $total_tasks,
+    "pending_tasks": $pending_tasks,
+    "active_tasks": $active_tasks,
+    "completed_tasks": $completed_tasks,
+    "failed_tasks": $failed_tasks
+  },
+  "health_status": "$(get_queue_health_status)"
+}
+EOF
+        return 0
+    fi
+    
+    if [[ "$output_format" == "compact" ]]; then
+        printf "Queue: %d total (%s%d pending%s, %s%d active%s, %s%d completed%s, %s%d failed%s)\n" \
+            $total_tasks \
+            "$YELLOW" $pending_tasks "$RESET" \
+            "$BLUE" $active_tasks "$RESET" \
+            "$GREEN" $completed_tasks "$RESET" \
+            "$RED" $failed_tasks "$RESET"
+        return 0
+    fi
+    
+    # Default detailed text output
+    echo -e "${CYAN}=== Enhanced Task Queue Status ===${RESET}"
+    echo "Queue Directory: $PROJECT_ROOT/$TASK_QUEUE_DIR"
+    echo "Max Queue Size: $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "unlimited" || echo $TASK_QUEUE_MAX_SIZE)"
+    echo "Default Timeout: ${TASK_DEFAULT_TIMEOUT}s"
+    echo "Max Retries: $TASK_MAX_RETRIES"
+    echo "Auto Cleanup: $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo "${TASK_AUTO_CLEANUP_DAYS} days" || echo "disabled")"
+    echo ""
+    
+    echo -e "${CYAN}=== Task Statistics ===${RESET}"
+    printf "Total Tasks:     %d\n" $total_tasks
+    printf "${YELLOW}Pending:         %d${RESET}\n" $pending_tasks
+    printf "${BLUE}Active:          %d${RESET}\n" $active_tasks
+    printf "${GREEN}Completed:       %d${RESET}\n" $completed_tasks
+    printf "${RED}Failed/Timeout:  %d${RESET}\n" $failed_tasks
+    echo ""
+    
+    # Health status
+    local health_status
+    health_status=$(get_queue_health_status)
+    case "$health_status" in
+        "healthy")
+            echo -e "Health Status: ${GREEN}HEALTHY${RESET}"
+            ;;
+        "warning")
+            echo -e "Health Status: ${YELLOW}WARNING${RESET}"
+            ;;
+        "critical")
+            echo -e "Health Status: ${RED}CRITICAL${RESET}"
+            ;;
+        *)
+            echo -e "Health Status: ${YELLOW}UNKNOWN${RESET}"
+            ;;
+    esac
+    echo ""
+    
+    # Recent activity (last 5 tasks)
+    if [[ $total_tasks -gt 0 ]]; then
+        echo -e "${CYAN}=== Recent Tasks (Last 5) ===${RESET}"
+        list_queue_tasks "all" "created" "5"
+    fi
+}
+
+# Bestimme Queue Health Status
+get_queue_health_status() {
+    local total_tasks=0 failed_tasks=0 active_tasks=0
+    local task_id
+    
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        for task_id in "${!TASK_STATES[@]}"; do
+            case "${TASK_STATES[$task_id]}" in
+                "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") ((failed_tasks++)) ;;
+                "$TASK_STATE_IN_PROGRESS") ((active_tasks++)) ;;
+            esac
+            ((total_tasks++))
+        done
+    fi
+    
+    # Health logic
+    if [[ $total_tasks -eq 0 ]]; then
+        echo "healthy"
+    elif [[ $failed_tasks -gt 0 ]] && [[ $((failed_tasks * 100 / total_tasks)) -gt 20 ]]; then
+        echo "critical"
+    elif [[ $active_tasks -gt 5 ]] || [[ $failed_tasks -gt 0 ]]; then
+        echo "warning"
+    else
+        echo "healthy"
+    fi
+}
+
+# ===============================================================================
+# INTERACTIVE MODE
+# ===============================================================================
+
+# Interactive Mode mit Real-time Queue Management
+start_interactive_mode() {
+    echo "=== Task Queue Interactive Mode ==="
+    echo "Type 'help' for commands, 'quit' to exit"
+    echo ""
+    
+    # Set up readline if available
+    if command -v read >/dev/null 2>&1; then
+        local readline_available=true
+    else
+        local readline_available=false
+    fi
+    
+    while true; do
+        # Load current state for fresh status
+        load_queue_state >/dev/null 2>&1 || true
+        
+        # Show current status in prompt
+        local pending_count=0 active_count=0 total_count=0
+        if declare -p TASK_STATES >/dev/null 2>&1; then
+            local task_id
+            for task_id in "${!TASK_STATES[@]}"; do
+                case "${TASK_STATES[$task_id]}" in
+                    "$TASK_STATE_PENDING") ((pending_count++)) ;;
+                    "$TASK_STATE_IN_PROGRESS") ((active_count++)) ;;
+                esac
+                ((total_count++))
+            done
+        fi
+        
+        # Color-coded prompt
+        if [[ -t 1 ]]; then
+            printf "\n\033[0;36m[%d total, \033[0;33m%d pending\033[0;36m, \033[0;34m%d active\033[0;36m]\033[0m > " \
+                "$total_count" "$pending_count" "$active_count"
+        else
+            printf "\n[%d total, %d pending, %d active] > " "$total_count" "$pending_count" "$active_count"
+        fi
+        
+        # Read command
+        local command args
+        if [[ "$readline_available" == "true" ]]; then
+            read -r -e command args
+        else
+            read -r command args
+        fi
+        
+        # Skip empty commands
+        [[ -z "$command" ]] && continue
+        
+        # Process command
+        case "$command" in
+            "help"|"h"|"?")
+                show_interactive_help
+                ;;
+            "status"|"s")
+                show_enhanced_status "true" "compact"
+                ;;
+            "list"|"l")
+                list_queue_tasks ${args:-all} priority
+                ;;
+            "add"|"a")
+                if [[ -n "$args" ]]; then
+                    # Parse args for add command
+                    local add_args=($args)
+                    if [[ ${#add_args[@]} -ge 2 ]]; then
+                        cli_operation_wrapper add_task_cmd "${add_args[@]}"
+                    else
+                        echo "Usage: add <type> <priority> [task_id] [metadata...]"
+                    fi
+                else
+                    echo "Usage: add <type> <priority> [task_id] [metadata...]"
+                fi
+                ;;
+            "remove"|"rm"|"r")
+                if [[ -n "$args" ]]; then
+                    cli_operation_wrapper remove_task_cmd $args
+                else
+                    echo "Usage: remove <task_id>"
+                fi
+                ;;
+            "clear")
+                echo "Are you sure you want to clear all tasks? (y/N)"
+                read -r confirmation
+                if [[ "$confirmation" =~ ^[Yy]$ ]]; then
+                    cli_operation_wrapper clear_queue_cmd
+                else
+                    echo "Clear cancelled"
+                fi
+                ;;
+            "github"|"gh"|"g")
+                if [[ -n "$args" ]]; then
+                    local gh_args=($args)
+                    cli_operation_wrapper github_issue_cmd "${gh_args[@]}"
+                else
+                    echo "Usage: github <issue_number> [priority] [title] [labels]"
+                fi
+                ;;
+            "stats"|"statistics")
+                get_queue_statistics
+                ;;
+            "refresh"|"reload")
+                echo "Reloading queue state..."
+                load_queue_state && echo "Queue reloaded successfully" || echo "Failed to reload queue"
+                ;;
+            "cleanup")
+                echo "Running cleanup..."
+                cli_operation_wrapper cleanup_cmd
+                ;;
+            "quit"|"q"|"exit")
+                echo "Exiting interactive mode..."
+                break
+                ;;
+            "next"|"n")
+                get_next_task
+                ;;
+            "config"|"cfg")
+                show_current_config
+                ;;
+            *)
+                echo "Unknown command: '$command'. Type 'help' for available commands."
+                ;;
+        esac
+    done
+}
+
+# Hilfe für Interactive Mode
+show_interactive_help() {
+    cat <<EOF
+=== Interactive Mode Commands ===
+
+Queue Management:
+  list, l [status] [sort]     List tasks (status: all|pending|active|completed|failed)
+  add, a <type> <priority>    Add new task to queue
+  remove, rm, r <task_id>     Remove task from queue
+  clear                       Clear all tasks (with confirmation)
+  
+GitHub Integration:
+  github, gh, g <number>      Add GitHub issue task
+  
+Queue Operations:
+  status, s                   Show compact queue status
+  stats, statistics           Show detailed queue statistics
+  next, n                     Get next task for processing
+  cleanup                     Clean up old tasks and backups
+  
+System:
+  config, cfg                 Show current configuration
+  refresh, reload             Reload queue state from disk
+  help, h, ?                  Show this help
+  quit, q, exit               Exit interactive mode
+
+Examples:
+  add custom 1 "" description "Fix login bug" command "fix-login.sh"
+  github 123 2
+  remove task-1234567890-0001
+  list pending priority
+
+Tips:
+- Tab completion supported where available
+- Command history with arrow keys
+- Status shown in prompt: [total, pending, active]
+EOF
+}
+
+# ===============================================================================
+# BATCH OPERATIONS
+# ===============================================================================
+
+# Batch-Operation für mehrere Tasks
+batch_operation_cmd() {
+    local operation="${1:-add}"
+    local source_type="${2:-stdin}"
+    local source_path="${3:-}"
+    
+    case "$operation" in
+        "add")
+            batch_add_tasks "$source_type" "$source_path" "${@:4}"
+            ;;
+        "remove")
+            batch_remove_tasks "$source_type" "$source_path"
+            ;;
+        *)
+            echo "Usage: batch <add|remove> <stdin|file> [path] [additional_args...]" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Batch Task Addition
+batch_add_tasks() {
+    local source_type="$1"
+    local source_path="$2"
+    local task_type="${3:-custom}"
+    local default_priority="${4:-5}"
+    
+    local input_source
+    local temp_file=""
+    local line_count=0
+    local success_count=0
+    local error_count=0
+    
+    # Determine input source
+    case "$source_type" in
+        "stdin")
+            if [[ -t 0 ]]; then
+                echo "Reading from stdin (press Ctrl+D when done):"
+            fi
+            input_source="/dev/stdin"
+            ;;
+        "file")
+            if [[ -z "$source_path" ]] || [[ ! -f "$source_path" ]]; then
+                echo "Error: File path required and must exist for file source" >&2
+                return 1
+            fi
+            input_source="$source_path"
+            ;;
+        *)
+            echo "Error: Invalid source type. Use 'stdin' or 'file'" >&2
+            return 1
+            ;;
+    esac
+    
+    echo "Starting batch task addition..."
+    echo "Task Type: $task_type, Default Priority: $default_priority"
+    echo ""
+    
+    # Process each line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        ((line_count++))
+        
+        # Parse line - support different formats
+        local parsed_task_type="$task_type"
+        local parsed_priority="$default_priority"
+        local parsed_description=""
+        local task_id=""
+        
+        if [[ "$line" =~ ^[0-9]+$ ]]; then
+            # GitHub issue number only
+            parsed_task_type="$TASK_TYPE_GITHUB_ISSUE"
+            parsed_description="Issue #$line"
+            task_id=$(with_queue_lock create_github_issue_task "$line" "$parsed_priority" "" "")
+        elif [[ "$line" =~ ^[0-9]+,(.+)$ ]]; then
+            # GitHub issue with description: "123,Fix login bug"
+            local issue_num="${line%%,*}"
+            parsed_description="${line#*,}"
+            parsed_task_type="$TASK_TYPE_GITHUB_ISSUE"
+            task_id=$(with_queue_lock create_github_issue_task "$issue_num" "$parsed_priority" "$parsed_description" "")
+        elif [[ "$line" =~ ^([^,]+),([0-9]+),(.+)$ ]]; then
+            # Full format: "type,priority,description"
+            parsed_task_type="${BASH_REMATCH[1]}"
+            parsed_priority="${BASH_REMATCH[2]}"
+            parsed_description="${BASH_REMATCH[3]}"
+            task_id=$(with_queue_lock add_task_to_queue "$parsed_task_type" "$parsed_priority" "" "description" "$parsed_description")
+        else
+            # Simple description only
+            parsed_description="$line"
+            task_id=$(with_queue_lock add_task_to_queue "$parsed_task_type" "$parsed_priority" "" "description" "$parsed_description")
+        fi
+        
+        if [[ $? -eq 0 && -n "$task_id" ]]; then
+            ((success_count++))
+            echo "✓ Added task $success_count/$line_count: $task_id ($parsed_description)"
+        else
+            ((error_count++))
+            echo "✗ Failed to add task $line_count: $line" >&2
+        fi
+        
+        # Progress indicator for large batches
+        if [[ $((line_count % 10)) -eq 0 ]]; then
+            echo "   Processed $line_count lines..."
+        fi
+    done < "$input_source"
+    
+    # Save state after batch operation
+    if [[ $success_count -gt 0 ]]; then
+        with_queue_lock save_queue_state
+    fi
+    
+    # Summary
+    echo ""
+    echo "=== Batch Operation Complete ==="
+    echo "Lines processed: $line_count"
+    echo "Tasks added successfully: $success_count"
+    echo "Errors: $error_count"
+    
+    if [[ $error_count -gt 0 ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Batch Task Removal
+batch_remove_tasks() {
+    local source_type="$1"
+    local source_path="$2"
+    
+    local input_source
+    local line_count=0
+    local success_count=0
+    local error_count=0
+    
+    # Determine input source
+    case "$source_type" in
+        "stdin")
+            if [[ -t 0 ]]; then
+                echo "Reading task IDs from stdin (press Ctrl+D when done):"
+            fi
+            input_source="/dev/stdin"
+            ;;
+        "file")
+            if [[ -z "$source_path" ]] || [[ ! -f "$source_path" ]]; then
+                echo "Error: File path required and must exist for file source" >&2
+                return 1
+            fi
+            input_source="$source_path"
+            ;;
+        *)
+            echo "Error: Invalid source type. Use 'stdin' or 'file'" >&2
+            return 1
+            ;;
+    esac
+    
+    echo "Starting batch task removal..."
+    echo ""
+    
+    # Process each line
+    while IFS= read -r task_id || [[ -n "$task_id" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$task_id" || "$task_id" =~ ^[[:space:]]*# ]] && continue
+        
+        # Clean whitespace
+        task_id=$(echo "$task_id" | tr -d ' \t\r\n')
+        
+        ((line_count++))
+        
+        if with_queue_lock remove_task_from_queue "$task_id"; then
+            ((success_count++))
+            echo "✓ Removed task $success_count/$line_count: $task_id"
+        else
+            ((error_count++))
+            echo "✗ Failed to remove task $line_count: $task_id" >&2
+        fi
+    done < "$input_source"
+    
+    # Save state after batch operation
+    if [[ $success_count -gt 0 ]]; then
+        with_queue_lock save_queue_state
+    fi
+    
+    # Summary
+    echo ""
+    echo "=== Batch Operation Complete ==="
+    echo "Task IDs processed: $line_count"
+    echo "Tasks removed successfully: $success_count"
+    echo "Errors: $error_count"
+    
+    if [[ $error_count -gt 0 ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
+# CONFIGURATION MANAGEMENT CLI
+# ===============================================================================
+
+# Zeige aktuelle Konfiguration
+show_current_config() {
+    echo "=== Current Task Queue Configuration ==="
+    cat <<EOF
+Core Settings:
+  TASK_QUEUE_ENABLED         = $TASK_QUEUE_ENABLED
+  TASK_QUEUE_DIR             = $TASK_QUEUE_DIR
+  TASK_QUEUE_MAX_SIZE        = $TASK_QUEUE_MAX_SIZE $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "(unlimited)")
+  
+Task Settings:
+  TASK_DEFAULT_TIMEOUT       = $TASK_DEFAULT_TIMEOUT seconds
+  TASK_MAX_RETRIES           = $TASK_MAX_RETRIES
+  TASK_RETRY_DELAY           = $TASK_RETRY_DELAY seconds
+  TASK_COMPLETION_PATTERN    = $TASK_COMPLETION_PATTERN
+  
+Cleanup Settings:
+  TASK_AUTO_CLEANUP_DAYS     = $TASK_AUTO_CLEANUP_DAYS $([ $TASK_AUTO_CLEANUP_DAYS -eq 0 ] && echo "(disabled)" || echo "days")
+  TASK_BACKUP_RETENTION_DAYS = $TASK_BACKUP_RETENTION_DAYS days
+  
+System Settings:
+  QUEUE_LOCK_TIMEOUT         = $QUEUE_LOCK_TIMEOUT seconds
+  
+Paths:
+  PROJECT_ROOT               = $PROJECT_ROOT
+  SCRIPT_DIR                 = $SCRIPT_DIR
+  Queue Directory            = $PROJECT_ROOT/$TASK_QUEUE_DIR
+EOF
+}
+
+# ===============================================================================
 # MAIN ENTRY POINT (für Testing und CLI)
 # ===============================================================================
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    echo "=== Task Queue Core Module ==="
-    
-    # Initialize
-    init_task_queue || {
-        echo "Failed to initialize task queue"
-        exit 1
-    }
-    
-    # Handle command line arguments
+    # Handle command line arguments with improved wrapper
     case "${1:-status}" in
         "status")
-            show_queue_status
+            cli_operation_wrapper status_cmd
+            ;;
+        "enhanced-status"|"estatus")
+            # Enhanced status with color support and optional JSON output
+            colors="true"
+            format="text"
+            shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --no-color|--no-colors) colors="false" ;;
+                    --json) format="json" ;;
+                    --compact) format="compact" ;;
+                    *) break ;;
+                esac
+                shift
+            done
+            init_task_queue && show_enhanced_status "$colors" "$format"
             ;;
         "list")
-            list_queue_tasks "${2:-all}" "${3:-priority}"
+            cli_operation_wrapper list_tasks_cmd "${2:-all}" "${3:-priority}"
             ;;
         "add")
-            if [[ $# -ge 3 ]]; then
-                task_id=$(with_queue_lock add_task_to_queue "$2" "$3" "${4:-}" "${@:5}")
-                if [[ $? -eq 0 ]]; then
-                    echo "Task added: $task_id"
-                    with_queue_lock save_queue_state
-                fi
-            else
-                echo "Usage: $0 add <type> <priority> [task_id] [metadata...]"
-                exit 1
-            fi
+            shift
+            cli_operation_wrapper add_task_cmd "$@"
             ;;
         "remove")
-            if [[ $# -ge 2 ]]; then
-                if with_queue_lock remove_task_from_queue "$2"; then
-                    echo "Task removed: $2"
-                    with_queue_lock save_queue_state
-                fi
-            else
-                echo "Usage: $0 remove <task_id>"
-                exit 1
-            fi
+            shift
+            cli_operation_wrapper remove_task_cmd "$@"
             ;;
         "clear")
-            if with_queue_lock clear_task_queue; then
-                echo "Queue cleared"
-                with_queue_lock save_queue_state
-            fi
+            cli_operation_wrapper clear_queue_cmd
             ;;
         "stats")
-            get_queue_statistics
+            cli_operation_wrapper stats_cmd
             ;;
         "cleanup")
-            with_queue_lock cleanup_old_tasks
-            with_queue_lock cleanup_old_backups
-            with_queue_lock save_queue_state
+            cli_operation_wrapper cleanup_cmd
             ;;
         "github-issue")
-            if [[ $# -ge 2 ]]; then
-                task_id=$(with_queue_lock create_github_issue_task "$2" "${3:-5}" "${4:-}" "${5:-}")
-                if [[ $? -eq 0 ]]; then
-                    echo "GitHub issue task added: $task_id"
-                    with_queue_lock save_queue_state
-                fi
+            shift
+            cli_operation_wrapper github_issue_cmd "$@"
+            ;;
+        "interactive"|"i")
+            # Interactive mode
+            init_task_queue && start_interactive_mode
+            ;;
+        "config")
+            if [[ $# -eq 1 ]]; then
+                init_task_queue && show_current_config
             else
-                echo "Usage: $0 github-issue <number> [priority] [title] [labels]"
+                echo "Configuration management not yet implemented"
                 exit 1
             fi
+            ;;
+        "next")
+            init_task_queue && get_next_task
+            ;;
+        "batch")
+            shift
+            cli_operation_wrapper batch_operation_cmd "$@"
             ;;
         "test")
             echo "Running basic tests..."
@@ -1670,23 +2342,55 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             cat <<EOF
 Usage: $0 <command> [arguments]
 
-Commands:
-  status                              Show queue status and statistics
-  list [status] [sort]                List tasks (status: all|pending|active|completed|failed|timeout, sort: priority|created)
-  add <type> <priority> [id] [meta]   Add task to queue
+Core Commands:
+  status                              Show basic queue status
+  enhanced-status, estatus            Show enhanced status with colors (--json, --compact, --no-color)
+  list [status] [sort]                List tasks (status: all|pending|active|completed|failed|timeout)
+  add <type> <priority> [id] [meta]   Add single task to queue
   remove <task_id>                    Remove task from queue
   clear                               Clear entire queue
-  stats                               Show queue statistics
+  
+Queue Management:
+  interactive, i                      Start interactive mode for real-time management
+  next                                Get next task for processing
+  stats                               Show detailed queue statistics
   cleanup                             Clean up old tasks and backups
+  config                              Show current configuration
+  
+Batch Operations:
+  batch add <stdin|file> [path] [type] [priority]
+                                      Add multiple tasks from stdin or file
+  batch remove <stdin|file> [path]   Remove multiple tasks by ID
+  
+GitHub Integration:
   github-issue <number> [priority]    Add GitHub issue task
+  
+Development:
   test                                Run basic functionality tests
 
 Examples:
+  # Basic usage
   $0 status
+  $0 enhanced-status --json
   $0 list pending priority
   $0 add custom 1 "" description "Fix bug" command "/dev fix-bug"
+  
+  # Interactive mode
+  $0 interactive
+  
+  # Batch operations
+  echo -e "41\n42\n43" | $0 batch add stdin github_issue 2
+  $0 batch add file tasks.txt custom 3
+  
+  # GitHub integration
   $0 github-issue 123 1
-  $0 remove task-1234567890-0001
+  
+Enhanced Features:
+  - Color-coded status displays
+  - Interactive mode with real-time updates
+  - Batch operations for bulk task management
+  - JSON output support for scripting
+  - Comprehensive help system
 EOF
             ;;
     esac
