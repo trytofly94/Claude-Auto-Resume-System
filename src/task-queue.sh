@@ -843,6 +843,268 @@ robust_lock_wrapper() {
 }
 
 # ===============================================================================
+# FINE-GRAINED LOCKING SYSTEM (Multiple Lock Types)
+# ===============================================================================
+
+# Define lock types for different operations
+declare -A LOCK_TYPES=(
+    ["read"]="queue/.read.lock.d"           # Read-only operations (may not be needed)
+    ["write"]="queue/.write.lock.d"         # Single task modifications  
+    ["batch"]="queue/.batch.lock.d"         # Batch operations
+    ["config"]="queue/.config.lock.d"       # Configuration changes
+    ["maintenance"]="queue/.maintenance.lock.d" # Cleanup/maintenance operations
+)
+
+# Get appropriate lock type for an operation
+get_operation_lock_type() {
+    local operation="$1"
+    case "$operation" in
+        "add_task_cmd"|"remove_task_cmd"|"update_status"|"update_priority"|"github_issue_cmd")   
+            echo "write" ;;
+        "batch_add"|"batch_remove"|"batch_operation_cmd"|"import_queue_data")                
+            echo "batch" ;;
+        "clear_queue_cmd"|"cleanup_cmd")                                  
+            echo "maintenance" ;;
+        "config_set"|"config_reset"|"show_current_config")                        
+            echo "config" ;;
+        *)                                                  
+            echo "write" ;;  # Default to write lock
+    esac
+}
+
+# Acquire typed lock for specific operation
+acquire_typed_lock() {
+    local operation="$1"
+    local lock_type
+    lock_type=$(get_operation_lock_type "$operation")
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
+    
+    log_debug "Acquiring $lock_type lock for operation: $operation"
+    
+    # Ensure lock directory parent exists
+    mkdir -p "$(dirname "$lock_dir")" 2>/dev/null || {
+        log_error "Failed to create lock directory parent: $(dirname "$lock_dir")"
+        return 1
+    }
+    
+    # Use similar logic to acquire_queue_lock_atomic but with typed locks
+    local attempts=0
+    local max_attempts=$([[ "${CLI_MODE:-false}" == "true" ]] && echo 5 || echo "$QUEUE_LOCK_TIMEOUT")
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            # Successfully acquired typed lock - write metadata
+            echo $$ > "$lock_dir/pid" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write PID to typed lock directory"
+                return 1
+            }
+            
+            date -Iseconds > "$lock_dir/timestamp" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write timestamp to typed lock directory"
+                return 1
+            }
+            
+            echo "$HOSTNAME" > "$lock_dir/hostname" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write hostname to typed lock directory"
+                return 1
+            }
+            
+            # Write additional metadata
+            echo "$USER" > "$lock_dir/user" 2>/dev/null || true
+            echo "$operation" > "$lock_dir/operation" 2>/dev/null || true
+            echo "$lock_type" > "$lock_dir/lock_type" 2>/dev/null || true
+            echo "${CLI_MODE:-false}" > "$lock_dir/cli_mode" 2>/dev/null || true
+            
+            log_debug "Acquired $lock_type lock (pid: $$, attempt: $attempts, operation: $operation)"
+            return 0
+        fi
+        
+        # Stale lock cleanup before retry
+        cleanup_stale_lock "$lock_dir"
+        
+        # Exponential backoff with jitter (same as atomic lock)
+        local base_delay=0.1
+        local delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
+        local jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
+        local wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
+        
+        # Cap wait time for CLI operations
+        if [[ "${CLI_MODE:-false}" == "true" ]]; then
+            wait_time=$(echo "if ($wait_time > 1.0) 1.0 else $wait_time" | bc -l 2>/dev/null || echo "1")
+        fi
+        
+        log_debug "$lock_type lock attempt $((attempts + 1))/$max_attempts failed, waiting ${wait_time}s"
+        sleep "$wait_time" 2>/dev/null || sleep 1
+        
+        ((attempts++))
+    done
+    
+    log_error "Failed to acquire $lock_type lock after $max_attempts attempts: $operation"
+    return 1
+}
+
+# Release typed lock
+release_typed_lock() {
+    local operation="$1"
+    local lock_type
+    lock_type=$(get_operation_lock_type "$operation")
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
+    
+    if [[ -d "$lock_dir" ]]; then
+        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+        
+        if [[ "$lock_pid" == "$$" ]]; then
+            rm -rf "$lock_dir" 2>/dev/null && {
+                log_debug "Released $lock_type lock (pid: $$, operation: $operation)"
+                return 0
+            } || {
+                log_warn "Failed to remove $lock_type lock directory"
+                return 1
+            }
+        else
+            log_warn "Attempted to release $lock_type lock not owned by this process (lock pid: $lock_pid, current pid: $$)"
+            return 1
+        fi
+    else
+        log_debug "No $lock_type lock directory to release"
+        return 0
+    fi
+}
+
+# Fine-grained lock wrapper for operations
+with_typed_lock() {
+    local operation="$1"
+    shift
+    local result=0
+    local start_time=$(date +%s.%3N 2>/dev/null || date +%s)
+    
+    log_debug "Starting typed locked operation: $operation"
+    
+    if acquire_typed_lock "$operation"; then
+        local acquire_time=$(date +%s.%3N 2>/dev/null || date +%s)
+        local wait_time=$(echo "$acquire_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        # Execute operation with typed lock held
+        "$operation" "$@"
+        result=$?
+        
+        # Always release typed lock
+        release_typed_lock "$operation"
+        
+        local end_time=$(date +%s.%3N 2>/dev/null || date +%s)
+        local hold_time=$(echo "$end_time - $acquire_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_debug "Completed typed locked operation: $operation (wait: ${wait_time}s, hold: ${hold_time}s, exit: $result)"
+        return $result
+    else
+        local fail_time=$(date +%s.%3N 2>/dev/null || date +%s)
+        local wait_time=$(echo "$fail_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_error "Cannot execute operation without typed lock: $operation (waited: ${wait_time}s)"
+        return 1
+    fi
+}
+
+# Check for lock conflicts (different lock types that might conflict)
+check_lock_conflicts() {
+    local requested_type="$1"
+    local conflicting_types=()
+    
+    case "$requested_type" in
+        "maintenance")
+            # Maintenance conflicts with everything
+            conflicting_types=("write" "batch" "config" "read")
+            ;;
+        "batch")
+            # Batch operations conflict with write and maintenance
+            conflicting_types=("write" "maintenance")
+            ;;
+        "write")
+            # Write operations conflict with batch and maintenance
+            conflicting_types=("batch" "maintenance")
+            ;;
+        "config")
+            # Config changes conflict with maintenance
+            conflicting_types=("maintenance")
+            ;;
+        *)
+            # Default: no conflicts (read operations)
+            conflicting_types=()
+            ;;
+    esac
+    
+    # Check if any conflicting locks exist
+    for conflict_type in "${conflicting_types[@]}"; do
+        local conflict_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$conflict_type]}"
+        if [[ -d "$conflict_dir" ]]; then
+            # Validate that the conflicting lock is still active
+            if validate_lock_integrity "$conflict_dir"; then
+                local conflict_pid=$(cat "$conflict_dir/pid" 2>/dev/null || echo "")
+                if [[ -n "$conflict_pid" ]] && kill -0 "$conflict_pid" 2>/dev/null; then
+                    log_debug "Lock conflict detected: $requested_type conflicts with active $conflict_type lock (PID: $conflict_pid)"
+                    return 1  # Conflict exists
+                fi
+            fi
+        fi
+    done
+    
+    return 0  # No conflicts
+}
+
+# Show all active typed locks
+show_typed_locks() {
+    local queue_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/queue"
+    local found_locks=false
+    
+    echo "=== Active Typed Locks ==="
+    
+    for lock_type in "${!LOCK_TYPES[@]}"; do
+        local lock_dir="$queue_dir/${LOCK_TYPES[$lock_type]#queue/}"
+        if [[ -d "$lock_dir" ]]; then
+            found_locks=true
+            echo "[$lock_type]"
+            get_lock_info "$lock_dir" | sed 's/^/  /'
+            echo
+        fi
+    done
+    
+    if [[ "$found_locks" == "false" ]]; then
+        echo "No active typed locks found"
+    fi
+}
+
+# Clean up all typed locks
+cleanup_all_typed_locks() {
+    local queue_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/queue"
+    local cleaned_count=0
+    local total_count=0
+    
+    log_info "Scanning for stale typed locks in: $queue_dir"
+    
+    for lock_type in "${!LOCK_TYPES[@]}"; do
+        local lock_dir="$queue_dir/${LOCK_TYPES[$lock_type]#queue/}"
+        if [[ -d "$lock_dir" ]]; then
+            ((total_count++))
+            if cleanup_stale_lock "$lock_dir"; then
+                ((cleaned_count++))
+                log_debug "Cleaned stale $lock_type lock"
+            fi
+        fi
+    done
+    
+    if [[ $total_count -gt 0 ]]; then
+        log_info "Stale typed lock cleanup: $cleaned_count/$total_count locks cleaned"
+    else
+        log_debug "No typed lock directories found for cleanup"
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
 # JSON-PERSISTENZ-LAYER
 # ===============================================================================
 
