@@ -328,6 +328,133 @@ with_queue_lock() {
 }
 
 # ===============================================================================
+# SMART OPERATION ROUTING (Lock-Free Read Operations)
+# ===============================================================================
+
+# Check if an operation is read-only (doesn't modify state)
+is_read_only_operation() {
+    local op="$1"
+    case "$op" in
+        "list"|"status"|"enhanced-status"|"filter"|"find"|"export"|"config"|"stats"|"statistics"|"next"|"monitor")
+            return 0  # Read-only operations
+            ;;
+        "show_queue_status"|"show_enhanced_status"|"list_queue_tasks"|"get_queue_statistics"|"get_next_task"|"advanced_list_tasks"|"export_queue_data"|"monitor_queue_cmd"|"show_current_config")
+            return 0  # Internal read-only functions
+            ;;
+        *)
+            return 1  # State-changing operations
+            ;;
+    esac
+}
+
+# Direct JSON operations for read-only commands (no locking required)
+direct_json_operation() {
+    local operation="$1"
+    shift
+    
+    log_debug "Direct JSON operation: $operation"
+    
+    # Ensure directories exist
+    ensure_queue_directories || return 1
+    
+    # Initialize arrays if needed (but don't force full init)
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA  
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays for direct JSON operation"
+    fi
+    
+    # Load state directly without locking
+    load_queue_state || {
+        log_error "Failed to load queue state for read operation"
+        return 1
+    }
+    
+    # Execute the read-only operation
+    "$operation" "$@"
+}
+
+# Direct JSON-based task listing (optimized for read operations)
+direct_json_list_tasks() {
+    local filter="${1:-all}"
+    local sort_order="${2:-priority}"
+    local queue_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+    
+    if [[ ! -f "$queue_file" ]]; then
+        echo "No tasks in queue"
+        return 0
+    fi
+    
+    # Use jq for efficient JSON filtering and sorting
+    case "$filter" in
+        "pending")
+            jq -r '.tasks[] | select(.status == "pending") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        "active")
+            jq -r '.tasks[] | select(.status == "active") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        "completed")
+            jq -r '.tasks[] | select(.status == "completed") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        "failed")
+            jq -r '.tasks[] | select(.status == "failed") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        *)
+            jq -r '.tasks[] | [.id, .type, .status, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k4 -n
+            ;;
+    esac
+}
+
+# Direct JSON status retrieval
+direct_json_get_status() {
+    local queue_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+    
+    if [[ ! -f "$queue_file" ]]; then
+        echo '{"status": "empty", "total_tasks": 0, "pending": 0, "active": 0, "completed": 0, "failed": 0}'
+        return 0
+    fi
+    
+    # Use jq for efficient status calculation
+    jq '{
+        status: (if .tasks | length > 0 then "active" else "empty" end),
+        total_tasks: (.tasks | length),
+        pending: (.tasks | map(select(.status == "pending")) | length),
+        active: (.tasks | map(select(.status == "active")) | length),  
+        completed: (.tasks | map(select(.status == "completed")) | length),
+        failed: (.tasks | map(select(.status == "failed")) | length),
+        last_updated: .metadata.last_updated
+    }' "$queue_file"
+}
+
+# Smart operation wrapper - routes operations based on read-only vs state-changing
+smart_operation_wrapper() {
+    local operation="$1"
+    shift
+    
+    if is_read_only_operation "$operation"; then
+        # Direct JSON access for read-only operations
+        log_debug "Using lock-free path for read-only operation: $operation"
+        direct_json_operation "$operation" "$@"
+    else
+        # Use robust locking for state-changing operations
+        log_debug "Using locked path for state-changing operation: $operation"
+        robust_lock_wrapper "$operation" "$@"
+    fi
+}
+
+# Placeholder for robust_lock_wrapper (will be implemented in Step 2)
+robust_lock_wrapper() {
+    local operation="$1"
+    shift
+    
+    # For now, use the existing with_queue_lock wrapper
+    with_queue_lock "$operation" "$@"
+}
+
+# ===============================================================================
 # JSON-PERSISTENZ-LAYER
 # ===============================================================================
 
