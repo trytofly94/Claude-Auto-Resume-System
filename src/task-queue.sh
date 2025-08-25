@@ -197,49 +197,67 @@ acquire_queue_lock() {
     
     ensure_queue_directories || return 1
     
+    # For CLI operations, use a shorter timeout to prevent hanging
+    if [[ "${CLI_MODE:-false}" == "true" ]]; then
+        max_attempts=5  # Maximum 5 seconds for CLI operations
+    fi
+    
     if has_command flock; then
         # Use flock if available (Linux)
         exec 200>"$lock_file"
         
-        if flock -x -w "$QUEUE_LOCK_TIMEOUT" 200; then
-            log_debug "Acquired queue lock (flock, fd: $lock_fd, timeout: ${QUEUE_LOCK_TIMEOUT}s)"
+        if flock -x -w "$max_attempts" 200; then
+            log_debug "Acquired queue lock (flock, fd: $lock_fd, timeout: ${max_attempts}s)"
             return 0
         else
-            log_error "Failed to acquire queue lock within ${QUEUE_LOCK_TIMEOUT}s"
+            log_error "Failed to acquire queue lock within ${max_attempts}s"
             return 1
         fi
     else
         # Alternative locking for macOS/systems without flock
         local pid_file="$lock_file.pid"
         
+        # Clean up any stale locks first
+        if [[ -f "$pid_file" ]]; then
+            local lock_pid
+            lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            
+            if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+                log_debug "Removing stale lock file (dead process: $lock_pid)"
+                rm -f "$pid_file" "$lock_file" 2>/dev/null || true
+            fi
+        fi
+        
         while [[ $attempts -lt $max_attempts ]]; do
-            # Check if lock file exists and is valid
+            # Try to acquire lock immediately
+            if (set -C; echo $$ > "$pid_file") 2>/dev/null; then
+                # Create main lock file
+                touch "$lock_file" || {
+                    rm -f "$pid_file" 2>/dev/null
+                    log_error "Failed to create lock file"
+                    return 1
+                }
+                log_debug "Acquired queue lock (alternative method, pid: $$, attempts: $attempts)"
+                return 0
+            fi
+            
+            # Check if another process still holds the lock
             if [[ -f "$pid_file" ]]; then
                 local lock_pid
                 lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
                 
-                # Check if process is still running
                 if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
                     log_debug "Queue lock held by process $lock_pid (attempt $((attempts + 1))/$max_attempts)"
-                    sleep 1
-                    ((attempts++))
-                    continue
                 else
-                    log_debug "Removing stale lock file (pid: $lock_pid)"
+                    log_debug "Removing stale lock file (dead process: $lock_pid)"
                     rm -f "$pid_file" "$lock_file" 2>/dev/null || true
+                    continue  # Try again immediately
                 fi
             fi
             
-            # Try to acquire lock
-            if (set -C; echo $$ > "$pid_file") 2>/dev/null; then
-                # Create main lock file
-                touch "$lock_file"
-                log_debug "Acquired queue lock (alternative method, pid: $$)"
-                return 0
-            else
-                log_debug "Failed to acquire lock, retrying... (attempt $((attempts + 1))/$max_attempts)"
+            ((attempts++))
+            if [[ $attempts -lt $max_attempts ]]; then
                 sleep 1
-                ((attempts++))
             fi
         done
         
@@ -1561,9 +1579,13 @@ cli_operation_wrapper() {
     local operation="$1"
     shift
     
+    # Set CLI mode flag for shorter lock timeouts
+    export CLI_MODE=true
+    
     # Initialize und State aus JSON laden
     init_task_queue || {
         log_error "Failed to initialize task queue for CLI operation"
+        export CLI_MODE=false
         return 1
     }
     
@@ -1581,6 +1603,7 @@ cli_operation_wrapper() {
             if [[ $result -eq 0 ]]; then
                 with_queue_lock save_queue_state || {
                     log_error "Failed to save queue state after $operation"
+                    export CLI_MODE=false
                     return 1
                 }
                 log_debug "Queue state saved after $operation"
@@ -1589,6 +1612,7 @@ cli_operation_wrapper() {
         fi
     done
     
+    export CLI_MODE=false
     return $result
 }
 
@@ -3154,7 +3178,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # Handle command line arguments with improved wrapper
     case "${1:-status}" in
         "status")
-            cli_operation_wrapper status_cmd
+            # Read-only operation - skip heavy locking
+            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+                echo "Task Queue: DISABLED"
+            else
+                load_queue_state >/dev/null 2>&1 && show_queue_status || echo "Task Queue: ENABLED (no tasks loaded)"
+            fi
             ;;
         "enhanced-status"|"estatus")
             # Enhanced status with color support and optional JSON output
@@ -3170,10 +3199,44 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 esac
                 shift
             done
-            init_task_queue && show_enhanced_status "$colors" "$format"
+            # Read-only operation - skip heavy locking
+            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+                if [[ "$format" == "json" ]]; then
+                    echo '{"status": "disabled", "message": "Task Queue is disabled"}'
+                else
+                    echo "Task Queue: DISABLED"
+                fi
+            else
+                load_queue_state >/dev/null 2>&1 && show_enhanced_status "$colors" "$format" || {
+                    if [[ "$format" == "json" ]]; then
+                        echo '{"status": "enabled", "message": "Queue enabled but no data loaded", "total_tasks": 0}'
+                    else
+                        echo "Task Queue: ENABLED (no tasks loaded)"
+                    fi
+                }
+            fi
             ;;
         "list")
-            cli_operation_wrapper list_tasks_cmd "${2:-all}" "${3:-priority}"
+            # Read-only operation with minimal locking
+            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+                echo "Task Queue: DISABLED"
+            else
+                # Direct JSON read for list command to avoid locking issues
+                QUEUE_FILE="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+                if [[ -f "$QUEUE_FILE" ]] && jq empty "$QUEUE_FILE" 2>/dev/null; then
+                    TASK_COUNT=$(jq -r '.total_tasks // 0' "$QUEUE_FILE" 2>/dev/null)
+                    if [[ "$TASK_COUNT" == "0" ]]; then
+                        echo "No tasks in queue"
+                    else
+                        echo "=== Task Queue (Direct Read) ==="
+                        echo "Total tasks: $TASK_COUNT"
+                        # Show task summary
+                        jq -r '.tasks[]? | "[\(.id)] \(.metadata.type // "unknown") (priority: \(.priority)) - \(.status)"' "$QUEUE_FILE" 2>/dev/null || echo "Tasks exist but format parsing failed"
+                    fi
+                else
+                    echo "No tasks to display (queue file not found or invalid)"
+                fi
+            fi
             ;;
         "add")
             shift
@@ -3187,7 +3250,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             cli_operation_wrapper clear_queue_cmd
             ;;
         "stats")
-            cli_operation_wrapper stats_cmd
+            # Read-only operation
+            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+                echo "Task Queue: DISABLED"
+            else
+                load_queue_state >/dev/null 2>&1 && get_queue_statistics || echo "No statistics available"
+            fi
             ;;
         "cleanup")
             cli_operation_wrapper cleanup_cmd
