@@ -189,48 +189,230 @@ validate_task_data() {
 # ===============================================================================
 
 # Comprehensive stale lock detection and cleanup
+# ===============================================================================
+# ENHANCED STALE LOCK DETECTION AND CLEANUP (Directory-Based System)
+# ===============================================================================
+
+# Enhanced stale lock cleanup with better timeout handling and graceful termination
 cleanup_stale_lock() {
     local lock_dir="$1"
     local pid_file="$lock_dir/pid"
     local timestamp_file="$lock_dir/timestamp"
     local hostname_file="$lock_dir/hostname"
+    local operation_file="$lock_dir/operation"
+    local user_file="$lock_dir/user"
     
     [[ -d "$lock_dir" ]] || return 0
     
-    # Multi-criteria validation
+    # Enhanced multi-criteria validation
     local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
     local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
     local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "")
+    local lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
+    local lock_user=$(cat "$user_file" 2>/dev/null || echo "$USER")
     
     local should_cleanup=false
+    local cleanup_reason=""
     
-    # Check 1: Process exists and is running
-    if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
-        log_debug "Lock process $lock_pid is dead - cleaning up"
+    # Check 1: Invalid or missing PID
+    if [[ -z "$lock_pid" ]]; then
+        log_debug "Lock has empty PID - cleaning up"
         should_cleanup=true
+        cleanup_reason="empty_pid"
+    # Check 2: Process exists and is running
+    elif ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_info "Lock process $lock_pid is dead ($lock_operation) - cleaning up"
+        should_cleanup=true
+        cleanup_reason="dead_process"
     fi
     
-    # Check 2: Age-based cleanup (locks older than 5 minutes)
-    if [[ -n "$lock_timestamp" ]]; then
+    # Check 3: Age-based cleanup with configurable threshold
+    if [[ -n "$lock_timestamp" ]] && [[ "$should_cleanup" == "false" ]]; then
         local current_time=$(date +%s)
         local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
         local age=$((current_time - lock_time))
+        local max_lock_age=${QUEUE_LOCK_STALE_THRESHOLD:-300}  # 5 minutes default
         
-        if [[ $age -gt 300 ]]; then  # 5 minutes
-            log_debug "Lock older than 5 minutes (age: ${age}s) - cleaning up"
-            should_cleanup=true
+        if [[ $age -gt $max_lock_age ]]; then
+            log_warn "Lock older than ${max_lock_age}s (age: ${age}s, operation: $lock_operation) - attempting cleanup"
+            
+            # Only attempt termination if it's our hostname and user
+            if [[ "$lock_hostname" == "$HOSTNAME" && "$lock_user" == "$USER" ]]; then
+                # Try graceful termination first
+                if kill -TERM "$lock_pid" 2>/dev/null; then
+                    log_info "Sent SIGTERM to stale lock process $lock_pid"
+                    sleep 2
+                    if ! kill -0 "$lock_pid" 2>/dev/null; then
+                        log_info "Successfully terminated stale lock process"
+                        should_cleanup=true
+                        cleanup_reason="graceful_termination"
+                    else
+                        # Force kill as last resort
+                        log_warn "Force killing stale lock process $lock_pid"
+                        kill -KILL "$lock_pid" 2>/dev/null || true
+                        sleep 1
+                        should_cleanup=true
+                        cleanup_reason="force_termination"
+                    fi
+                else
+                    log_debug "Could not signal process $lock_pid - may have exited"
+                    should_cleanup=true
+                    cleanup_reason="signal_failed"
+                fi
+            else
+                log_warn "Stale lock from different host/user ($lock_hostname/$lock_user vs $HOSTNAME/$USER) - leaving for manual cleanup"
+                return 1
+            fi
         fi
     fi
     
-    # Check 3: Different hostname (network filesystems)
-    if [[ -n "$lock_hostname" && "$lock_hostname" != "$HOSTNAME" ]]; then
+    # Check 4: Different hostname validation (with age consideration)
+    if [[ -n "$lock_hostname" && "$lock_hostname" != "$HOSTNAME" ]] && [[ "$should_cleanup" == "false" ]]; then
         log_debug "Lock from different host ($lock_hostname vs $HOSTNAME) - validating"
-        # For now, we don't auto-cleanup cross-host locks without additional validation
+        
+        # Only cleanup cross-host locks if they're very old (> 1 hour) and process is definitely dead
+        if [[ -n "$lock_timestamp" ]]; then
+            local current_time=$(date +%s)
+            local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+            local age=$((current_time - lock_time))
+            
+            if [[ $age -gt 3600 ]] && [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+                log_info "Very old cross-host lock with dead process - cleaning up (age: ${age}s)"
+                should_cleanup=true
+                cleanup_reason="old_cross_host"
+            fi
+        fi
     fi
     
+    # Perform cleanup if needed
     if [[ "$should_cleanup" == "true" ]]; then
-        rm -rf "$lock_dir" 2>/dev/null && log_debug "Cleaned up stale lock directory"
+        if rm -rf "$lock_dir" 2>/dev/null; then
+            log_debug "Cleaned up stale lock directory: $cleanup_reason"
+            return 0
+        else
+            log_warn "Failed to clean up stale lock directory: $lock_dir"
+            return 1
+        fi
     fi
+    
+    return 1  # Lock is still valid
+}
+
+# Clean up all stale locks in queue directory
+cleanup_all_stale_locks() {
+    local queue_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR"
+    local cleaned_count=0
+    local total_count=0
+    
+    log_info "Scanning for stale locks in: $queue_dir"
+    
+    # Find all lock directories
+    while IFS= read -r -d '' lock_dir; do
+        ((total_count++))
+        if cleanup_stale_lock "$lock_dir"; then
+            ((cleaned_count++))
+            log_debug "Cleaned stale lock: $(basename "$lock_dir")"
+        fi
+    done < <(find "$queue_dir" -name "*.lock.d" -type d -print0 2>/dev/null || true)
+    
+    if [[ $total_count -gt 0 ]]; then
+        log_info "Stale lock cleanup: $cleaned_count/$total_count locks cleaned"
+    else
+        log_debug "No lock directories found for cleanup"
+    fi
+    
+    return 0
+}
+
+# Validate lock directory integrity
+validate_lock_integrity() {
+    local lock_dir="$1"
+    local pid_file="$lock_dir/pid"
+    local timestamp_file="$lock_dir/timestamp"
+    local hostname_file="$lock_dir/hostname"
+    
+    # Check if lock directory exists
+    if [[ ! -d "$lock_dir" ]]; then
+        log_debug "Lock directory does not exist: $lock_dir"
+        return 1
+    fi
+    
+    # Check if required files exist
+    if [[ ! -f "$pid_file" ]]; then
+        log_debug "Missing PID file: $pid_file"
+        return 1
+    fi
+    
+    # Validate PID file content
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    if [[ ! "$lock_pid" =~ ^[0-9]+$ ]]; then
+        log_debug "Invalid PID in lock file: $lock_pid"
+        return 1
+    fi
+    
+    # Check timestamp file if it exists
+    if [[ -f "$timestamp_file" ]]; then
+        local timestamp
+        timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
+        if [[ -z "$timestamp" ]]; then
+            log_debug "Empty timestamp file: $timestamp_file"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Get detailed lock information for directory-based locks
+get_lock_info() {
+    local lock_dir="$1"
+    local pid_file="$lock_dir/pid"
+    local timestamp_file="$lock_dir/timestamp"
+    local hostname_file="$lock_dir/hostname"
+    local operation_file="$lock_dir/operation"
+    local user_file="$lock_dir/user"
+    
+    if [[ ! -d "$lock_dir" ]]; then
+        echo "No lock found"
+        return 1
+    fi
+    
+    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "unknown")
+    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "unknown")
+    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "unknown")
+    local lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
+    local lock_user=$(cat "$user_file" 2>/dev/null || echo "unknown")
+    
+    local age="unknown"
+    if [[ "$lock_timestamp" != "unknown" ]]; then
+        local current_time=$(date +%s)
+        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        if [[ $lock_time -gt 0 ]]; then
+            age=$((current_time - lock_time))
+        fi
+    fi
+    
+    local status="unknown"
+    if [[ "$lock_pid" != "unknown" ]]; then
+        if kill -0 "$lock_pid" 2>/dev/null; then
+            status="active"
+        else
+            status="stale"
+        fi
+    fi
+    
+    cat <<EOF
+Lock Information:
+  Directory: $(basename "$lock_dir")
+  PID: $lock_pid
+  Status: $status
+  Operation: $lock_operation
+  Age: ${age}s
+  Hostname: $lock_hostname
+  User: $lock_user
+  Timestamp: $lock_timestamp
+EOF
 }
 
 # Atomic directory-based lock acquisition
@@ -260,7 +442,12 @@ acquire_queue_lock_atomic() {
                 return 1
             }
             
-            log_debug "Acquired atomic queue lock (pid: $$, attempt: $attempts)"
+            # Write additional metadata for enhanced cleanup
+            echo "$USER" > "$lock_dir/user" 2>/dev/null || true
+            echo "${1:-unknown}" > "$lock_dir/operation" 2>/dev/null || true
+            echo "${CLI_MODE:-false}" > "$lock_dir/cli_mode" 2>/dev/null || true
+            
+            log_debug "Acquired atomic queue lock (pid: $$, attempt: $attempts, operation: ${1:-unknown})"
             return 0
         fi
         
