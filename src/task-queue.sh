@@ -2475,9 +2475,9 @@ cli_operation_wrapper() {
     
     log_debug "CLI Operation: $operation with args: $*"
     
-    # Execute with proper lock management
+    # Execute with smart operation routing (lock-free for reads, robust locking for writes)
     local result
-    with_queue_lock_enhanced "$operation" "$@"
+    smart_operation_wrapper "$operation" "$@"
     result=$?
     
     export CLI_MODE=false
@@ -4040,6 +4040,100 @@ EOF
 }
 
 # ===============================================================================
+# LOCK MANAGEMENT CLI COMMANDS
+# ===============================================================================
+
+# Show current lock status
+show_lock_status_cmd() {
+    echo "=== Task Queue Lock Status ==="
+    
+    # Show main queue lock
+    local main_lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    if [[ -d "$main_lock_dir" ]]; then
+        echo "Main Queue Lock:"
+        get_lock_info "$main_lock_dir" | sed 's/^/  /'
+    else
+        echo "Main Queue Lock: Not held"
+    fi
+    echo
+    
+    # Show typed locks
+    show_typed_locks
+    
+    # Show any legacy file locks
+    local legacy_lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
+    if [[ -f "$legacy_lock_file" ]]; then
+        echo "Legacy file lock detected: $legacy_lock_file"
+    fi
+}
+
+# Clean up stale locks
+cleanup_locks_cmd() {
+    echo "Cleaning up stale locks..."
+    
+    # Clean up main queue locks
+    cleanup_all_stale_locks
+    
+    # Clean up typed locks 
+    cleanup_all_typed_locks
+    
+    echo "Lock cleanup completed"
+}
+
+# Check lock system health
+lock_health_check_cmd() {
+    local health_score=100
+    local issues=()
+    
+    # Check for stale main locks
+    local main_lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    if [[ -d "$main_lock_dir" ]]; then
+        if ! validate_lock_integrity "$main_lock_dir"; then
+            ((health_score -= 20))
+            issues+=("Invalid main lock detected")
+        fi
+    fi
+    
+    # Check for stale typed locks
+    for lock_type in "${!LOCK_TYPES[@]}"; do
+        local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
+        if [[ -d "$lock_dir" ]]; then
+            if ! validate_lock_integrity "$lock_dir"; then
+                ((health_score -= 10))
+                issues+=("Invalid $lock_type lock detected")
+            fi
+        fi
+    done
+    
+    # Check system load impact
+    if command -v uptime >/dev/null 2>&1; then
+        local load_avg=$(uptime | awk '{print $(NF-2)}' | sed 's/,//')
+        if (( $(echo "$load_avg > 2.0" | bc -l 2>/dev/null || echo "0") )); then
+            ((health_score -= 15))
+            issues+=("High system load may affect lock performance: $load_avg")
+        fi
+    fi
+    
+    echo "Lock system health: $health_score/100"
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo "Issues detected:"
+        for issue in "${issues[@]}"; do
+            echo "  - $issue"
+        done
+        echo
+        echo "Recommendations:"
+        if [[ $health_score -lt 60 ]]; then
+            echo "  - Run 'lock cleanup' to remove stale locks"
+            echo "  - Consider restarting if issues persist"
+        fi
+        echo "  - Monitor system load: $(uptime)"
+    else
+        echo "No issues detected"
+    fi
+}
+
+# ===============================================================================
 # MAIN ENTRY POINT (für Testing und CLI)
 # ===============================================================================
 
@@ -4167,6 +4261,35 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         "monitor")
             shift
             init_task_queue && monitor_queue_cmd "$@"
+            ;;
+        "lock")
+            # Lock management commands
+            case "${2:-status}" in
+                "status")
+                    show_lock_status_cmd
+                    ;;
+                "cleanup")
+                    cleanup_locks_cmd
+                    ;;
+                "health")
+                    lock_health_check_cmd
+                    ;;
+                "typed")
+                    show_typed_locks
+                    ;;
+                "cleanup-typed")
+                    cleanup_all_typed_locks
+                    ;;
+                *)
+                    echo "Usage: $0 lock [status|cleanup|health|typed|cleanup-typed]"
+                    echo "  status       - Show current lock status"
+                    echo "  cleanup      - Clean up stale locks"
+                    echo "  health       - Check lock system health"
+                    echo "  typed        - Show typed locks"
+                    echo "  cleanup-typed - Clean up all typed locks"
+                    exit 1
+                    ;;
+            esac
             ;;
         "test")
             echo "Running basic tests..."
