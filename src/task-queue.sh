@@ -2193,6 +2193,773 @@ batch_remove_tasks() {
 }
 
 # ===============================================================================
+# ADVANCED FILTERING AND QUERY SYSTEM
+# ===============================================================================
+
+# Advanced list command with filtering capabilities
+advanced_list_tasks() {
+    local filter_status=""
+    local filter_priority=""
+    local filter_type=""
+    local filter_date_after=""
+    local filter_date_before=""
+    local filter_text=""
+    local sort_by="priority"
+    local output_format="text"
+    local limit=""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --status=*) filter_status="${1#*=}" ;;
+            --priority=*) filter_priority="${1#*=}" ;;
+            --type=*) filter_type="${1#*=}" ;;
+            --created-after=*) filter_date_after="${1#*=}" ;;
+            --created-before=*) filter_date_before="${1#*=}" ;;
+            --search=*) filter_text="${1#*=}" ;;
+            --sort=*) sort_by="${1#*=}" ;;
+            --format=*) output_format="${1#*=}" ;;
+            --limit=*) limit="${1#*=}" ;;
+            --json) output_format="json" ;;
+            --help)
+                show_filter_help
+                return 0
+                ;;
+            *) echo "Unknown filter option: $1" >&2; return 1 ;;
+        esac
+        shift
+    done
+    
+    # Collect all task IDs that match filters
+    local matching_tasks=()
+    local task_id
+    
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        if [[ "$output_format" == "json" ]]; then
+            echo '{"tasks": [], "count": 0}'
+        else
+            echo "No tasks found"
+        fi
+        return 0
+    fi
+    
+    for task_id in "${!TASK_STATES[@]}"; do
+        # Apply filters
+        if ! task_matches_filters "$task_id" "$filter_status" "$filter_priority" "$filter_type" "$filter_date_after" "$filter_date_before" "$filter_text"; then
+            continue
+        fi
+        
+        matching_tasks+=("$task_id")
+    done
+    
+    # Sort tasks
+    case "$sort_by" in
+        "priority") sort_tasks_by_priority matching_tasks ;;
+        "created") sort_tasks_by_date matching_tasks ;;
+        "status") sort_tasks_by_status matching_tasks ;;
+        *) log_warn "Unknown sort option: $sort_by, using priority" ;;
+    esac
+    
+    # Apply limit
+    if [[ -n "$limit" && "$limit" -gt 0 ]]; then
+        local temp_array=()
+        local i
+        for ((i=0; i<limit && i<${#matching_tasks[@]}; i++)); do
+            temp_array+=("${matching_tasks[$i]}")
+        done
+        matching_tasks=("${temp_array[@]}")
+    fi
+    
+    # Output results
+    if [[ "$output_format" == "json" ]]; then
+        output_filtered_tasks_json matching_tasks
+    else
+        output_filtered_tasks_text matching_tasks
+    fi
+}
+
+# Check if task matches all specified filters
+task_matches_filters() {
+    local task_id="$1"
+    local filter_status="$2"
+    local filter_priority="$3"
+    local filter_type="$4"
+    local filter_date_after="$5"
+    local filter_date_before="$6"
+    local filter_text="$7"
+    
+    # Status filter
+    if [[ -n "$filter_status" ]]; then
+        local current_status="${TASK_STATES[$task_id]:-}"
+        if [[ "$filter_status" == *","* ]]; then
+            # Multiple statuses
+            local status_list="${filter_status//,/|}"
+            if ! [[ "$current_status" =~ ^($status_list)$ ]]; then
+                return 1
+            fi
+        else
+            # Single status
+            if [[ "$current_status" != "$filter_status" ]]; then
+                return 1
+            fi
+        fi
+    fi
+    
+    # Priority filter
+    if [[ -n "$filter_priority" ]]; then
+        local current_priority="${TASK_PRIORITIES[$task_id]:-5}"
+        if [[ "$filter_priority" == *"-"* ]]; then
+            # Range: "1-3"
+            local min_priority="${filter_priority%-*}"
+            local max_priority="${filter_priority#*-}"
+            if [[ "$current_priority" -lt "$min_priority" ]] || [[ "$current_priority" -gt "$max_priority" ]]; then
+                return 1
+            fi
+        else
+            # Exact match
+            if [[ "$current_priority" != "$filter_priority" ]]; then
+                return 1
+            fi
+        fi
+    fi
+    
+    # Type filter
+    if [[ -n "$filter_type" ]]; then
+        local current_metadata="${TASK_METADATA[$task_id]:-}"
+        if ! echo "$current_metadata" | grep -q "\"type\":\"$filter_type\""; then
+            return 1
+        fi
+    fi
+    
+    # Date filters (basic implementation - could be enhanced)
+    if [[ -n "$filter_date_after" ]]; then
+        local task_timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        local filter_timestamp
+        filter_timestamp=$(date -d "$filter_date_after" +%s 2>/dev/null) || filter_timestamp=0
+        if [[ "$task_timestamp" -le "$filter_timestamp" ]]; then
+            return 1
+        fi
+    fi
+    
+    if [[ -n "$filter_date_before" ]]; then
+        local task_timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        local filter_timestamp
+        filter_timestamp=$(date -d "$filter_date_before" +%s 2>/dev/null) || filter_timestamp=999999999999
+        if [[ "$task_timestamp" -ge "$filter_timestamp" ]]; then
+            return 1
+        fi
+    fi
+    
+    # Text search filter
+    if [[ -n "$filter_text" ]]; then
+        local current_metadata="${TASK_METADATA[$task_id]:-}"
+        if ! echo "$current_metadata" | grep -qi "$filter_text"; then
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Sort tasks by priority
+sort_tasks_by_priority() {
+    local -n task_array=$1
+    local temp_file="/tmp/task_sort_$$"
+    
+    # Create sortable list
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        printf "%02d %s\n" "$priority" "$task_id" >> "$temp_file"
+    done
+    
+    # Sort and extract task IDs
+    task_array=()
+    while read -r priority task_id; do
+        task_array+=("$task_id")
+    done < <(sort -n "$temp_file")
+    
+    rm -f "$temp_file"
+}
+
+# Sort tasks by creation date
+sort_tasks_by_date() {
+    local -n task_array=$1
+    local temp_file="/tmp/task_sort_$$"
+    
+    # Create sortable list
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        printf "%s %s\n" "$timestamp" "$task_id" >> "$temp_file"
+    done
+    
+    # Sort and extract task IDs (newest first)
+    task_array=()
+    while read -r timestamp task_id; do
+        task_array+=("$task_id")
+    done < <(sort -rn "$temp_file")
+    
+    rm -f "$temp_file"
+}
+
+# Sort tasks by status
+sort_tasks_by_status() {
+    local -n task_array=$1
+    local temp_file="/tmp/task_sort_$$"
+    
+    # Create sortable list with status priority
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        local status="${TASK_STATES[$task_id]:-pending}"
+        local sort_priority
+        case "$status" in
+            "$TASK_STATE_IN_PROGRESS") sort_priority="1" ;;
+            "$TASK_STATE_PENDING") sort_priority="2" ;;
+            "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") sort_priority="3" ;;
+            "$TASK_STATE_COMPLETED") sort_priority="4" ;;
+            *) sort_priority="5" ;;
+        esac
+        printf "%s %s\n" "$sort_priority" "$task_id" >> "$temp_file"
+    done
+    
+    # Sort and extract task IDs
+    task_array=()
+    while read -r sort_priority task_id; do
+        task_array+=("$task_id")
+    done < <(sort -n "$temp_file")
+    
+    rm -f "$temp_file"
+}
+
+# Output filtered tasks in JSON format
+output_filtered_tasks_json() {
+    local -n task_array=$1
+    local task_count=${#task_array[@]}
+    
+    echo "{"
+    echo "  \"count\": $task_count,"
+    echo "  \"tasks\": ["
+    
+    local i
+    for ((i=0; i<${#task_array[@]}; i++)); do
+        local task_id="${task_array[$i]}"
+        local status="${TASK_STATES[$task_id]:-unknown}"
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        local metadata="${TASK_METADATA[$task_id]:-{}}"
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        
+        echo "    {"
+        echo "      \"id\": \"$task_id\","
+        echo "      \"status\": \"$status\","
+        echo "      \"priority\": $priority,"
+        echo "      \"timestamp\": $timestamp,"
+        echo "      \"metadata\": $metadata"
+        if [[ $i -lt $((${#task_array[@]} - 1)) ]]; then
+            echo "    },"
+        else
+            echo "    }"
+        fi
+    done
+    
+    echo "  ]"
+    echo "}"
+}
+
+# Output filtered tasks in text format
+output_filtered_tasks_text() {
+    local -n task_array=$1
+    local task_count=${#task_array[@]}
+    
+    if [[ $task_count -eq 0 ]]; then
+        echo "No tasks match the specified filters"
+        return 0
+    fi
+    
+    echo "=== Filtered Tasks ($task_count found) ==="
+    echo ""
+    
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        display_task_details "$task_id"
+        echo ""
+    done
+}
+
+# Display detailed task information
+display_task_details() {
+    local task_id="$1"
+    local status="${TASK_STATES[$task_id]:-unknown}"
+    local priority="${TASK_PRIORITIES[$task_id]:-5}"
+    local metadata="${TASK_METADATA[$task_id]:-{}}"
+    local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+    
+    # Color coding
+    local status_color=""
+    local reset_color=""
+    if [[ -t 1 ]]; then
+        case "$status" in
+            "$TASK_STATE_PENDING") status_color='\033[0;33m' ;;
+            "$TASK_STATE_IN_PROGRESS") status_color='\033[0;34m' ;;
+            "$TASK_STATE_COMPLETED") status_color='\033[0;32m' ;;
+            "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") status_color='\033[0;31m' ;;
+        esac
+        reset_color='\033[0m'
+    fi
+    
+    # Format timestamp
+    local formatted_date=""
+    if [[ "$timestamp" != "0" ]] && command -v date >/dev/null 2>&1; then
+        formatted_date=$(date -d "@$timestamp" "+%Y-%m-%d %H:%M" 2>/dev/null) || formatted_date="$timestamp"
+    else
+        formatted_date="$timestamp"
+    fi
+    
+    # Extract description from metadata
+    local description=""
+    if echo "$metadata" | jq -e '.description' >/dev/null 2>&1; then
+        description=$(echo "$metadata" | jq -r '.description' 2>/dev/null) || description=""
+    fi
+    
+    printf "ID: %s\n" "$task_id"
+    printf "Status: ${status_color}%s${reset_color}\n" "$status"
+    printf "Priority: %s\n" "$priority"
+    printf "Created: %s\n" "$formatted_date"
+    if [[ -n "$description" ]]; then
+        printf "Description: %s\n" "$description"
+    fi
+}
+
+# Show filter help
+show_filter_help() {
+    cat <<EOF
+=== Advanced Task Filtering ===
+
+Usage: filter [OPTIONS]
+
+Filter Options:
+  --status=STATUS          Filter by status (pending,in_progress,completed,failed,timeout)
+                           Multiple: --status=pending,in_progress
+  --priority=PRIORITY      Filter by priority (1-10) or range (1-3)
+  --type=TYPE             Filter by task type (github_issue,custom,github_pr)
+  --created-after=DATE    Filter tasks created after date (YYYY-MM-DD)
+  --created-before=DATE   Filter tasks created before date (YYYY-MM-DD)
+  --search=TEXT           Search in task descriptions and metadata
+
+Sort Options:
+  --sort=FIELD            Sort by: priority, created, status
+
+Output Options:
+  --format=FORMAT         Output format: text, json
+  --json                  JSON output (shorthand)
+  --limit=N               Limit results to N tasks
+
+Examples:
+  filter --status=pending --priority=1-3
+  filter --type=github_issue --created-after=2025-08-01
+  filter --search="bug fix" --sort=created --limit=5
+  filter --status=pending,in_progress --json
+EOF
+}
+
+# ===============================================================================
+# EXPORT/IMPORT SYSTEM
+# ===============================================================================
+
+# Export queue data to file or stdout
+export_queue_data() {
+    local export_format="${1:-json}"
+    local output_file="${2:-}"
+    local filter_args=("${@:3}")
+    
+    case "$export_format" in
+        "json")
+            export_queue_json "$output_file" "${filter_args[@]}"
+            ;;
+        "csv")
+            export_queue_csv "$output_file" "${filter_args[@]}"
+            ;;
+        *)
+            echo "Error: Unsupported export format: $export_format" >&2
+            echo "Supported formats: json, csv" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Export queue as JSON
+export_queue_json() {
+    local output_file="${1:-}"
+    local filter_args=("${@:2}")
+    
+    # Generate export data
+    local export_data
+    export_data=$(generate_export_json "${filter_args[@]}")
+    
+    # Output to file or stdout
+    if [[ -n "$output_file" ]]; then
+        echo "$export_data" > "$output_file" || {
+            echo "Error: Failed to write to $output_file" >&2
+            return 1
+        }
+        echo "Queue exported to: $output_file"
+    else
+        echo "$export_data"
+    fi
+}
+
+# Export queue as CSV
+export_queue_csv() {
+    local output_file="${1:-}"
+    local filter_args=("${@:2}")
+    
+    # Generate CSV header
+    local csv_data="ID,Status,Priority,Type,Created,Description"
+    
+    # Get filtered tasks if filters are specified
+    local task_list=()
+    if [[ ${#filter_args[@]} -gt 0 ]]; then
+        # Apply filters (reuse filtering system)
+        # This is a simplified version - in a full implementation,
+        # we'd integrate with the filtering system properly
+        local task_id
+        for task_id in "${!TASK_STATES[@]}"; do
+            task_list+=("$task_id")
+        done
+    else
+        # All tasks
+        local task_id
+        for task_id in "${!TASK_STATES[@]}"; do
+            task_list+=("$task_id")
+        done
+    fi
+    
+    # Generate CSV rows
+    local task_id
+    for task_id in "${task_list[@]}"; do
+        local status="${TASK_STATES[$task_id]:-unknown}"
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        local metadata="${TASK_METADATA[$task_id]:-{}}"
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        
+        # Extract type and description from metadata
+        local task_type=""
+        local description=""
+        if echo "$metadata" | jq -e '.' >/dev/null 2>&1; then
+            task_type=$(echo "$metadata" | jq -r '.type // "custom"' 2>/dev/null) || task_type="custom"
+            description=$(echo "$metadata" | jq -r '.description // ""' 2>/dev/null) || description=""
+        fi
+        
+        # Format timestamp
+        local formatted_date=""
+        if [[ "$timestamp" != "0" ]] && command -v date >/dev/null 2>&1; then
+            formatted_date=$(date -d "@$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null) || formatted_date="$timestamp"
+        else
+            formatted_date="$timestamp"
+        fi
+        
+        # Escape CSV fields
+        description="${description//\"/\"\"}"
+        if [[ "$description" == *,* ]] || [[ "$description" == *\"* ]]; then
+            description="\"$description\""
+        fi
+        
+        csv_data+=$'\n'"$task_id,$status,$priority,$task_type,$formatted_date,$description"
+    done
+    
+    # Output to file or stdout
+    if [[ -n "$output_file" ]]; then
+        echo "$csv_data" > "$output_file" || {
+            echo "Error: Failed to write to $output_file" >&2
+            return 1
+        }
+        echo "Queue exported to CSV: $output_file"
+    else
+        echo "$csv_data"
+    fi
+}
+
+# Generate comprehensive JSON export
+generate_export_json() {
+    local filter_args=("$@")
+    
+    # Get export metadata
+    local export_timestamp=$(date -Iseconds)
+    local total_tasks=0
+    local task_count_by_status='{}'
+    
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        total_tasks=${#TASK_STATES[@]}
+        
+        # Count tasks by status
+        local pending=0 active=0 completed=0 failed=0
+        local task_id
+        for task_id in "${!TASK_STATES[@]}"; do
+            case "${TASK_STATES[$task_id]}" in
+                "$TASK_STATE_PENDING") ((pending++)) ;;
+                "$TASK_STATE_IN_PROGRESS") ((active++)) ;;
+                "$TASK_STATE_COMPLETED") ((completed++)) ;;
+                "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") ((failed++)) ;;
+            esac
+        done
+        
+        task_count_by_status=$(cat <<EOF
+{
+  "pending": $pending,
+  "in_progress": $active,
+  "completed": $completed,
+  "failed": $failed
+}
+EOF
+        )
+    fi
+    
+    # Generate export JSON
+    cat <<EOF
+{
+  "export_metadata": {
+    "version": "1.0",
+    "timestamp": "$export_timestamp",
+    "total_tasks": $total_tasks,
+    "task_counts": $task_count_by_status,
+    "source_system": "claude-auto-resume-task-queue"
+  },
+  "configuration": {
+    "TASK_QUEUE_ENABLED": "$TASK_QUEUE_ENABLED",
+    "TASK_DEFAULT_TIMEOUT": $TASK_DEFAULT_TIMEOUT,
+    "TASK_MAX_RETRIES": $TASK_MAX_RETRIES,
+    "TASK_QUEUE_MAX_SIZE": $TASK_QUEUE_MAX_SIZE
+  },
+  "tasks": [
+$(generate_tasks_json_array)
+  ]
+}
+EOF
+}
+
+# Generate JSON array for all tasks
+generate_tasks_json_array() {
+    local task_list=()
+    local task_id
+    
+    # Collect all task IDs
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        for task_id in "${!TASK_STATES[@]}"; do
+            task_list+=("$task_id")
+        done
+    fi
+    
+    # Generate JSON for each task
+    local i
+    for ((i=0; i<${#task_list[@]}; i++)); do
+        task_id="${task_list[$i]}"
+        local status="${TASK_STATES[$task_id]:-unknown}"
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        local metadata="${TASK_METADATA[$task_id]:-{}}"
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        local retry_count="${TASK_RETRY_COUNTS[$task_id]:-0}"
+        
+        echo "    {"
+        echo "      \"id\": \"$task_id\","
+        echo "      \"status\": \"$status\","
+        echo "      \"priority\": $priority,"
+        echo "      \"timestamp\": $timestamp,"
+        echo "      \"retry_count\": $retry_count,"
+        echo "      \"metadata\": $metadata"
+        if [[ $i -lt $((${#task_list[@]} - 1)) ]]; then
+            echo "    },"
+        else
+            echo "    }"
+        fi
+    done
+}
+
+# Import queue data from file
+import_queue_data() {
+    local import_file="$1"
+    local import_mode="${2:-merge}" # merge, replace, validate
+    
+    if [[ ! -f "$import_file" ]]; then
+        echo "Error: Import file not found: $import_file" >&2
+        return 1
+    fi
+    
+    # Validate JSON first
+    if ! jq empty "$import_file" 2>/dev/null; then
+        echo "Error: Import file contains invalid JSON: $import_file" >&2
+        return 1
+    fi
+    
+    case "$import_mode" in
+        "validate")
+            validate_import_file "$import_file"
+            ;;
+        "replace")
+            import_with_replace "$import_file"
+            ;;
+        "merge")
+            import_with_merge "$import_file"
+            ;;
+        *)
+            echo "Error: Invalid import mode: $import_mode" >&2
+            echo "Supported modes: validate, merge, replace" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Validate import file structure
+validate_import_file() {
+    local import_file="$1"
+    
+    echo "Validating import file: $import_file"
+    
+    # Check required structure
+    local required_fields=("export_metadata" "tasks")
+    local field
+    for field in "${required_fields[@]}"; do
+        if ! jq -e ".$field" "$import_file" >/dev/null 2>&1; then
+            echo "✗ Missing required field: $field"
+            return 1
+        fi
+    done
+    
+    # Validate tasks array
+    local task_count
+    task_count=$(jq -r '.tasks | length' "$import_file" 2>/dev/null) || task_count=0
+    echo "✓ Found $task_count tasks in import file"
+    
+    # Check task structure
+    if [[ $task_count -gt 0 ]]; then
+        local first_task_valid
+        first_task_valid=$(jq -e '.tasks[0] | has("id") and has("status") and has("priority")' "$import_file" 2>/dev/null)
+        if [[ "$first_task_valid" == "true" ]]; then
+            echo "✓ Task structure appears valid"
+        else
+            echo "✗ Invalid task structure detected"
+            return 1
+        fi
+    fi
+    
+    # Check export metadata
+    local export_version
+    export_version=$(jq -r '.export_metadata.version' "$import_file" 2>/dev/null)
+    echo "✓ Export version: $export_version"
+    
+    local export_timestamp
+    export_timestamp=$(jq -r '.export_metadata.timestamp' "$import_file" 2>/dev/null)
+    echo "✓ Export timestamp: $export_timestamp"
+    
+    echo "Import file validation completed successfully"
+    return 0
+}
+
+# Import with merge mode (add new, update existing)
+import_with_merge() {
+    local import_file="$1"
+    
+    echo "Importing queue data (merge mode) from: $import_file"
+    
+    # Validate first
+    if ! validate_import_file "$import_file"; then
+        echo "Import aborted due to validation errors"
+        return 1
+    fi
+    
+    # Create backup before import
+    local backup_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/backups/pre-import-$(date +%Y%m%d-%H%M%S).json"
+    if ! with_queue_lock save_queue_state; then
+        echo "Warning: Could not create backup before import"
+    else
+        cp "$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json" "$backup_file" 2>/dev/null || true
+        echo "Backup created: $backup_file"
+    fi
+    
+    # Import tasks
+    local imported_count=0
+    local updated_count=0
+    local error_count=0
+    
+    # Process each task from import file
+    while read -r task_json; do
+        local task_id priority status metadata timestamp retry_count
+        
+        task_id=$(echo "$task_json" | jq -r '.id' 2>/dev/null) || continue
+        priority=$(echo "$task_json" | jq -r '.priority // 5' 2>/dev/null) || priority=5
+        status=$(echo "$task_json" | jq -r '.status' 2>/dev/null) || status="pending"
+        metadata=$(echo "$task_json" | jq -c '.metadata // {}' 2>/dev/null) || metadata="{}"
+        timestamp=$(echo "$task_json" | jq -r '.timestamp // 0' 2>/dev/null) || timestamp=0
+        retry_count=$(echo "$task_json" | jq -r '.retry_count // 0' 2>/dev/null) || retry_count=0
+        
+        # Check if task exists
+        if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+            # Update existing task
+            TASK_STATES[$task_id]="$status"
+            TASK_PRIORITIES[$task_id]="$priority"
+            TASK_METADATA[$task_id]="$metadata"
+            TASK_TIMESTAMPS[$task_id]="$timestamp"
+            TASK_RETRY_COUNTS[$task_id]="$retry_count"
+            ((updated_count++))
+            echo "Updated task: $task_id"
+        else
+            # Add new task
+            TASK_STATES[$task_id]="$status"
+            TASK_PRIORITIES[$task_id]="$priority"
+            TASK_METADATA[$task_id]="$metadata"
+            TASK_TIMESTAMPS[$task_id]="$timestamp"
+            TASK_RETRY_COUNTS[$task_id]="$retry_count"
+            ((imported_count++))
+            echo "Imported task: $task_id"
+        fi
+    done < <(jq -c '.tasks[]' "$import_file" 2>/dev/null)
+    
+    # Save updated state
+    if with_queue_lock save_queue_state; then
+        echo ""
+        echo "=== Import Summary ==="
+        echo "New tasks imported: $imported_count"
+        echo "Existing tasks updated: $updated_count"
+        echo "Errors: $error_count"
+        echo "Import completed successfully"
+    else
+        echo "Error: Failed to save queue state after import"
+        return 1
+    fi
+}
+
+# Import with replace mode (clear existing, import new)
+import_with_replace() {
+    local import_file="$1"
+    
+    echo "Importing queue data (replace mode) from: $import_file"
+    echo "WARNING: This will replace ALL existing tasks!"
+    
+    # Validate first
+    if ! validate_import_file "$import_file"; then
+        echo "Import aborted due to validation errors"
+        return 1
+    fi
+    
+    # Create backup before replace
+    local backup_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/backups/pre-replace-$(date +%Y%m%d-%H%M%S).json"
+    if with_queue_lock save_queue_state; then
+        cp "$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json" "$backup_file" 2>/dev/null || true
+        echo "Backup created: $backup_file"
+    fi
+    
+    # Clear existing tasks
+    if with_queue_lock clear_task_queue; then
+        echo "Existing queue cleared"
+    else
+        echo "Error: Failed to clear existing queue"
+        return 1
+    fi
+    
+    # Import new tasks (reuse merge logic)
+    import_with_merge "$import_file"
+}
+
+# ===============================================================================
 # CONFIGURATION MANAGEMENT CLI
 # ===============================================================================
 
@@ -2294,6 +3061,18 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             shift
             cli_operation_wrapper batch_operation_cmd "$@"
             ;;
+        "filter"|"find")
+            shift
+            init_task_queue && advanced_list_tasks "$@"
+            ;;
+        "export")
+            shift
+            init_task_queue && export_queue_data "$@"
+            ;;
+        "import")
+            shift
+            cli_operation_wrapper import_queue_data "$@"
+            ;;
         "test")
             echo "Running basic tests..."
             
@@ -2361,6 +3140,11 @@ Batch Operations:
   batch add <stdin|file> [path] [type] [priority]
                                       Add multiple tasks from stdin or file
   batch remove <stdin|file> [path]   Remove multiple tasks by ID
+
+Advanced Features:
+  filter, find [OPTIONS]             Advanced task filtering and search
+  export <format> [file] [filters]   Export queue data (json, csv)
+  import <file> [mode]               Import queue data (validate, merge, replace)
   
 GitHub Integration:
   github-issue <number> [priority]    Add GitHub issue task
@@ -2381,6 +3165,15 @@ Examples:
   # Batch operations
   echo -e "41\n42\n43" | $0 batch add stdin github_issue 2
   $0 batch add file tasks.txt custom 3
+  
+  # Advanced filtering
+  $0 filter --status=pending --priority=1-3 --sort=created
+  $0 find --type=github_issue --search="bug fix" --json
+  
+  # Export/Import
+  $0 export json queue_backup.json
+  $0 export csv queue_report.csv
+  $0 import queue_backup.json merge
   
   # GitHub integration
   $0 github-issue 123 1
