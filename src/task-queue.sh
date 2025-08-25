@@ -2960,6 +2960,160 @@ import_with_replace() {
 }
 
 # ===============================================================================
+# REAL-TIME MONITORING MODE
+# ===============================================================================
+
+# Real-time monitoring mode mit auto-refresh
+start_monitor_mode() {
+    local refresh_interval="${1:-5}"  # seconds
+    local monitor_format="${2:-compact}"
+    local show_help="${3:-true}"
+    
+    # Validate refresh interval
+    if ! [[ "$refresh_interval" =~ ^[0-9]+$ ]] || [[ "$refresh_interval" -lt 1 ]]; then
+        echo "Error: Invalid refresh interval. Must be a positive integer." >&2
+        return 1
+    fi
+    
+    if [[ "$show_help" == "true" ]]; then
+        echo "=== Task Queue Real-time Monitor ==="
+        echo "Refresh interval: ${refresh_interval}s"
+        echo "Press 'q' and Enter to quit, 'r' and Enter to refresh now"
+        echo ""
+    fi
+    
+    # Set up signal handling for clean exit
+    trap 'echo "Monitor stopped"; exit 0' INT TERM
+    
+    local last_update=$(date +%s)
+    local cycle_count=0
+    
+    while true; do
+        # Check for user input (non-blocking)
+        local user_input=""
+        if read -t 0.1 -r user_input 2>/dev/null; then
+            case "$user_input" in
+                "q"|"quit"|"exit") 
+                    echo "Monitor stopped"
+                    break 
+                    ;;
+                "r"|"refresh")
+                    # Force immediate refresh
+                    ;;
+                "h"|"help")
+                    show_monitor_help
+                    continue
+                    ;;
+            esac
+        fi
+        
+        # Clear screen for full display mode
+        if [[ "$monitor_format" != "compact" ]]; then
+            clear
+        fi
+        
+        # Load fresh state
+        load_queue_state >/dev/null 2>&1
+        
+        # Show timestamp
+        local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+        if [[ "$monitor_format" == "compact" ]]; then
+            printf "\r[%s] " "$current_time"
+            show_enhanced_status "true" "compact"
+        else
+            echo "=== Task Queue Monitor - $current_time ==="
+            echo "Update #$((++cycle_count)) (every ${refresh_interval}s)"
+            echo ""
+            show_enhanced_status "true" "text"
+            
+            # Show recent activity if available
+            if [[ $(get_task_count) -gt 0 ]]; then
+                echo ""
+                echo "=== Recent Tasks (Last 3) ==="
+                list_queue_tasks "all" "created" "3" 2>/dev/null || echo "No recent tasks available"
+            fi
+            
+            echo ""
+            echo "Commands: q=quit, r=refresh, h=help"
+        fi
+        
+        # Wait for next refresh
+        local elapsed=$(($(date +%s) - last_update))
+        if [[ $elapsed -lt $refresh_interval ]]; then
+            sleep $((refresh_interval - elapsed))
+        fi
+        last_update=$(date +%s)
+    done
+    
+    # Clean up
+    trap - INT TERM
+}
+
+# Get total task count helper
+get_task_count() {
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        echo "${#TASK_STATES[@]}"
+    else
+        echo "0"
+    fi
+}
+
+# Show monitor help
+show_monitor_help() {
+    cat <<EOF
+
+=== Monitor Mode Help ===
+
+Commands (type and press Enter):
+  q, quit, exit    Stop monitoring and exit
+  r, refresh       Force immediate refresh
+  h, help          Show this help
+
+Monitor shows:
+- Real-time queue statistics with color coding
+- Health status (healthy/warning/critical)
+- Recent task activity
+- Last update timestamp
+
+The display updates automatically every ${refresh_interval:-5} seconds.
+EOF
+}
+
+# Wrapper command for monitor mode
+monitor_queue_cmd() {
+    local refresh_interval="${1:-5}"
+    local format="${2:-compact}"
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --interval=*) refresh_interval="${1#*=}" ;;
+            --format=*) format="${1#*=}" ;;
+            --compact) format="compact" ;;
+            --full) format="full" ;;
+            --help) 
+                echo "Usage: monitor [--interval=N] [--format=compact|full]"
+                echo "  --interval=N    Refresh interval in seconds (default: 5)"
+                echo "  --format=FORMAT Output format: compact (single line) or full (detailed)"
+                return 0
+                ;;
+            *) 
+                # Assume it's the refresh interval if it's a number
+                if [[ "$1" =~ ^[0-9]+$ ]]; then
+                    refresh_interval="$1"
+                else
+                    echo "Unknown monitor option: $1" >&2
+                    return 1
+                fi
+                ;;
+        esac
+        shift
+    done
+    
+    start_monitor_mode "$refresh_interval" "$format" "true"
+}
+
+# ===============================================================================
 # CONFIGURATION MANAGEMENT CLI
 # ===============================================================================
 
@@ -3073,6 +3227,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             shift
             cli_operation_wrapper import_queue_data "$@"
             ;;
+        "monitor")
+            shift
+            init_task_queue && monitor_queue_cmd "$@"
+            ;;
         "test")
             echo "Running basic tests..."
             
@@ -3131,6 +3289,7 @@ Core Commands:
   
 Queue Management:
   interactive, i                      Start interactive mode for real-time management
+  monitor [interval]                  Real-time monitoring with auto-refresh (default: 5s)
   next                                Get next task for processing
   stats                               Show detailed queue statistics
   cleanup                             Clean up old tasks and backups
@@ -3161,6 +3320,10 @@ Examples:
   
   # Interactive mode
   $0 interactive
+  
+  # Real-time monitoring
+  $0 monitor 10          # Monitor with 10s refresh interval
+  $0 monitor --format=full --interval=3
   
   # Batch operations
   echo -e "41\n42\n43" | $0 batch add stdin github_issue 2
