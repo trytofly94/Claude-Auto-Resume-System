@@ -615,13 +615,28 @@ add_task_to_queue() {
     local task_type="$1"
     local priority="$2"
     local task_id="${3:-}"
-    shift 3
-    local metadata=("$@")
+    
+    # Handle variable arguments safely
+    local metadata=()
+    if [[ $# -gt 3 ]]; then
+        shift 3
+        metadata=("$@")
+    fi
     
     log_info "Adding task to queue (type: $task_type, priority: $priority)"
     
     # Validate input
     validate_task_data "$task_type" "$priority" || return 1
+    
+    # Ensure arrays are initialized before accessing them
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays in add_task_to_queue"
+    fi
     
     # Generate ID if not provided
     if [[ -z "$task_id" ]]; then
@@ -639,7 +654,7 @@ add_task_to_queue() {
     # Check queue size limit
     local current_size=0
     # Check if TASK_STATES has elements for queue limit
-    if declare -p TASK_STATES >/dev/null 2>&1; then
+    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
         current_size=${#TASK_STATES[@]}
     fi
     
@@ -686,6 +701,16 @@ remove_task_from_queue() {
     
     validate_task_id "$task_id" || return 1
     
+    # Ensure arrays are initialized before accessing them
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays in remove_task_from_queue"
+    fi
+    
     if [[ -z "${TASK_STATES[$task_id]:-}" ]]; then
         log_error "Task not found in queue: $task_id"
         return 1
@@ -731,6 +756,16 @@ get_next_task() {
     local filter_status="${1:-$TASK_STATE_PENDING}"
     
     log_debug "Getting next task with status: $filter_status"
+    
+    # Ensure arrays are initialized before accessing them
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays in get_next_task"
+    fi
     
     local best_task_id=""
     local best_priority=11  # Höher als Maximum (10)
@@ -1426,7 +1461,7 @@ init_task_queue() {
     
     # Initialize arrays if not already done
     # Use a safer check for array initialization
-    if ! declare -p TASK_STATES >/dev/null 2>&1 || [[ ${#TASK_STATES[@]} -eq 0 ]] 2>/dev/null; then
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
         declare -gA TASK_STATES
         declare -gA TASK_METADATA
         declare -gA TASK_RETRY_COUNTS
