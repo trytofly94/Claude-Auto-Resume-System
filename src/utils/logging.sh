@@ -229,9 +229,9 @@ log_message() {
     {
         echo "$log_entry" >> "$LOG_FILE"
         
-        # In TEST_MODE auch zu stdout ausgeben für BATS-Tests
+        # In TEST_MODE auch zu stderr ausgeben für BATS-Tests (nicht stdout, um Return-Werte nicht zu stören)
         if [[ "${TEST_MODE:-false}" == "true" ]]; then
-            echo "$log_entry"
+            echo "$log_entry" >&2
         fi
         
         # Bei ERROR und WARN auch zu stderr ausgeben

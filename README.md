@@ -59,6 +59,7 @@ Dieses Projekt vereint die besten Eigenschaften beider Grundlagen:
 - 🛡️ **Fehlertolerante Wiederverbindung** bei Netzwerkproblemen
 - 📝 **Strukturiertes Logging** für Debugging und Monitoring
 - 🎯 **Projektbasierte Session-Trennung** via claunch
+- 📋 **Task Queue System** für sequenzielles GitHub Issue-Management
 - 🔧 **Cross-Platform-Support** (macOS, Linux)
 
 ## 📋 Voraussetzungen
@@ -222,6 +223,7 @@ src/
 ├── hybrid-monitor.sh          # 🎯 Haupt-Monitoring-System
 ├── claunch-integration.sh     # 🔗 claunch-Wrapper-Funktionen  
 ├── session-manager.sh         # 📊 Session-Lifecycle-Management
+├── task-queue.sh             # 📋 Task Queue Core Module
 └── utils/
     ├── logging.sh            # 📝 Strukturiertes Logging
     ├── network.sh            # 🌐 Netzwerk-Utilities
@@ -375,6 +377,49 @@ grep "Session recovery" logs/hybrid-monitor.log
 # Performance-Metriken extrahieren
 jq '.metrics' logs/hybrid-monitor.json
 ```
+
+## 📋 Task Queue System
+
+### Task Queue Funktionalität
+
+Das Task Queue Core Module bietet sequenzielles Management von GitHub Issues und Tasks:
+
+```bash
+# Task Queue System aktivieren
+source src/task-queue.sh
+init_task_queue
+
+# GitHub Issue als Task hinzufügen
+add_task_to_queue "github_issue" 1 "" "40" "Implement Task Queue Core Module"
+
+# Nächste prioritäre Task abrufen
+task_id=$(get_next_task)
+
+# Task-Status aktualisieren
+update_task_status "$task_id" "in_progress"
+update_task_status "$task_id" "completed"
+
+# Queue-Statistiken anzeigen
+get_queue_statistics
+```
+
+### Task Queue Konfiguration
+
+```bash
+# config/default.conf
+TASK_QUEUE_ENABLED=false          # Task Queue aktivieren/deaktivieren
+TASK_DEFAULT_TIMEOUT=3600         # Standard-Timeout (1 Stunde)
+TASK_MAX_RETRIES=3               # Maximale Wiederholungsversuche
+TASK_RETRY_DELAY=300             # Verzögerung zwischen Wiederholungen (5 Min)
+QUEUE_LOCK_TIMEOUT=30            # File-Locking-Timeout (30 Sek)
+```
+
+### Unterstützte Task-Typen
+
+- **GitHub Issue Tasks**: Automatische Integration mit GitHub API
+- **Custom Tasks**: Benutzerdefinierte Aufgaben mit flexiblen Metadaten
+- **Priority Management**: 1-10 Priority-Scale (1 = höchste Priorität)
+- **Status Tracking**: pending → in_progress → completed/failed/timeout
 
 ## 🚀 Erweiterte Nutzung
 
