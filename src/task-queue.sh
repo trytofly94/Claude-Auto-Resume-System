@@ -12,7 +12,7 @@ set -euo pipefail
 # ===============================================================================
 
 # Standard-Konfiguration (wird von config/default.conf überschrieben)
-TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-false}"
+# TASK_QUEUE_ENABLED will be loaded from config file - don't set a default here
 TASK_QUEUE_DIR="${TASK_QUEUE_DIR:-queue}"
 TASK_DEFAULT_TIMEOUT="${TASK_DEFAULT_TIMEOUT:-3600}"
 TASK_MAX_RETRIES="${TASK_MAX_RETRIES:-3}"
@@ -229,7 +229,25 @@ cleanup_stale_lock() {
     # Check 3: Age-based cleanup with configurable threshold
     if [[ -n "$lock_timestamp" ]] && [[ "$should_cleanup" == "false" ]]; then
         local current_time=$(date +%s)
-        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        # Cross-platform timestamp parsing
+        local lock_time
+        if command -v gdate >/dev/null 2>&1; then
+            # Use GNU date if available (brew install coreutils)
+            lock_time=$(gdate -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        elif date --version 2>/dev/null | grep -q "GNU"; then
+            # GNU date on Linux
+            lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        else
+            # macOS date - convert ISO timestamp to epoch
+            # Format: 2025-08-25T13:52:20+02:00 -> 202508251352.20
+            local formatted_date
+            formatted_date=$(echo "$lock_timestamp" | sed -E 's/([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})[+\-].*$/\1\2\3\4\5.\6/' 2>/dev/null || echo "")
+            if [[ -n "$formatted_date" ]]; then
+                lock_time=$(date -j -f "%Y%m%d%H%M.%S" "$formatted_date" +%s 2>/dev/null || echo 0)
+            else
+                lock_time=0
+            fi
+        fi
         local age=$((current_time - lock_time))
         local max_lock_age=${QUEUE_LOCK_STALE_THRESHOLD:-300}  # 5 minutes default
         
@@ -2288,7 +2306,7 @@ init_task_queue() {
     fi
     
     # Check if task queue is enabled
-    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
         log_warn "Task queue is disabled in configuration"
         return 1
     fi
@@ -2354,7 +2372,7 @@ init_task_queue_readonly() {
     fi
     
     # Check if task queue is enabled
-    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
         log_debug "Task queue is disabled in configuration"
         return 1
     fi
@@ -2428,7 +2446,7 @@ load_queue_state_readonly() {
 
 # Task-Queue-Status anzeigen
 show_queue_status() {
-    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
         echo "Task Queue: DISABLED"
         return 0
     fi
@@ -2574,7 +2592,7 @@ show_enhanced_status() {
     local use_colors="${1:-true}"
     local output_format="${2:-text}" # text, json, compact
     
-    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
         if [[ "$output_format" == "json" ]]; then
             echo '{"status": "disabled", "message": "Task Queue is disabled"}'
         else
@@ -4138,11 +4156,14 @@ lock_health_check_cmd() {
 # ===============================================================================
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Load configuration first
+    init_task_queue_readonly >/dev/null 2>&1 || true
+    
     # Handle command line arguments with improved wrapper
     case "${1:-status}" in
         "status")
             # Read-only operation - skip heavy locking
-            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
                 echo "Task Queue: DISABLED"
             else
                 load_queue_state >/dev/null 2>&1 && show_queue_status || echo "Task Queue: ENABLED (no tasks loaded)"
@@ -4163,7 +4184,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 shift
             done
             # Read-only operation - skip heavy locking
-            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
                 if [[ "$format" == "json" ]]; then
                     echo '{"status": "disabled", "message": "Task Queue is disabled"}'
                 else
@@ -4181,7 +4202,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         "list")
             # Read-only operation with minimal locking
-            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
                 echo "Task Queue: DISABLED"
             else
                 # Direct JSON read for list command to avoid locking issues
@@ -4214,7 +4235,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         "stats")
             # Read-only operation
-            if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
                 echo "Task Queue: DISABLED"
             else
                 load_queue_state >/dev/null 2>&1 && get_queue_statistics || echo "No statistics available"
