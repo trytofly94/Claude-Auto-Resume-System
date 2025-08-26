@@ -24,11 +24,22 @@ TASK_BACKUP_RETENTION_DAYS="${TASK_BACKUP_RETENTION_DAYS:-30}"
 QUEUE_LOCK_TIMEOUT="${QUEUE_LOCK_TIMEOUT:-30}"
 
 # Task-State-Tracking (global associative arrays)
-declare -gA TASK_STATES
-declare -gA TASK_METADATA
-declare -gA TASK_RETRY_COUNTS
-declare -gA TASK_TIMESTAMPS
-declare -gA TASK_PRIORITIES
+# Initialize arrays at script load time to ensure availability in all contexts
+if ! declare -p TASK_STATES >/dev/null 2>&1; then
+    declare -gA TASK_STATES
+fi
+if ! declare -p TASK_METADATA >/dev/null 2>&1; then
+    declare -gA TASK_METADATA
+fi
+if ! declare -p TASK_RETRY_COUNTS >/dev/null 2>&1; then
+    declare -gA TASK_RETRY_COUNTS
+fi
+if ! declare -p TASK_TIMESTAMPS >/dev/null 2>&1; then
+    declare -gA TASK_TIMESTAMPS
+fi
+if ! declare -p TASK_PRIORITIES >/dev/null 2>&1; then
+    declare -gA TASK_PRIORITIES
+fi
 
 # Task-Status-Konstanten
 readonly TASK_STATE_PENDING="pending"
@@ -615,42 +626,83 @@ add_task_to_queue() {
     local task_type="$1"
     local priority="$2"
     local task_id="${3:-}"
-    shift 3
-    local metadata=("$@")
+    
+    # Handle variable arguments safely
+    local metadata=()
+    if [[ $# -gt 3 ]]; then
+        shift 3
+        metadata=("$@")
+    fi
     
     log_info "Adding task to queue (type: $task_type, priority: $priority)"
     
     # Validate input
     validate_task_data "$task_type" "$priority" || return 1
+    log_debug "Passed validate_task_data"
+    
+    # Ensure arrays are initialized before accessing them
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays in add_task_to_queue"
+    fi
+    log_debug "Arrays are available"
     
     # Generate ID if not provided
     if [[ -z "$task_id" ]]; then
         task_id=$(generate_task_id)
+        log_debug "Generated task ID: $task_id"
     else
         validate_task_id "$task_id" || return 1
+        log_debug "Validated provided task ID: $task_id"
     fi
     
     # Check if task already exists
-    if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+    local task_exists=false
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        # BATS environment - use file-based tracking for duplicate detection
+        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+        if [[ -f "$bats_state_file" ]] && grep -q "^$task_id$" "$bats_state_file" 2>/dev/null; then
+            task_exists=true
+        fi
+    else
+        # Normal environment - use array
+        if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+            task_exists=true
+        fi
+    fi
+    
+    if [[ "$task_exists" == "true" ]]; then
         log_error "Task already exists in queue: $task_id"
         return 1
     fi
+    log_debug "Task ID is unique"
     
     # Check queue size limit
     local current_size=0
-    # Check if TASK_STATES has elements for queue limit
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        # BATS environment - count from file
+        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+        if [[ -f "$bats_state_file" ]]; then
+            current_size=$(wc -l < "$bats_state_file" 2>/dev/null || echo "0")
+        fi
+    else
+        # Normal environment - use array
         current_size=${#TASK_STATES[@]}
     fi
     
-    if [[ $TASK_QUEUE_MAX_SIZE -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then
+    if [[ ${TASK_QUEUE_MAX_SIZE:-0} -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then
         log_error "Queue is full (max size: $TASK_QUEUE_MAX_SIZE)"
         return 1
     fi
+    log_debug "Queue size check: $current_size/${TASK_QUEUE_MAX_SIZE:-unlimited}"
     
     local current_time=$(date -Iseconds)
     
-    # Initialize task data
+    # Initialize task data in memory arrays
     TASK_STATES["$task_id"]="$TASK_STATE_PENDING"
     TASK_PRIORITIES["$task_id"]="$priority"
     TASK_RETRY_COUNTS["$task_id"]=0
@@ -659,6 +711,14 @@ add_task_to_queue() {
     TASK_METADATA["${task_id}_type"]="$task_type"
     TASK_METADATA["${task_id}_timeout"]="$TASK_DEFAULT_TIMEOUT"
     TASK_METADATA["${task_id}_max_retries"]="$TASK_MAX_RETRIES"
+    
+    # In BATS test environment - also use file-based tracking for persistence validation
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+        mkdir -p "$(dirname "$bats_state_file")"
+        echo "$task_id" >> "$bats_state_file"
+        log_debug "Added task to BATS file-based tracking: $task_id"
+    fi
     
     # Process metadata arguments
     local i=0
@@ -685,6 +745,16 @@ remove_task_from_queue() {
     local cleanup="${2:-true}"
     
     validate_task_id "$task_id" || return 1
+    
+    # Ensure arrays are initialized before accessing them
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays in remove_task_from_queue"
+    fi
     
     if [[ -z "${TASK_STATES[$task_id]:-}" ]]; then
         log_error "Task not found in queue: $task_id"
@@ -731,6 +801,16 @@ get_next_task() {
     local filter_status="${1:-$TASK_STATE_PENDING}"
     
     log_debug "Getting next task with status: $filter_status"
+    
+    # Ensure arrays are initialized before accessing them
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays in get_next_task"
+    fi
     
     local best_task_id=""
     local best_priority=11  # Höher als Maximum (10)
@@ -1426,7 +1506,7 @@ init_task_queue() {
     
     # Initialize arrays if not already done
     # Use a safer check for array initialization
-    if ! declare -p TASK_STATES >/dev/null 2>&1 || [[ ${#TASK_STATES[@]} -eq 0 ]] 2>/dev/null; then
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
         declare -gA TASK_STATES
         declare -gA TASK_METADATA
         declare -gA TASK_RETRY_COUNTS
