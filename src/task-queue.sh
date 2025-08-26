@@ -1123,6 +1123,370 @@ cleanup_all_typed_locks() {
 }
 
 # ===============================================================================
+# PHASE 2: ENHANCED LOCKING ROBUSTNESS (Issue #47)
+# ===============================================================================
+
+# Lock operation metrics tracking
+declare -A LOCK_METRICS=(
+    ["successful_acquisitions"]="0"
+    ["failed_acquisition_attempts"]="0" 
+    ["total_failures"]="0"
+    ["total_wait_time"]="0.0"
+    ["max_wait_time"]="0.0"
+    ["stale_cleanups"]="0"
+    ["detailed_failures"]="0"
+    ["failure_reports_generated"]="0"
+)
+
+# Update lock metrics for performance tracking
+update_lock_metrics() {
+    local metric="$1"
+    local value="$2"
+    local operation="${3:-increment}"
+    
+    case "$operation" in
+        "increment")
+            LOCK_METRICS["$metric"]=$((${LOCK_METRICS["$metric"]} + ${value:-1}))
+            ;;
+        "add")
+            if command -v bc >/dev/null 2>&1; then
+                LOCK_METRICS["$metric"]=$(echo "${LOCK_METRICS["$metric"]} + $value" | bc -l)
+            else
+                # Fallback for systems without bc
+                LOCK_METRICS["$metric"]=$((${LOCK_METRICS["$metric"]%.*} + ${value%.*}))
+            fi
+            ;;
+        "set")
+            LOCK_METRICS["$metric"]="$value"
+            ;;
+        "max")
+            if command -v bc >/dev/null 2>&1; then
+                if (( $(echo "${value} > ${LOCK_METRICS["$metric"]}" | bc -l 2>/dev/null || echo 0) )); then
+                    LOCK_METRICS["$metric"]="$value"
+                fi
+            else
+                # Simple integer comparison fallback
+                if [[ ${value%.*} -gt ${LOCK_METRICS["$metric"]%.*} ]]; then
+                    LOCK_METRICS["$metric"]="$value"
+                fi
+            fi
+            ;;
+    esac
+}
+
+# Get current lock metrics as CSV (for monitoring)
+get_current_lock_metrics() {
+    echo "${LOCK_METRICS[successful_acquisitions]:-0},${LOCK_METRICS[total_failures]:-0},${LOCK_METRICS[total_wait_time]:-0},${LOCK_METRICS[max_wait_time]:-0}"
+}
+
+# Show detailed lock metrics
+show_lock_metrics() {
+    local success_count=${LOCK_METRICS[successful_acquisitions]:-0}
+    local failure_count=${LOCK_METRICS[total_failures]:-0}
+    local total_attempts=$((success_count + failure_count))
+    local success_rate="0"
+    
+    if [[ $total_attempts -gt 0 ]]; then
+        if command -v bc >/dev/null 2>&1; then
+            success_rate=$(echo "scale=2; $success_count * 100 / $total_attempts" | bc -l)
+        else
+            success_rate=$(( success_count * 100 / total_attempts ))
+        fi
+    fi
+    
+    cat << EOF
+=== Lock Performance Metrics ===
+Total lock attempts: $total_attempts
+Successful acquisitions: $success_count
+Failed attempts: ${LOCK_METRICS[failed_acquisition_attempts]:-0}
+Total failures: $failure_count
+Success rate: ${success_rate}%
+Total wait time: ${LOCK_METRICS[total_wait_time]:-0}s
+Max wait time: ${LOCK_METRICS[max_wait_time]:-0}s
+Stale locks cleaned: ${LOCK_METRICS[stale_cleanups]:-0}
+Detailed failure reports: ${LOCK_METRICS[failure_reports_generated]:-0}
+EOF
+}
+
+# Advanced lock acquisition with load-aware adaptive backoff
+acquire_lock_adaptive_backoff() {
+    local max_attempts=${1:-10}
+    local operation_type="${2:-standard}"
+    local base_delay=0.05
+    local max_delay=2.0
+    local attempt=0
+    
+    # Get system load for adaptive behavior
+    local system_load="1.0"
+    if uptime >/dev/null 2>&1; then
+        system_load=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ' 2>/dev/null || echo "1.0")
+    fi
+    
+    # Adjust parameters based on system load
+    if command -v bc >/dev/null 2>&1 && (( $(echo "$system_load > 2.0" | bc -l 2>/dev/null || echo 0) )); then
+        max_attempts=$((max_attempts + 5))
+        max_delay=5.0
+        log_debug "High system load detected ($system_load), extending retry parameters"
+    fi
+    
+    # Operation-specific timeout adjustments
+    case "$operation_type" in
+        "read-only")
+            max_attempts=3
+            max_delay=1.0
+            ;;
+        "critical")
+            max_attempts=20
+            max_delay=10.0
+            ;;
+        "batch")
+            max_attempts=15
+            max_delay=5.0
+            ;;
+    esac
+    
+    local lock_start=$(date +%s.%N 2>/dev/null || date +%s)
+    
+    while [[ $attempt -lt $max_attempts ]]; do
+        local attempt_start=$(date +%s.%N 2>/dev/null || date +%s)
+        
+        if acquire_queue_lock_atomic "$operation_type"; then
+            local duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $lock_start" | bc -l 2>/dev/null || echo "0")
+            update_lock_metrics "successful_acquisitions" 1
+            update_lock_metrics "total_wait_time" "$duration" "add"
+            update_lock_metrics "max_wait_time" "$duration" "max"
+            return 0
+        fi
+        
+        update_lock_metrics "failed_acquisition_attempts" 1
+        
+        # Adaptive exponential backoff with jitter and load awareness
+        local base_wait
+        if command -v bc >/dev/null 2>&1; then
+            base_wait=$(echo "$base_delay * (1.5 ^ $attempt)" | bc -l 2>/dev/null || echo "1")
+            local load_factor=$(echo "$system_load / 2.0" | bc -l 2>/dev/null || echo "1")
+            local jitter=$(echo "scale=3; ($RANDOM % 1000) / 10000.0" | bc -l 2>/dev/null || echo "0.01")
+            local adaptive_wait=$(echo "$base_wait * $load_factor + $jitter" | bc -l 2>/dev/null || echo "$base_wait")
+            
+            # Cap at max_delay
+            local final_wait=$(echo "if ($adaptive_wait > $max_delay) $max_delay else $adaptive_wait" | bc -l 2>/dev/null || echo "$max_delay")
+        else
+            # Fallback without bc
+            base_wait=$((attempt < 5 ? attempt * 250 : 1000))  # milliseconds
+            local final_wait=$(echo "scale=3; $base_wait / 1000" | bc -l 2>/dev/null || echo "1")
+        fi
+        
+        log_debug "Lock attempt $((attempt + 1))/$max_attempts failed, adaptive wait: ${final_wait}s (load: $system_load)"
+        sleep "$final_wait" 2>/dev/null || sleep 1
+        
+        ((attempt++))
+    done
+    
+    update_lock_metrics "total_failures" 1
+    log_error "Failed to acquire lock after $max_attempts adaptive attempts (system load: $system_load)"
+    
+    # Generate failure report for analysis
+    handle_lock_failure "$operation_type" "timeout" "$max_attempts"
+    
+    return 1
+}
+
+# Enhanced error handling with detailed failure reporting
+handle_lock_failure() {
+    local operation="$1"
+    local failure_reason="$2"
+    local retry_count="${3:-0}"
+    
+    # Detailed failure analysis
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    local failure_report="/tmp/lock_failure_$(date +%s)_$$.log"
+    
+    {
+        echo "=== LOCK FAILURE REPORT ==="
+        echo "Timestamp: $(date -Iseconds)"
+        echo "Operation: $operation"  
+        echo "Failure reason: $failure_reason"
+        echo "Retry count: $retry_count"
+        echo "Process ID: $$"
+        echo "Parent PID: $PPID"
+        echo "Working directory: $PWD"
+        echo ""
+        echo "System Information:"
+        echo "System load: $(uptime 2>/dev/null || echo 'N/A')"
+        
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            echo "Memory usage: $(free -h 2>/dev/null || echo 'N/A')"
+        elif [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "Memory usage: $(vm_stat 2>/dev/null | head -5 || echo 'N/A')"
+        fi
+        
+        echo "Process count: $(ps aux | wc -l)"
+        echo "Disk usage (queue dir): $(du -sh "$PROJECT_ROOT/$TASK_QUEUE_DIR" 2>/dev/null || echo 'N/A')"
+        echo ""
+        
+        if [[ -d "$lock_dir" ]]; then
+            echo "Lock Directory Analysis:"
+            echo "Lock directory exists: $lock_dir"
+            echo "Directory permissions: $(ls -ld "$lock_dir" 2>/dev/null || echo 'N/A')"
+            echo "Lock PID: $(cat "$lock_dir/pid" 2>/dev/null || echo 'N/A')"
+            echo "Lock timestamp: $(cat "$lock_dir/timestamp" 2>/dev/null || echo 'N/A')" 
+            echo "Lock hostname: $(cat "$lock_dir/hostname" 2>/dev/null || echo 'N/A')"
+            echo "Lock user: $(cat "$lock_dir/user" 2>/dev/null || echo 'N/A')"
+            echo "Lock operation: $(cat "$lock_dir/operation" 2>/dev/null || echo 'N/A')"
+            
+            # Process validation
+            local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null)
+            if [[ -n "$lock_pid" ]]; then
+                if kill -0 "$lock_pid" 2>/dev/null; then
+                    echo "Lock process status: ALIVE"
+                    echo "Lock process info: $(ps -p "$lock_pid" -o pid,ppid,etime,comm,args 2>/dev/null || echo 'N/A')"
+                else
+                    echo "Lock process status: DEAD"
+                fi
+            fi
+        else
+            echo "Lock directory does not exist: $lock_dir"
+        fi
+        
+        echo ""
+        echo "Current Lock Metrics:"
+        get_current_lock_metrics | sed 's/^/  /'
+        echo ""
+        echo "=== END REPORT ==="
+    } > "$failure_report"
+    
+    # Log the failure
+    log_error "Lock operation failed: $operation (detailed report: $failure_report)"
+    
+    # Attempt intelligent recovery
+    case "$failure_reason" in
+        "stale_lock")
+            log_info "Attempting stale lock cleanup recovery"
+            cleanup_stale_lock "$lock_dir" && update_lock_metrics "stale_cleanups" 1
+            ;;
+        "timeout")
+            log_info "Timeout failure - checking system resources"
+            # Could trigger system health check or backoff adjustment
+            ;;
+        "resource_exhaustion") 
+            log_warn "Resource exhaustion detected - backing off operations"
+            sleep 5
+            ;;
+        "permission_denied")
+            log_error "Permission denied - check directory permissions"
+            ls -la "$PROJECT_ROOT/$TASK_QUEUE_DIR" >/dev/null 2>&1 || true
+            ;;
+    esac
+    
+    # Update failure metrics
+    update_lock_metrics "detailed_failures" 1
+    update_lock_metrics "failure_reports_generated" 1
+    
+    # Keep only the most recent 10 failure reports to prevent disk bloat
+    find /tmp -name "lock_failure_*.log" -type f -mtime +1 -delete 2>/dev/null || true
+    local report_count=$(find /tmp -name "lock_failure_*.log" -type f 2>/dev/null | wc -l)
+    if [[ $report_count -gt 10 ]]; then
+        find /tmp -name "lock_failure_*.log" -type f -printf '%T@ %p\n' 2>/dev/null | \
+        sort -n | head -n -10 | cut -d' ' -f2- | xargs -r rm -f 2>/dev/null || true
+    fi
+}
+
+# Operation-specific timeout configuration
+declare -A OPERATION_TIMEOUTS=(
+    ["add_task_cmd"]="10"
+    ["remove_task_cmd"]="5" 
+    ["batch_add_tasks"]="30"
+    ["batch_operation_cmd"]="45"
+    ["import_with_merge"]="60"
+    ["interactive_mode"]="5"
+    ["status_cmd"]="2"
+    ["list_tasks_cmd"]="2"
+    ["show_current_config"]="2"
+    ["cleanup_cmd"]="15"
+)
+
+# Get operation-specific timeout
+get_operation_timeout() {
+    local operation="$1"
+    local default_timeout=${2:-30}
+    
+    echo "${OPERATION_TIMEOUTS[$operation]:-$default_timeout}"
+}
+
+# Enhanced lock wrapper with intelligent retry and monitoring
+with_enhanced_lock() {
+    local operation="$1"
+    shift
+    local start_time=$(date +%s.%N 2>/dev/null || date +%s)
+    local result=0
+    
+    # Check if we already hold a lock (prevent nested locking)
+    if [[ "${QUEUE_LOCK_HELD:-false}" == "true" ]]; then
+        log_debug "Enhanced lock already held - executing $operation directly"
+        "$operation" "$@"
+        return $?
+    fi
+    
+    log_debug "Starting enhanced lock operation: $operation"
+    export QUEUE_LOCK_HELD=true
+    
+    # Get operation-specific parameters
+    local operation_timeout
+    operation_timeout=$(get_operation_timeout "$operation")
+    local max_attempts=$(( operation_timeout > 10 ? operation_timeout / 2 : 5 ))
+    
+    # Determine operation type for adaptive backoff
+    local operation_type="standard"
+    case "$operation" in
+        *status*|*list*|*show*) operation_type="read-only" ;;
+        *batch*|*import*) operation_type="batch" ;;
+        *add*|*remove*|*cleanup*) operation_type="critical" ;;
+    esac
+    
+    if acquire_lock_adaptive_backoff "$max_attempts" "$operation_type"; then
+        # Execute operation with monitoring
+        local exec_start_time=$(date +%s.%N 2>/dev/null || date +%s)
+        "$operation" "$@"
+        result=$?
+        local exec_end_time=$(date +%s.%N 2>/dev/null || date +%s)
+        
+        # Log performance metrics
+        if command -v bc >/dev/null 2>&1; then
+            local exec_duration=$(echo "$exec_end_time - $exec_start_time" | bc -l 2>/dev/null || echo "N/A")
+            log_debug "Enhanced operation $operation completed in ${exec_duration}s (exit code: $result)"
+        else
+            log_debug "Enhanced operation $operation completed (exit code: $result)"
+        fi
+        
+        # Always release lock
+        release_queue_lock_atomic
+        
+        if command -v bc >/dev/null 2>&1; then
+            local total_duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $start_time" | bc -l 2>/dev/null || echo "N/A")
+            log_debug "Total enhanced lock duration: ${total_duration}s"
+        fi
+        
+        export QUEUE_LOCK_HELD=false
+        return $result
+    else
+        log_error "Cannot execute enhanced operation without lock: $operation"
+        export QUEUE_LOCK_HELD=false
+        return 1
+    fi
+}
+
+# Reset lock metrics (for testing or maintenance)
+reset_lock_metrics() {
+    for metric in "${!LOCK_METRICS[@]}"; do
+        case "$metric" in
+            *_time|*rate) LOCK_METRICS["$metric"]="0.0" ;;
+            *) LOCK_METRICS["$metric"]="0" ;;
+        esac
+    done
+    log_info "Lock metrics reset to zero"
+}
+
+# ===============================================================================
 # JSON-PERSISTENZ-LAYER
 # ===============================================================================
 
