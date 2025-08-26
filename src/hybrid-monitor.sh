@@ -196,6 +196,25 @@ load_dependencies() {
         "session-manager.sh"
     )
     
+    # Task Queue Module (optional - nur wenn verfügbar)
+    # Note: task-queue.sh is designed as standalone script, not for sourcing
+    # We'll use it via direct execution rather than sourcing
+    local task_queue_script="$SCRIPT_DIR/task-queue.sh"
+    if [[ -f "$task_queue_script" && -r "$task_queue_script" && -x "$task_queue_script" ]]; then
+        # Test if task-queue.sh is functional
+        if "$task_queue_script" list >/dev/null 2>&1; then
+            log_debug "Task Queue script validated and functional"
+            export TASK_QUEUE_AVAILABLE=true
+            export TASK_QUEUE_SCRIPT="$task_queue_script"
+        else
+            log_warn "Task Queue script exists but not functional"
+            export TASK_QUEUE_AVAILABLE=false
+        fi
+    else
+        log_warn "Task Queue script not found or not executable at: $task_queue_script"
+        export TASK_QUEUE_AVAILABLE=false
+    fi
+    
     for module in "${modules[@]}"; do
         local module_path="$SCRIPT_DIR/$module"
         if [[ -f "$module_path" ]]; then
@@ -294,7 +313,7 @@ load_configuration() {
             
             # Setze bekannte Konfigurationsvariablen
             case "$key" in
-                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED)
+                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR)
                     eval "$key='$value'"
                     log_debug "Config: $key=$value"
                     ;;
@@ -313,6 +332,39 @@ load_configuration() {
     else
         log_warn "Configuration file not found: $config_path (using defaults)"
     fi
+}
+
+# Lade Task Queue Konfiguration und bestimme Processing-Modus
+load_task_queue_config() {
+    log_debug "Loading task queue configuration"
+    
+    # Task Queue Processing aktivieren wenn:
+    # 1. TASK_QUEUE_ENABLED=true in config, oder 
+    # 2. --queue-mode CLI parameter verwendet wird
+    if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" || "${QUEUE_MODE:-false}" == "true" ]]; then
+        if [[ "${TASK_QUEUE_AVAILABLE:-false}" == "true" ]]; then
+            export TASK_QUEUE_PROCESSING=true
+            log_info "Task Queue processing enabled"
+            
+            # Initialize task queue system
+            if declare -f init_task_queue_system >/dev/null 2>&1; then
+                if ! init_task_queue_system; then
+                    log_error "Failed to initialize task queue system"
+                    export TASK_QUEUE_PROCESSING=false
+                    return 1
+                fi
+            fi
+        else
+            log_warn "Task Queue processing requested but module not available"
+            export TASK_QUEUE_PROCESSING=false
+            return 1
+        fi
+    else
+        export TASK_QUEUE_PROCESSING=false
+        log_debug "Task Queue processing disabled"
+    fi
+    
+    return 0
 }
 
 # Validiere Systemvoraussetzungen
@@ -379,6 +431,135 @@ validate_system_requirements() {
     fi
     
     log_info "All system requirements validated"
+    return 0
+}
+
+# ===============================================================================
+# TASK QUEUE OPERATIONS
+# ===============================================================================
+
+# Behandle Task Queue CLI Operations
+handle_task_queue_operations() {
+    log_debug "Processing task queue operations"
+    
+    # Prüfe ob Task Queue verfügbar ist
+    if [[ "${TASK_QUEUE_AVAILABLE:-false}" != "true" ]]; then
+        log_error "Task Queue module not available - cannot process queue operations"
+        return 1
+    fi
+    
+    # Handle verschiedene Queue-Operationen
+    local operation_handled=false
+    
+    if [[ "$ADD_ISSUE" != "" ]]; then
+        log_info "Adding GitHub issue to queue: $ADD_ISSUE"
+        if "${TASK_QUEUE_SCRIPT}" add github_issue "$ADD_ISSUE" "Process GitHub Issue #$ADD_ISSUE"; then
+            log_info "Successfully added GitHub issue $ADD_ISSUE to queue"
+            operation_handled=true
+        else
+            log_error "Failed to add GitHub issue $ADD_ISSUE to queue"
+        fi
+    fi
+    
+    if [[ "$ADD_PR" != "" ]]; then
+        log_info "Adding GitHub PR to queue: $ADD_PR"
+        if "${TASK_QUEUE_SCRIPT}" add github_pr "$ADD_PR" "Process GitHub PR #$ADD_PR"; then
+            log_info "Successfully added GitHub PR $ADD_PR to queue"
+            operation_handled=true
+        else
+            log_error "Failed to add GitHub PR $ADD_PR to queue"
+        fi
+    fi
+    
+    if [[ "$ADD_CUSTOM" != "" ]]; then
+        log_info "Adding custom task to queue: $ADD_CUSTOM"
+        # Generate unique task ID
+        local task_id="custom-$(date +%s)"
+        if "${TASK_QUEUE_SCRIPT}" add custom "$task_id" "$ADD_CUSTOM"; then
+            log_info "Successfully added custom task to queue: $task_id"
+            operation_handled=true
+        else
+            log_error "Failed to add custom task to queue"
+        fi
+    fi
+    
+    if [[ "$LIST_QUEUE" == "true" ]]; then
+        log_info "Displaying task queue:"
+        "${TASK_QUEUE_SCRIPT}" list
+        operation_handled=true
+    fi
+    
+    if [[ "$PAUSE_QUEUE" == "true" ]]; then
+        log_info "Pausing task queue"
+        if "${TASK_QUEUE_SCRIPT}" pause "Manual pause via CLI"; then
+            log_info "Task queue paused successfully"
+            operation_handled=true
+        else
+            log_error "Failed to pause task queue"
+        fi
+    fi
+    
+    if [[ "$RESUME_QUEUE" == "true" ]]; then
+        log_info "Resuming task queue"
+        if "${TASK_QUEUE_SCRIPT}" resume; then
+            log_info "Task queue resumed successfully"
+            operation_handled=true
+        else
+            log_error "Failed to resume task queue"
+        fi
+    fi
+    
+    if [[ "$CLEAR_QUEUE" == "true" ]]; then
+        log_info "Clearing task queue"
+        if "${TASK_QUEUE_SCRIPT}" clear "Manual clear via CLI"; then
+            log_info "Task queue cleared successfully"
+            operation_handled=true
+        else
+            log_error "Failed to clear task queue"
+        fi
+    fi
+    
+    return 0
+}
+
+# Verarbeite Task Queue (wird von continuous_monitoring_loop() aufgerufen)
+process_task_queue() {
+    log_debug "Checking task queue for pending tasks"
+    
+    # Prüfe ob Queue verfügbar ist
+    if [[ "${TASK_QUEUE_AVAILABLE:-false}" != "true" ]]; then
+        log_debug "Task queue not available - skipping processing"
+        return 0
+    fi
+    
+    # Prüfe ob Queue pausiert ist
+    if "${TASK_QUEUE_SCRIPT}" status | grep -q "Queue Status: paused"; then
+        log_debug "Task queue is paused - skipping processing"
+        return 0
+    fi
+    
+    # Prüfe auf pending tasks - verwende task-queue.sh list command
+    local pending_tasks
+    pending_tasks=$("${TASK_QUEUE_SCRIPT}" list --status=pending --count-only 2>/dev/null)
+    if [[ -z "$pending_tasks" || "$pending_tasks" -eq 0 ]]; then
+        log_debug "No pending tasks in queue"
+        return 0
+    fi
+    
+    # Hole nächste Task - für Phase 1 nur ersten pending task identifizieren
+    local next_task_id
+    next_task_id=$("${TASK_QUEUE_SCRIPT}" list --status=pending --format=id-only --limit=1 2>/dev/null | head -1)
+    if [[ -z "$next_task_id" ]]; then
+        log_debug "No executable tasks available"
+        return 0
+    fi
+    
+    log_info "Found pending task for processing: $next_task_id"
+    
+    # Placeholder für Phase 2 - aktuell nur logging
+    # TODO: Implement execute_single_task function in Phase 2
+    log_info "Task processing will be implemented in Phase 2: $next_task_id"
+    
     return 0
 }
 
@@ -575,6 +756,7 @@ continuous_monitoring_loop() {
     log_info "  Working directory: $WORKING_DIR"
     log_info "  Use claunch: $USE_CLAUNCH"
     log_info "  Use new terminal: $USE_NEW_TERMINAL"
+    log_info "  Task queue processing: ${TASK_QUEUE_PROCESSING:-false}"
     
     # Task Queue Configuration Display
     if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
@@ -785,6 +967,11 @@ TASK QUEUE WORKFLOW:
     3. Monitor progress: Task completion detected via pattern matching
     4. Review results: GitHub integration provides progress comments
 
+    # Queue mode examples
+    $SCRIPT_NAME --add-custom "Implement user authentication feature"
+    $SCRIPT_NAME --add-issue 123
+    $SCRIPT_NAME --queue-mode --continuous
+
 CONFIGURATION:
     Configuration is loaded from $CONFIG_FILE by default.
     Use --config to specify an alternative configuration file.
@@ -868,6 +1055,60 @@ parse_arguments() {
                 ;;
             --dry-run)
                 DRY_RUN=true
+                shift
+                ;;
+            --queue-mode)
+                QUEUE_MODE=true
+                shift
+                ;;
+            --add-issue)
+                if [[ -z "${2:-}" ]]; then
+                    log_error "Option $1 requires an issue number or URL"
+                    exit 1
+                fi
+                # Validate that issue number is numeric
+                if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Error: Invalid issue number '$2'. Issue numbers must be numeric."
+                    exit 1
+                fi
+                ADD_ISSUE="$2"
+                shift 2
+                ;;
+            --add-pr)
+                if [[ -z "${2:-}" ]]; then
+                    log_error "Option $1 requires a PR number or URL"
+                    exit 1
+                fi
+                # Validate that PR number is numeric
+                if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Error: Invalid PR number '$2'. PR numbers must be numeric."
+                    exit 1
+                fi
+                ADD_PR="$2"
+                shift 2
+                ;;
+            --add-custom)
+                if [[ -z "${2:-}" ]]; then
+                    log_error "Error: --add-custom requires a task description"
+                    exit 1
+                fi
+                ADD_CUSTOM="$2"
+                shift 2
+                ;;
+            --list-queue)
+                LIST_QUEUE=true
+                shift
+                ;;
+            --pause-queue)
+                PAUSE_QUEUE=true
+                shift
+                ;;
+            --resume-queue)
+                RESUME_QUEUE=true
+                shift
+                ;;
+            --clear-queue)
+                CLEAR_QUEUE=true
                 shift
                 ;;
             --version)
@@ -1809,6 +2050,19 @@ main() {
     
     # Lade Dependencies
     load_dependencies
+    
+    # Lade Task Queue Konfiguration
+    load_task_queue_config
+    
+    # Handle Task Queue Operations (falls CLI-Parameter gesetzt)
+    if [[ "$ADD_ISSUE" != "" || "$ADD_PR" != "" || "$ADD_CUSTOM" != "" || "$LIST_QUEUE" == "true" || "$PAUSE_QUEUE" == "true" || "$RESUME_QUEUE" == "true" || "$CLEAR_QUEUE" == "true" ]]; then
+        handle_task_queue_operations
+        # Exit nach Queue-Operationen falls nicht in continuous mode
+        if [[ "$CONTINUOUS_MODE" != "true" && "$QUEUE_MODE" != "true" ]]; then
+            log_info "Queue operations completed"
+            exit 0
+        fi
+    fi
     
     # Initialisiere Logging mit vollständiger Konfiguration
     if declare -f init_logging >/dev/null 2>&1; then

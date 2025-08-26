@@ -10,6 +10,8 @@
 - Persistente Session-Verwaltung mit tmux-Integration
 - Robuste Fehlerbehandlung und Monitoring
 
+- The development focus should be with the main program. if tests fail that are expected to work in the real thing then the testing process has to be revised. ok 
+
 ## 2. Technologie-Stack
 
 ### Kern-Technologien
