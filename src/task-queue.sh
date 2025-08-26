@@ -624,9 +624,10 @@ with_queue_lock_enhanced() {
     fi
 }
 
-# Legacy wrapper - now redirects to enhanced version for better compatibility
+# Legacy wrapper - now redirects to Phase 2 enhanced lock system for better performance under load
 with_queue_lock() {
-    with_queue_lock_enhanced "$@"
+    # Use the new enhanced lock system with adaptive backoff for better performance under load
+    with_enhanced_lock "$@"
 }
 
 # ===============================================================================
@@ -741,9 +742,9 @@ smart_operation_wrapper() {
         log_debug "Using lock-free path for read-only operation: $operation"
         direct_json_operation "$operation" "$@"
     else
-        # Use robust locking for state-changing operations
-        log_debug "Using locked path for state-changing operation: $operation"
-        robust_lock_wrapper "$operation" "$@"
+        # Use Phase 2 enhanced locking for state-changing operations
+        log_debug "Using enhanced lock path for state-changing operation: $operation"
+        with_enhanced_lock "$operation" "$@"
     fi
 }
 
@@ -1261,19 +1262,26 @@ acquire_lock_adaptive_backoff() {
         update_lock_metrics "failed_acquisition_attempts" 1
         
         # Adaptive exponential backoff with jitter and load awareness
-        local base_wait
+        local final_wait="0.5"  # Safe default
+        
         if command -v bc >/dev/null 2>&1; then
-            base_wait=$(echo "$base_delay * (1.5 ^ $attempt)" | bc -l 2>/dev/null || echo "1")
-            local load_factor=$(echo "$system_load / 2.0" | bc -l 2>/dev/null || echo "1")
+            local base_wait=$(echo "$base_delay * (1.5 ^ $attempt)" | bc -l 2>/dev/null || echo "0.5")
+            local load_factor=$(echo "$system_load / 2.0" | bc -l 2>/dev/null || echo "1.0")
             local jitter=$(echo "scale=3; ($RANDOM % 1000) / 10000.0" | bc -l 2>/dev/null || echo "0.01")
             local adaptive_wait=$(echo "$base_wait * $load_factor + $jitter" | bc -l 2>/dev/null || echo "$base_wait")
             
             # Cap at max_delay
-            local final_wait=$(echo "if ($adaptive_wait > $max_delay) $max_delay else $adaptive_wait" | bc -l 2>/dev/null || echo "$max_delay")
+            final_wait=$(echo "if ($adaptive_wait > $max_delay) $max_delay else $adaptive_wait" | bc -l 2>/dev/null || echo "$max_delay")
         else
-            # Fallback without bc
-            base_wait=$((attempt < 5 ? attempt * 250 : 1000))  # milliseconds
-            local final_wait=$(echo "scale=3; $base_wait / 1000" | bc -l 2>/dev/null || echo "1")
+            # Fallback without bc - simple exponential backoff
+            local base_ms=$((attempt < 5 ? attempt * 250 : 1000))  # milliseconds
+            final_wait=$(( base_ms < 2000 ? base_ms : 2000 ))  # Cap at 2000ms
+            final_wait="0.$(printf "%03d" $((final_wait % 1000)))"  # Convert to decimal seconds
+        fi
+        
+        # Ensure final_wait is never empty and is a valid number
+        if [[ -z "$final_wait" ]] || [[ ! "$final_wait" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+            final_wait="0.5"
         fi
         
         log_debug "Lock attempt $((attempt + 1))/$max_attempts failed, adaptive wait: ${final_wait}s (load: $system_load)"
@@ -1430,10 +1438,18 @@ with_enhanced_lock() {
     log_debug "Starting enhanced lock operation: $operation"
     export QUEUE_LOCK_HELD=true
     
-    # Get operation-specific parameters
+    # Get operation-specific parameters, with CLI mode override
     local operation_timeout
     operation_timeout=$(get_operation_timeout "$operation")
-    local max_attempts=$(( operation_timeout > 10 ? operation_timeout / 2 : 5 ))
+    
+    # For CLI operations, use shorter timeouts to prevent hanging
+    local max_attempts
+    if [[ "${CLI_MODE:-false}" == "true" ]]; then
+        max_attempts=8  # Increased from 5 to 8 for better success rate under load
+        operation_timeout=10  # Cap timeout for CLI operations
+    else
+        max_attempts=$(( operation_timeout > 10 ? operation_timeout / 2 : 5 ))
+    fi
     
     # Determine operation type for adaptive backoff
     local operation_type="standard"

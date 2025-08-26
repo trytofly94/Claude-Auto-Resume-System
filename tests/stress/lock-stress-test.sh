@@ -44,8 +44,9 @@ test_add_task_under_load() {
     local task_id="$1"
     local start_time=$(date +%s.%N 2>/dev/null || date +%s)
     
-    # Use the actual task queue system
-    if "$PROJECT_ROOT/src/task-queue.sh" add custom "$task_id" "Stress test task $task_id" >/dev/null 2>&1; then
+    # Use the actual task queue system with correct syntax
+    # Format: add <type> <priority> [id] [meta_key] [meta_value]
+    if "$PROJECT_ROOT/src/task-queue.sh" add custom 5 "" "description" "Stress test task $task_id" >/dev/null 2>&1; then
         local end_time=$(date +%s.%N 2>/dev/null || date +%s)
         local duration=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
         return 0
@@ -400,7 +401,7 @@ simulate_realistic_workload() {
             local op_start=$(date +%s.%N 2>/dev/null || date +%s)
             local task_id="dev_$(date +%s)_$RANDOM"
             
-            if "$PROJECT_ROOT/src/task-queue.sh" add custom "$task_id" "Dev task $task_id" >/dev/null 2>&1; then
+            if "$PROJECT_ROOT/src/task-queue.sh" add custom 5 "" "description" "Dev task $task_id" >/dev/null 2>&1; then
                 local duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $op_start" | bc -l 2>/dev/null || echo "0")
                 echo "$(date -Iseconds),$scenario,add,1,$duration" >> "$workload_results"
             else
@@ -435,7 +436,7 @@ simulate_realistic_workload() {
                 local op_start=$(date +%s.%N 2>/dev/null || date +%s)
                 local task_id="batch_$(date +%s)_${i}"
                 
-                if "$PROJECT_ROOT/src/task-queue.sh" add custom "$task_id" "Batch task $i" >/dev/null 2>&1; then
+                if "$PROJECT_ROOT/src/task-queue.sh" add custom 3 "" "description" "Batch task $i" >/dev/null 2>&1; then
                     local duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $op_start" | bc -l 2>/dev/null || echo "0")
                     echo "$(date -Iseconds),$scenario,add,1,$duration" >> "$workload_results"
                 else
