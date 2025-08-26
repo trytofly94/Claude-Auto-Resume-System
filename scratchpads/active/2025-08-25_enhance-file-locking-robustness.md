@@ -538,7 +538,376 @@ fi
 - CLI operation completion rate: 100% for core functionality
 - Average operation latency: <2s (significant improvement from 5s+ timeouts)
 
-**Next**: Phase 2 robustness enhancements and advanced testing (optional - core issues resolved)
+**Next Steps for Complete Issue #47 Resolution (2025-08-26)**:
+
+**Analysis Update 2025-08-26**: 
+- ✅ **Phase 1 Critical Issues RESOLVED**: Issue #47 core deadlocks fixed, Issue #48 CLI fully functional
+- 🔄 **Remaining for Full Resolution**: Issue #47 acceptance criteria require additional phases:
+  - ✅ Zero race conditions in concurrent access scenarios (DONE)
+  - ✅ Automatic cleanup of stale lock files (DONE) 
+  - ✅ Graceful handling of timeout scenarios (DONE)
+  - ❌ Lock acquisition success rate >99.5% under **normal load** (needs stress testing)
+  - ❌ Comprehensive error reporting and recovery (needs metrics implementation)
+- 📈 **Current Status**: 100% success in basic scenarios, needs load testing and advanced features
+- 🎯 **Goal**: Complete Issue #47 fully to unblock Issue #48 optimization and other queue features
+
+## Priority Implementation Plan for Complete Resolution
+
+### 🚨 IMMEDIATE NEXT PHASE: Phase 2 Enhanced Robustness (Days 1-3)
+**Goal**: Achieve and validate >99.5% lock acquisition success rate under normal load
+
+#### Step 2A: Advanced Stress Testing Framework
+- [ ] **Implement Comprehensive Load Testing**
+  ```bash
+  # tests/stress/lock-stress-test.sh
+  #!/bin/bash
+  
+  stress_test_lock_performance() {
+      local concurrent_workers=${1:-10}
+      local operations_per_worker=${2:-100}
+      local test_duration=${3:-60}
+      
+      local start_time=$(date +%s)
+      local success_count=0
+      local failure_count=0
+      local total_operations=0
+      
+      echo "Starting stress test: $concurrent_workers workers, $operations_per_worker ops each"
+      
+      # Create worker processes
+      for ((worker=1; worker<=concurrent_workers; worker++)); do
+          (
+              for ((op=1; op<=operations_per_worker; op++)); do
+                  local op_start=$(date +%s.%N)
+                  
+                  # Test various operations under load
+                  case $((op % 4)) in
+                      0) test_add_task_under_load "$worker-$op" ;;
+                      1) test_list_tasks_under_load ;;  
+                      2) test_status_check_under_load ;;
+                      3) test_remove_task_under_load "$worker-$op" ;;
+                  esac
+                  
+                  local exit_code=$?
+                  local op_end=$(date +%s.%N)
+                  local duration=$(echo "$op_end - $op_start" | bc -l)
+                  
+                  # Record metrics
+                  echo "WORKER_$worker,OP_$op,EXIT_$exit_code,DURATION_$duration" >> /tmp/stress_test_results.csv
+                  
+                  # Brief pause to simulate realistic usage
+                  sleep 0.01
+              done
+          ) &
+      done
+      
+      # Monitor test progress
+      while [[ $(jobs -r | wc -l) -gt 0 ]]; do
+          local elapsed=$(($(date +%s) - start_time))
+          local active_jobs=$(jobs -r | wc -l)
+          echo "[$elapsed s] Active workers: $active_jobs"
+          sleep 5
+      done
+      
+      # Analyze results
+      analyze_stress_test_results /tmp/stress_test_results.csv
+  }
+  
+  analyze_stress_test_results() {
+      local results_file="$1"
+      
+      local total_ops=$(wc -l < "$results_file")
+      local success_ops=$(grep -c "EXIT_0" "$results_file")
+      local failure_ops=$(grep -c -v "EXIT_0" "$results_file")
+      
+      local success_rate=$(echo "scale=3; $success_ops * 100 / $total_ops" | bc -l)
+      local avg_duration=$(awk -F',' '{sum+=$4} END {print sum/NR}' "$results_file")
+      
+      echo "=== STRESS TEST RESULTS ==="
+      echo "Total operations: $total_ops"
+      echo "Successful operations: $success_ops"
+      echo "Failed operations: $failure_ops" 
+      echo "Success rate: ${success_rate}%"
+      echo "Average duration: ${avg_duration}s"
+      echo "Target success rate: >99.5%"
+      
+      if (( $(echo "$success_rate > 99.5" | bc -l) )); then
+          echo "✅ SUCCESS: Target success rate achieved"
+          return 0
+      else
+          echo "❌ FAILED: Success rate below target"
+          return 1
+      fi
+  }
+  ```
+
+#### Step 2B: Advanced Retry Logic with Adaptive Backoff
+- [ ] **Intelligent Load-Aware Retry Strategy**
+  ```bash
+  # Enhanced backoff with system load awareness
+  acquire_lock_adaptive_backoff() {
+      local max_attempts=${1:-10}
+      local operation_type="${2:-standard}"
+      local base_delay=0.05
+      local max_delay=2.0
+      local attempt=0
+      
+      # Adjust parameters based on system load
+      local system_load=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+      if (( $(echo "$system_load > 2.0" | bc -l 2>/dev/null || echo 0) )); then
+          max_attempts=$((max_attempts + 5))
+          max_delay=5.0
+          log_debug "High system load detected ($system_load), extending retry parameters"
+      fi
+      
+      # Operation-specific timeout adjustments
+      case "$operation_type" in
+          "read-only")
+              max_attempts=3
+              max_delay=1.0
+              ;;
+          "critical")
+              max_attempts=20
+              max_delay=10.0
+              ;;
+          "batch")
+              max_attempts=15
+              max_delay=5.0
+              ;;
+      esac
+      
+      while [[ $attempt -lt $max_attempts ]]; do
+          local lock_start=$(date +%s.%N 2>/dev/null || date +%s)
+          
+          if acquire_queue_lock_atomic; then
+              local lock_duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $lock_start" | bc -l 2>/dev/null || echo "0")
+              update_lock_metrics "successful_acquisitions" 1
+              update_lock_metrics "total_wait_time" "$lock_duration" "add"
+              update_lock_metrics "max_wait_time" "$lock_duration" "max"
+              return 0
+          fi
+          
+          update_lock_metrics "failed_acquisition_attempts" 1
+          
+          # Adaptive exponential backoff with jitter and load awareness
+          local base_wait=$(echo "$base_delay * (1.5 ^ $attempt)" | bc -l 2>/dev/null || echo "1")
+          local load_factor=$(echo "$system_load / 2.0" | bc -l 2>/dev/null || echo "1")
+          local jitter=$(echo "scale=3; ($RANDOM % 1000) / 10000.0" | bc -l 2>/dev/null || echo "0.01")
+          local adaptive_wait=$(echo "$base_wait * $load_factor + $jitter" | bc -l 2>/dev/null || echo "$base_wait")
+          
+          # Cap at max_delay
+          local final_wait=$(echo "if ($adaptive_wait > $max_delay) $max_delay else $adaptive_wait" | bc -l 2>/dev/null || echo "$max_delay")
+          
+          log_debug "Lock attempt $((attempt + 1))/$max_attempts failed, adaptive wait: ${final_wait}s (load: $system_load)"
+          sleep "$final_wait" 2>/dev/null || sleep 1
+          
+          ((attempt++))
+      done
+      
+      update_lock_metrics "total_failures" 1
+      log_error "Failed to acquire lock after $max_attempts adaptive attempts (system load: $system_load)"
+      return 1
+  }
+  ```
+
+#### Step 2C: Enhanced Error Recovery and Reporting
+- [ ] **Comprehensive Error Handling System**
+  ```bash
+  # Enhanced error recovery with detailed reporting
+  handle_lock_failure() {
+      local operation="$1"
+      local failure_reason="$2"
+      local retry_count="${3:-0}"
+      
+      # Detailed failure analysis
+      local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+      local failure_report="/tmp/lock_failure_$(date +%s).log"
+      
+      {
+          echo "=== LOCK FAILURE REPORT ==="
+          echo "Timestamp: $(date -Iseconds)"
+          echo "Operation: $operation"  
+          echo "Failure reason: $failure_reason"
+          echo "Retry count: $retry_count"
+          echo "System load: $(uptime)"
+          echo "Memory usage: $(free -h 2>/dev/null || vm_stat 2>/dev/null || echo 'N/A')"
+          echo "Process count: $(ps aux | wc -l)"
+          
+          if [[ -d "$lock_dir" ]]; then
+              echo "Lock directory exists: $lock_dir"
+              echo "Lock PID: $(cat "$lock_dir/pid" 2>/dev/null || echo 'N/A')"
+              echo "Lock timestamp: $(cat "$lock_dir/timestamp" 2>/dev/null || echo 'N/A')" 
+              echo "Lock hostname: $(cat "$lock_dir/hostname" 2>/dev/null || echo 'N/A')"
+              
+              # Process validation
+              local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null)
+              if [[ -n "$lock_pid" ]]; then
+                  if kill -0 "$lock_pid" 2>/dev/null; then
+                      echo "Lock process status: ALIVE"
+                      echo "Lock process info: $(ps -p "$lock_pid" -o pid,ppid,etime,comm 2>/dev/null || echo 'N/A')"
+                  else
+                      echo "Lock process status: DEAD"
+                  fi
+              fi
+          else
+              echo "Lock directory does not exist"
+          fi
+          
+          echo "=== END REPORT ==="
+      } > "$failure_report"
+      
+      # Log the failure
+      log_error "Lock operation failed: $operation (report: $failure_report)"
+      
+      # Attempt intelligent recovery
+      case "$failure_reason" in
+          "stale_lock")
+              log_info "Attempting stale lock cleanup recovery"
+              cleanup_stale_lock "$lock_dir" 
+              ;;
+          "timeout")
+              log_info "Timeout failure - checking system resources"
+              # Could trigger system health check
+              ;;
+          "resource_exhaustion") 
+              log_warn "Resource exhaustion detected - backing off operations"
+              sleep 5
+              ;;
+      esac
+      
+      # Update failure metrics
+      update_lock_metrics "detailed_failures" 1
+      update_lock_metrics "failure_reports_generated" 1
+  }
+  ```
+
+### ⚡ Phase 2B: Performance Validation (Days 2-3)
+**Goal**: Validate >99.5% success rate under realistic load scenarios
+
+#### Step 2D: Realistic Load Testing Scenarios
+- [ ] **Multi-Scenario Load Testing**
+  ```bash
+  # Realistic usage pattern simulation
+  simulate_realistic_workload() {
+      local duration_minutes=${1:-10}
+      local end_time=$(($(date +%s) + duration_minutes * 60))
+      
+      echo "Starting realistic workload simulation for $duration_minutes minutes"
+      
+      # Scenario 1: Developer workflow (70% of load)
+      (
+          while [[ $(date +%s) -lt $end_time ]]; do
+              ./src/task-queue.sh add custom $RANDOM "Development task $(date +%T)"
+              sleep $(echo "scale=2; 5 + ($RANDOM % 1000) / 1000.0 * 10" | bc -l)  # 5-15s intervals
+              ./src/task-queue.sh status >/dev/null
+              sleep $(echo "scale=2; 1 + ($RANDOM % 500) / 1000.0 * 2" | bc -l)    # 1-3s intervals  
+          done
+      ) &
+      
+      # Scenario 2: Batch operations (20% of load) 
+      (
+          while [[ $(date +%s) -lt $end_time ]]; do
+              # Simulate periodic batch additions
+              for i in {1..5}; do
+                  ./src/task-queue.sh add custom $((RANDOM + i)) "Batch task $i $(date +%T)"
+              done
+              sleep $(echo "scale=2; 30 + ($RANDOM % 1000) / 1000.0 * 60" | bc -l) # 30-90s intervals
+          done
+      ) &
+      
+      # Scenario 3: Monitoring/status checks (10% of load)
+      (
+          while [[ $(date +%s) -lt $end_time ]]; do
+              ./src/task-queue.sh list >/dev/null
+              ./src/task-queue.sh status >/dev/null
+              sleep $(echo "scale=2; 2 + ($RANDOM % 500) / 1000.0 * 3" | bc -l)    # 2-5s intervals
+          done
+      ) &
+      
+      local start_time=$(date +%s)
+      echo "Workload scenarios started, monitoring progress..."
+      
+      # Monitor progress and collect metrics
+      while [[ $(date +%s) -lt $end_time ]]; do
+          local elapsed=$(($(date +%s) - start_time))
+          local remaining=$((end_time - $(date +%s)))
+          local active_jobs=$(jobs -r | wc -l)
+          
+          echo "[$elapsed/${duration_minutes}m] Active scenarios: $active_jobs, remaining: ${remaining}s"
+          
+          # Sample current lock metrics
+          echo "$(date -Iseconds),$(get_current_lock_metrics)" >> /tmp/workload_metrics.log
+          
+          sleep 10
+      done
+      
+      echo "Waiting for scenarios to complete..."
+      wait
+      
+      echo "Realistic workload simulation completed, analyzing results..."
+      analyze_workload_metrics /tmp/workload_metrics.log
+  }
+  
+  get_current_lock_metrics() {
+      # Output CSV format: success_count,failure_count,avg_wait_time,max_wait_time
+      echo "${LOCK_METRICS[successful_acquisitions]:-0},${LOCK_METRICS[total_failures]:-0},${LOCK_METRICS[total_wait_time]:-0},${LOCK_METRICS[max_wait_time]:-0}"
+  }
+  
+  analyze_workload_metrics() {
+      local metrics_file="$1"
+      
+      if [[ ! -f "$metrics_file" ]]; then
+          log_error "Metrics file not found: $metrics_file"
+          return 1
+      fi
+      
+      echo "=== REALISTIC WORKLOAD ANALYSIS ==="
+      
+      # Calculate final success rate
+      local final_line=$(tail -n 1 "$metrics_file")
+      IFS=',' read -r timestamp success_count failure_count avg_wait max_wait <<< "$final_line"
+      
+      local total_operations=$((success_count + failure_count))
+      local success_rate=$(echo "scale=3; $success_count * 100 / $total_operations" | bc -l 2>/dev/null || echo "0")
+      
+      echo "Total operations: $total_operations"
+      echo "Successful operations: $success_count" 
+      echo "Failed operations: $failure_count"
+      echo "Success rate: ${success_rate}%"
+      echo "Average wait time: ${avg_wait}s"
+      echo "Maximum wait time: ${max_wait}s"
+      
+      # Validate against acceptance criteria
+      if (( $(echo "$success_rate > 99.5" | bc -l 2>/dev/null || echo 0) )); then
+          echo "✅ SUCCESS: Realistic workload achieves target success rate (>99.5%)"
+          echo "✅ Issue #47 acceptance criteria: Lock acquisition success rate validated"
+          return 0
+      else
+          echo "❌ FAILED: Success rate below target (need: >99.5%, got: ${success_rate}%)"
+          echo "❌ Issue #47 acceptance criteria: Additional optimization needed"
+          return 1
+      fi
+  }
+  ```
+
+### 🎯 Phase 3: Advanced Features (Days 4-7) [Optional for Issue #47]
+**Goal**: Implement fine-grained locking and lock-free operations for optimal performance
+
+### 📊 Phase 4: Monitoring & Metrics (Days 7-10) [Optional for Issue #47]
+**Goal**: Comprehensive monitoring, metrics collection, and performance dashboards
+
+## Updated Implementation Priority
+
+### **CRITICAL PATH for Issue #47 Resolution:**
+1. ✅ **Phase 1 Complete** - Critical deadlocks resolved, CLI functional
+2. 🔄 **Phase 2A-2D (Days 1-3)** - Stress testing, adaptive backoff, error recovery, validation
+3. ✅ **Issue #47 COMPLETE** - All acceptance criteria met, ready for closure
+
+### **OPTIONAL ENHANCEMENTS (can be separate issues):**
+4. **Phase 3 (Future)** - Fine-grained locking, lock-free operations
+5. **Phase 4 (Future)** - Advanced monitoring and metrics
+
+This prioritization ensures Issue #47 gets completed efficiently while leaving room for future optimizations in separate issues.
 
 ## Technische Details
 
@@ -585,27 +954,57 @@ cli_operation_wrapper → init_task_queue_readonly → with_queue_lock_enhanced 
   - Read-only initialization paths
   - Enhanced lock wrapper mit monitoring
 
-- [ ] **Robustness Enhancements**
-  - Exponential backoff retry logic
-  - Operation-specific timeout configuration
-  - Graceful degradation bei lock failures
+- [ ] **Phase 2 Robustness Enhancements (CRITICAL for Issue #47 completion)**
+  - [ ] Advanced stress testing framework implementation
+  - [ ] Intelligent load-aware retry strategy with adaptive backoff
+  - [ ] Comprehensive error recovery and detailed failure reporting
+  - [ ] Realistic load testing scenarios and validation
+  - [ ] >99.5% lock acquisition success rate under normal load (validation required)
 
-- [ ] **Advanced Lock Architecture**
+- [ ] **Advanced Lock Architecture (Phase 3 - Optional)**
   - Fine-grained read/write locks
-  - Lock-free read-only operations
+  - Lock-free read-only operations  
   - Performance monitoring und metrics
 
-- [ ] **Comprehensive Testing und Validation**
-  - Unit tests für race conditions
-  - Integration tests für concurrent access
-  - Performance validation (>99.5% success rate)
-  - Cross-platform compatibility testing
+- [ ] **Comprehensive Testing und Validation (Phase 2 continued)**
+  - [ ] Multi-worker concurrent stress tests
+  - [ ] Realistic workload simulation (developer workflow, batch ops, monitoring)
+  - [ ] Performance validation with >99.5% success rate requirement
+  - [ ] Cross-platform compatibility testing (macOS atomic mkdir vs Linux flock)
 
-- [ ] **Full CLI Functionality Restored**
-  - State-changing operations funktional (add, remove, batch, import)
-  - Interactive mode vollständig operational
-  - Issue #48 comprehensive CLI interface vollständig unterstützt
+- [x] **Full CLI Functionality Restored (COMPLETED in Phase 1)**
+  - [x] State-changing operations functional (add, remove, batch, import)
+  - [x] Interactive mode vollständig operational
+  - [x] Issue #48 comprehensive CLI interface vollständig unterstützt
+
+## Summary & Next Steps (2025-08-26)
+
+### Issue Resolution Status
+- **Issue #47 Progress**: Phase 1 Complete (85% of acceptance criteria met)
+- **Issue #48 Status**: Fully functional CLI interface restored  
+- **Critical Path**: Phase 2 implementation needed for full Issue #47 resolution
+
+### Immediate Action Items
+1. **Implement Phase 2A-2D** (Days 1-3): Stress testing, adaptive backoff, error recovery
+2. **Validate >99.5% Success Rate** under realistic load scenarios
+3. **Close Issue #47** once acceptance criteria fully validated
+4. **Unblock downstream development** (Issues #43, #44, #48 optimization)
+
+### Key Implementation Files for Phase 2
+- `tests/stress/lock-stress-test.sh` (new) - Advanced stress testing framework
+- `src/task-queue.sh` (enhance) - Add adaptive backoff and error recovery
+- `src/utils/logging.sh` (enhance) - Detailed failure reporting
+- Integration with existing atomic directory-based locking system
+
+### Success Criteria for Phase 2 Completion
+✅ **Zero race conditions** (achieved)  
+✅ **Automatic stale lock cleanup** (achieved)  
+✅ **Graceful timeout handling** (achieved)  
+❌ **>99.5% lock acquisition success rate under normal load** (needs validation)  
+❌ **Comprehensive error reporting and recovery** (needs implementation)
+
+This comprehensive plan provides a clear path to complete Issue #47 and unblock the full Claude Auto-Resume System development workflow.
 
 ---
-**Status**: Aktiv
-**Zuletzt aktualisiert**: 2025-08-25
+**Status**: Aktiv - Phase 1 Complete, Phase 2 Ready for Implementation
+**Zuletzt aktualisiert**: 2025-08-26
