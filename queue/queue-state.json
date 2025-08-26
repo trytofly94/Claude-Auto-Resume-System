@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "status": "active",
+  "created": "$(date -Iseconds)",
+  "last_processed": null,
+  "stats": {
+    "total_processed": 0,
+    "successful": 0,
+    "failed": 0,
+    "timeouts": 0
+  }
+}
