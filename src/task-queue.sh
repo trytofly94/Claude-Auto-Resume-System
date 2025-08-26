@@ -1928,6 +1928,33 @@ add_task_to_queue() {
     done
     
     log_info "Task added to queue: $task_id ($task_type, priority=$priority)"
+    
+    # Persist task data to JSON file
+    if ! save_queue_state; then
+        log_error "Failed to persist task to storage, rolling back memory state"
+        # Rollback memory state
+        unset "TASK_STATES[$task_id]"
+        unset "TASK_PRIORITIES[$task_id]"
+        unset "TASK_RETRY_COUNTS[$task_id]"
+        unset "TASK_TIMESTAMPS[${task_id}_created]"
+        unset "TASK_TIMESTAMPS[${task_id}_$TASK_STATE_PENDING]"
+        unset "TASK_METADATA[${task_id}_type]"
+        unset "TASK_METADATA[${task_id}_timeout]"
+        unset "TASK_METADATA[${task_id}_max_retries]"
+        
+        # Also rollback BATS file-based tracking if applicable
+        if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+            local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+            if [[ -f "$bats_state_file" ]]; then
+                # Remove the last occurrence of this task_id from the file
+                sed -i '' "/^$task_id$/d" "$bats_state_file" 2>/dev/null || true
+            fi
+        fi
+        
+        return 1
+    fi
+    
+    log_debug "Task successfully persisted to storage: $task_id"
     echo "$task_id"  # Return task ID for caller
     return 0
 }
