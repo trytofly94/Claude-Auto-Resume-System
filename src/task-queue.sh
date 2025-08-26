@@ -2012,6 +2012,12 @@ remove_task_from_queue() {
         fi
     fi
     
+    # Persist changes to storage
+    if ! save_queue_state; then
+        log_error "Failed to persist task removal to storage for: $task_id"
+        return 1
+    fi
+    
     log_info "Task removed from queue: $task_id"
     return 0
 }
@@ -2114,6 +2120,15 @@ update_task_status() {
         TASK_STATES["$task_id"]="$new_status"
         TASK_TIMESTAMPS["${task_id}_${new_status}"]=$(date -Iseconds)
         
+        # Persist changes to storage
+        if ! save_queue_state; then
+            log_error "Failed to persist status change to storage for: $task_id"
+            # Rollback the state change
+            TASK_STATES["$task_id"]="$old_status"
+            unset "TASK_TIMESTAMPS[${task_id}_${new_status}]"
+            return 1
+        fi
+        
         return 0
     else
         log_debug "Task $task_id already in state: $new_status"
@@ -2143,6 +2158,15 @@ update_task_priority() {
     if [[ "$old_priority" != "$new_priority" ]]; then
         log_info "Task $task_id priority change: $old_priority -> $new_priority"
         TASK_PRIORITIES["$task_id"]="$new_priority"
+        
+        # Persist changes to storage
+        if ! save_queue_state; then
+            log_error "Failed to persist priority change to storage for: $task_id"
+            # Rollback the priority change
+            TASK_PRIORITIES["$task_id"]="$old_priority"
+            return 1
+        fi
+        
         return 0
     else
         log_debug "Task $task_id already has priority: $new_priority"
