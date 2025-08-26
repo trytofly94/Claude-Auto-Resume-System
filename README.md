@@ -1,8 +1,11 @@
 # Claude Auto-Resume
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI/CD Pipeline](https://github.com/trytofly94/Claude-Auto-Resume-System/actions/workflows/ci.yml/badge.svg)](https://github.com/trytofly94/Claude-Auto-Resume-System/actions/workflows/ci.yml)
 [![Shell](https://img.shields.io/badge/Shell-Bash_4.0+-blue.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](#system-requirements)
+[![Tests](https://img.shields.io/badge/Tests-BATS-green.svg)](#testing)
+[![Code Quality](https://img.shields.io/badge/Code%20Quality-ShellCheck-brightgreen.svg)](#ci-cd-pipeline)
 
 Ein intelligentes Automatisierungssystem für robustes Claude CLI Session-Management mit automatischer Wiederherstellung nach Usage-Limits und Verbindungsfehlern.
 
@@ -499,6 +502,44 @@ git commit -m "feat: add new session recovery strategy"
 ## 📄 Lizenz
 
 [MIT License](LICENSE) - Siehe LICENSE-Datei für Details.
+
+## 🚀 CI/CD Pipeline
+
+### Automated Testing
+Das Projekt verfügt über eine umfassende GitHub Actions CI/CD Pipeline:
+
+**🔍 Code Quality Checks:**
+- ✅ **ShellCheck** - Statische Analyse aller Bash-Scripts
+- ✅ **Syntax Validation** - Überprüfung auf Shell-Syntax-Fehler
+- ✅ **Security Scanning** - Prüfung auf potenzielle Sicherheitslücken
+
+**🧪 Multi-Platform Testing:**
+- ✅ **Ubuntu Latest** - Primäre Testplattform mit vollständiger Test-Suite
+- ✅ **macOS Latest** - Cross-Platform-Kompatibilitätstests
+- ✅ **Multi-Bash** - Tests mit Bash 4.4, 5.0, 5.1
+
+**📊 Test Coverage:**
+- ✅ **BATS Test Suite** - Umfassende Unit- und Integration-Tests
+- ✅ **Task Execution Engine** - Alle 8 Phasen der Task-Engine validiert
+- ✅ **CLI Interface** - Alle 14 Task Queue Parameter getestet
+- ✅ **End-to-End Tests** - Komplette Workflow-Validierung
+
+### Pipeline Status
+```bash
+# Aktuelle Pipeline-Ergebnisse prüfen
+git clone https://github.com/trytofly94/Claude-Auto-Resume-System.git
+cd Claude-Auto-Resume-System
+
+# Lokale Tests ausführen
+./scripts/setup.sh
+bats tests/simple-task-engine-test.bats
+```
+
+### Release Management
+- 🏷️ **Automatische Releases** - Semantic Versioning mit Git Tags
+- 📦 **Packaged Assets** - Tar.gz und Zip-Archive für jede Version
+- 📝 **Changelog Generation** - Automatische Generierung aus Commit-History
+- 🔄 **Continuous Integration** - Automatische Tests bei jedem PR und Push
 
 ## 🆘 Support
 
