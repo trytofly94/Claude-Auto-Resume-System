@@ -25,20 +25,32 @@ QUEUE_LOCK_TIMEOUT="${QUEUE_LOCK_TIMEOUT:-30}"
 
 # Task-State-Tracking (global associative arrays)
 # Initialize arrays at script load time to ensure availability in all contexts
+# Use fallback syntax for better compatibility
 if ! declare -p TASK_STATES >/dev/null 2>&1; then
-    declare -gA TASK_STATES
+    if ! declare -gA TASK_STATES 2>/dev/null; then
+        # Fallback for older bash versions
+        declare -A TASK_STATES
+    fi
 fi
 if ! declare -p TASK_METADATA >/dev/null 2>&1; then
-    declare -gA TASK_METADATA
+    if ! declare -gA TASK_METADATA 2>/dev/null; then
+        declare -A TASK_METADATA
+    fi
 fi
 if ! declare -p TASK_RETRY_COUNTS >/dev/null 2>&1; then
-    declare -gA TASK_RETRY_COUNTS
+    if ! declare -gA TASK_RETRY_COUNTS 2>/dev/null; then
+        declare -A TASK_RETRY_COUNTS
+    fi
 fi
 if ! declare -p TASK_TIMESTAMPS >/dev/null 2>&1; then
-    declare -gA TASK_TIMESTAMPS
+    if ! declare -gA TASK_TIMESTAMPS 2>/dev/null; then
+        declare -A TASK_TIMESTAMPS
+    fi
 fi
 if ! declare -p TASK_PRIORITIES >/dev/null 2>&1; then
-    declare -gA TASK_PRIORITIES
+    if ! declare -gA TASK_PRIORITIES 2>/dev/null; then
+        declare -A TASK_PRIORITIES
+    fi
 fi
 
 # Task-Status-Konstanten
@@ -435,7 +447,12 @@ EOF
 acquire_queue_lock_atomic() {
     local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
     local attempts=0
-    local max_attempts=$([[ "${CLI_MODE:-false}" == "true" ]] && echo 10 || echo "$QUEUE_LOCK_TIMEOUT")
+    
+    # Clean up any stale locks first
+    cleanup_stale_lock "$lock_dir" 2>/dev/null || true
+    
+    # Single attempt for atomic operation
+    local max_attempts=1
     
     while [[ $attempts -lt $max_attempts ]]; do
         if mkdir "$lock_dir" 2>/dev/null; then
@@ -468,7 +485,13 @@ acquire_queue_lock_atomic() {
         fi
         
         # Stale lock cleanup before retry
-        cleanup_stale_lock "$lock_dir"
+        if cleanup_stale_lock "$lock_dir"; then
+            log_debug "Successfully cleaned up stale lock, retrying immediately"
+            # Don't increment attempts counter for immediate retry after cleanup
+            continue
+        else
+            log_debug "Stale lock cleanup failed or lock is still valid"
+        fi
         
         # Exponential backoff with jitter
         local base_delay=0.1
@@ -486,6 +509,9 @@ acquire_queue_lock_atomic() {
         
         ((attempts++))
     done
+    
+    # Final cleanup attempt before giving up
+    cleanup_stale_lock "$lock_dir" 2>/dev/null || true
     
     log_error "Failed to acquire atomic queue lock after $max_attempts attempts"
     return 1
@@ -524,7 +550,15 @@ release_queue_lock_atomic() {
 acquire_queue_lock() {
     # Always use atomic directory-based locking for better cross-platform reliability
     # This eliminates the need for flock and provides more robust locking
+    local result
     acquire_queue_lock_atomic "$@"
+    result=$?
+    if [[ $result -ne 0 ]]; then
+        log_debug "acquire_queue_lock_atomic returned $result"
+    else
+        log_debug "acquire_queue_lock_atomic succeeded"
+    fi
+    return $result
 }
 
 # Release queue lock - always use atomic directory-based locking
@@ -741,12 +775,15 @@ acquire_lock_with_backoff() {
     log_debug "Attempting to acquire lock for $operation (timeout: ${operation_timeout}s, max_attempts: $max_attempts)"
     
     while [[ $attempt -le $max_attempts ]]; do
+        export LOCK_BACKOFF_MODE=true
         if acquire_queue_lock; then
+            export LOCK_BACKOFF_MODE=false
             local end_time=$(date +%s.%3N)
             local wait_time=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
             log_debug "Lock acquired for $operation (attempt $attempt, wait: ${wait_time}s)"
             return 0
         fi
+        export LOCK_BACKOFF_MODE=false
         
         # Calculate exponential backoff with jitter
         local delay
@@ -779,6 +816,7 @@ acquire_lock_with_backoff() {
     local end_time=$(date +%s.%3N) 
     local total_wait=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "$operation_timeout")
     log_error "Failed to acquire lock for $operation after $max_attempts attempts (${total_wait}s)"
+    export LOCK_BACKOFF_MODE=false
     return 1
 }
 
@@ -1413,13 +1451,17 @@ add_task_to_queue() {
     log_debug "Passed validate_task_data"
     
     # Ensure arrays are initialized before accessing them
+    log_debug "About to check if TASK_STATES is declared"
     if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        log_debug "TASK_STATES not declared, initializing arrays"
         declare -gA TASK_STATES
         declare -gA TASK_METADATA
         declare -gA TASK_RETRY_COUNTS
         declare -gA TASK_TIMESTAMPS
         declare -gA TASK_PRIORITIES
         log_debug "Initialized arrays in add_task_to_queue"
+    else
+        log_debug "TASK_STATES already declared"
     fi
     log_debug "Arrays are available"
     
