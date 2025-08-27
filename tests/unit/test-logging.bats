@@ -1,33 +1,45 @@
 #!/usr/bin/env bats
 
 # Unit tests for logging.sh utility module
+# Enhanced with Issue #46 BATS compatibility improvements
 
 load '../test_helper'
 
 setup() {
+    # Phase 2: Use enhanced setup with BATS compatibility (Issue #46)
+    enhanced_setup
+    
     export TEST_MODE=true
-    export LOG_LEVEL="DEBUG"
+    export LOG_LEVEL="DEBUG" 
     export DEBUG_MODE=true
     
     # Create temporary log directory
     TEST_LOG_DIR=$(mktemp -d)
     export LOG_FILE="$TEST_LOG_DIR/test.log"
     
-    # Source the logging module
-    source "$BATS_TEST_DIRNAME/../../src/utils/logging.sh"
+    # Phase 1: Source with timeout protection (Issue #46)
+    if ! run_with_bats_timeout "setup" bash -c "source '$BATS_TEST_DIRNAME/../../src/utils/logging.sh'"; then
+        fail "Failed to source logging module with timeout"
+    fi
+    
+    # Also source normally for direct function access in tests
+    source "$BATS_TEST_DIRNAME/../../src/utils/logging.sh" 2>/dev/null || true
 }
 
 teardown() {
-    rm -rf "$TEST_LOG_DIR"
+    # Phase 2: Use enhanced teardown (Issue #46)
+    rm -rf "$TEST_LOG_DIR" 2>/dev/null || true
+    enhanced_teardown
 }
 
 @test "logging module loads without errors" {
-    # Test that the module can be sourced
+    # Test that the module can be sourced - Issue #46: Enhanced compatibility
     run bash -c "source '$BATS_TEST_DIRNAME/../../src/utils/logging.sh'"
     [ "$status" -eq 0 ]
 }
 
 @test "log_info function exists and works" {
+    # Issue #46: Test with enhanced BATS compatibility
     run log_info "Test info message"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "[INFO]" ]]
@@ -35,6 +47,7 @@ teardown() {
 }
 
 @test "log_warn function exists and works" {
+    # Issue #46: Test with enhanced BATS compatibility
     run log_warn "Test warning message"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "[WARN]" ]]
