@@ -1394,6 +1394,360 @@ github_integration_main() {
 }
 
 # ===============================================================================
+# SECURITY VALIDATION FUNCTIONS
+# ===============================================================================
+
+# Validiert und bereinigt Benutzereingaben für GitHub-Integration
+validate_github_input() {
+    local input="$1"
+    local input_type="$2"  # 'issue_number', 'comment', 'url', etc.
+    
+    if [[ -z "$input" ]]; then
+        log_error "Empty input provided for validation"
+        return 1
+    fi
+    
+    # Bereinige potentiell gefährliche Zeichen
+    case "$input_type" in
+        "issue_number")
+            # Sollte nur Ziffern enthalten
+            if [[ ! "$input" =~ ^[0-9]+$ ]]; then
+                log_error "Invalid issue number format: $input"
+                return 1
+            fi
+            # Prüfe vernünftige Grenzen
+            if [[ ${#input} -gt 10 ]]; then
+                log_error "Issue number too long: $input"
+                return 1
+            fi
+            ;;
+        "comment")
+            # Escape HTML/markdown special chars und limitiere Länge
+            if [[ ${#input} -gt 65000 ]]; then  # GitHub comment limit
+                log_error "Comment too long: ${#input} characters (max 65000)"
+                return 1
+            fi
+            # Escape potentielle HTML injection
+            input=$(echo "$input" | sed 's/</\&lt;/g; s/>/\&gt;/g; s/&/\&amp;/g')
+            ;;
+        "url")
+            # Validiere GitHub URL Format
+            if [[ ! "$input" =~ ^https://github\.com/[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+/(issues|pull)/[0-9]+/?$ ]]; then
+                log_error "Invalid GitHub URL format: $input"
+                return 1
+            fi
+            ;;
+        "repository")
+            # Validiere Repository Format (owner/repo)
+            if [[ ! "$input" =~ ^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$ ]]; then
+                log_error "Invalid repository format: $input"
+                return 1
+            fi
+            ;;
+        "username")
+            # Validiere GitHub Username Format
+            if [[ ! "$input" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]){0,38}[a-zA-Z0-9]?$ ]]; then
+                log_error "Invalid GitHub username format: $input"
+                return 1
+            fi
+            ;;
+    esac
+    
+    return 0
+}
+
+# Bereinigt Benutzereingaben von potentiell gefährlichen Inhalten
+sanitize_user_input() {
+    local input="$1"
+    
+    if [[ -z "$input" ]]; then
+        echo ""
+        return 0
+    fi
+    
+    # Entferne null bytes und Steuerzeichen
+    input=$(echo "$input" | tr -d '\000-\031\177-\377')
+    
+    # Limitiere Eingabelänge
+    if [[ ${#input} -gt 10000 ]]; then
+        input="${input:0:10000}"
+        log_warn "Input truncated to 10000 characters for security"
+    fi
+    
+    # Entferne potentielle Command Injection Patterns
+    input=$(echo "$input" | sed 's/;[[:space:]]*[|&]/; /g; s/\$(/$/g; s/`/'"'"'/g')
+    
+    echo "$input"
+}
+
+# Validiert GitHub Token Format und Struktur
+validate_github_token() {
+    local token="$1"
+    
+    if [[ -z "$token" ]]; then
+        log_debug "No GitHub token provided"
+        return 1
+    fi
+    
+    # Prüfe GitHub Token Format
+    case "$token" in
+        ghp_*)
+            # Personal Access Token format
+            if [[ ${#token} -ne 40 ]]; then
+                log_error "Invalid GitHub personal access token format (wrong length)"
+                return 1
+            fi
+            if [[ ! "$token" =~ ^ghp_[a-zA-Z0-9]{36}$ ]]; then
+                log_error "Invalid GitHub personal access token format (invalid characters)"
+                return 1
+            fi
+            ;;
+        gho_*)
+            # OAuth token format
+            if [[ ${#token} -ne 40 ]]; then
+                log_error "Invalid GitHub OAuth token format (wrong length)"
+                return 1
+            fi
+            ;;
+        ghu_*)
+            # User-to-server token format
+            if [[ ${#token} -ne 40 ]]; then
+                log_error "Invalid GitHub user-to-server token format (wrong length)"
+                return 1
+            fi
+            ;;
+        ghs_*)
+            # Server-to-server token format
+            if [[ ${#token} -ne 40 ]]; then
+                log_error "Invalid GitHub server-to-server token format (wrong length)"
+                return 1
+            fi
+            ;;
+        *)
+            log_error "Unrecognized GitHub token format"
+            return 1
+            ;;
+    esac
+    
+    return 0
+}
+
+# Verifiziert GitHub Repository Permissions
+verify_github_permissions() {
+    local repo_url="$1"
+    
+    if [[ -z "$repo_url" ]]; then
+        log_error "No repository URL provided for permission verification"
+        return 1
+    fi
+    
+    # Validiere URL Format zuerst
+    if ! validate_github_input "$repo_url" "url"; then
+        return 1
+    fi
+    
+    # Extrahiere owner/repo aus URL
+    local repo_path
+    repo_path=$(echo "$repo_url" | sed -n 's|.*github\.com/\([^/]*/[^/]*\).*|\1|p')
+    
+    if [[ -z "$repo_path" ]]; then
+        log_error "Could not extract repository path from URL: $repo_url"
+        return 1
+    fi
+    
+    # Prüfe ob Benutzer Schreibzugriff hat (benötigt für Kommentare)
+    local permissions_check
+    if ! permissions_check=$(gh api "repos/$repo_path" --jq '.permissions.push // false' 2>/dev/null); then
+        log_error "Failed to check repository permissions for: $repo_path"
+        return 1
+    fi
+    
+    if [[ "$permissions_check" != "true" ]]; then
+        log_error "Insufficient permissions for repository: $repo_path"
+        log_error "Write access is required for GitHub integration features"
+        return 1
+    fi
+    
+    log_debug "Repository permissions verified for: $repo_path"
+    return 0
+}
+
+# Validiert GitHub API Response auf potentielle Sicherheitsprobleme
+validate_github_api_response() {
+    local response="$1"
+    local expected_fields="${2:-}"  # Optional: comma-separated list of required fields
+    
+    if [[ -z "$response" ]]; then
+        log_error "Empty GitHub API response"
+        return 1
+    fi
+    
+    # Prüfe ob Response gültiges JSON ist
+    if ! echo "$response" | jq . >/dev/null 2>&1; then
+        log_error "Invalid JSON in GitHub API response"
+        return 1
+    fi
+    
+    # Prüfe auf GitHub API Error Messages
+    local error_message
+    error_message=$(echo "$response" | jq -r '.message // empty' 2>/dev/null)
+    if [[ -n "$error_message" ]]; then
+        log_error "GitHub API error: $error_message"
+        
+        # Spezielle Behandlung für häufige Fehler
+        case "$error_message" in
+            *"rate limit"*|*"API rate limit"*)
+                log_warn "Rate limit exceeded - implementing backoff strategy"
+                return 2  # Special return code for rate limiting
+                ;;
+            *"authentication"*|*"token"*)
+                log_error "Authentication failed - check GitHub token"
+                return 3  # Special return code for auth issues
+                ;;
+            *"permission"*|*"access"*)
+                log_error "Permission denied - check repository access"
+                return 4  # Special return code for permission issues
+                ;;
+        esac
+        
+        return 1
+    fi
+    
+    # Validiere erwartete Felder falls angegeben
+    if [[ -n "$expected_fields" ]]; then
+        IFS=',' read -ra fields <<< "$expected_fields"
+        for field in "${fields[@]}"; do
+            if ! echo "$response" | jq -e ".$field" >/dev/null 2>&1; then
+                log_error "Required field '$field' missing in GitHub API response"
+                return 1
+            fi
+        done
+    fi
+    
+    # Prüfe auf verdächtig große Responses (DoS-Schutz)
+    local response_size=${#response}
+    if [[ $response_size -gt 1048576 ]]; then  # 1MB limit
+        log_warn "GitHub API response is very large: ${response_size} bytes"
+        log_warn "This might indicate an unexpected response or potential DoS"
+    fi
+    
+    return 0
+}
+
+# Sichere GitHub API Request Funktion mit Input Validation
+secure_github_api_request() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+    
+    # Validiere Method
+    case "$method" in
+        GET|POST|PATCH|DELETE)
+            ;;
+        *)
+            log_error "Invalid HTTP method: $method"
+            return 1
+            ;;
+    esac
+    
+    # Validiere Endpoint
+    if [[ ! "$endpoint" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+        log_error "Invalid API endpoint format: $endpoint"
+        return 1
+    fi
+    
+    # Validiere GitHub Token
+    if [[ -n "${GITHUB_TOKEN:-}" ]] && ! validate_github_token "$GITHUB_TOKEN"; then
+        log_error "Invalid GitHub token - cannot make API request"
+        return 1
+    fi
+    
+    # Sanitize data falls bereitgestellt
+    if [[ -n "$data" ]]; then
+        data=$(sanitize_user_input "$data")
+    fi
+    
+    # Make request mit Error Handling
+    local response http_code
+    if [[ "$method" == "GET" ]]; then
+        response=$(gh api "$endpoint" 2>&1) || {
+            http_code=$?
+            log_error "GitHub API request failed: $response"
+            return $http_code
+        }
+    else
+        if [[ -n "$data" ]]; then
+            response=$(gh api "$endpoint" --method "$method" --input - <<< "$data" 2>&1) || {
+                http_code=$?
+                log_error "GitHub API request failed: $response"
+                return $http_code
+            }
+        else
+            response=$(gh api "$endpoint" --method "$method" 2>&1) || {
+                http_code=$?
+                log_error "GitHub API request failed: $response"
+                return $http_code
+            }
+        fi
+    fi
+    
+    # Validiere Response
+    if ! validate_github_api_response "$response"; then
+        log_error "GitHub API response validation failed"
+        return 1
+    fi
+    
+    # Return clean response
+    echo "$response"
+    return 0
+}
+
+# Prüft auf verdächtige GitHub URLs oder Inhalte
+check_suspicious_github_content() {
+    local content="$1"
+    local content_type="${2:-unknown}"
+    
+    if [[ -z "$content" ]]; then
+        return 0
+    fi
+    
+    # Patterns die auf verdächtige Inhalte hinweisen könnten
+    local suspicious_patterns=(
+        "javascript:"
+        "data:"
+        "<script"
+        "onclick="
+        "onerror="
+        "onload="
+        "eval\("
+        "document\."
+        "window\."
+    )
+    
+    local suspicious_found=false
+    for pattern in "${suspicious_patterns[@]}"; do
+        if [[ "$content" == *"$pattern"* ]]; then
+            log_warn "Suspicious pattern found in $content_type: $pattern"
+            suspicious_found=true
+        fi
+    done
+    
+    # Prüfe auf ungewöhnlich lange URLs
+    while IFS= read -r line; do
+        if [[ "$line" =~ https?://[^[:space:]]{200,} ]]; then
+            log_warn "Unusually long URL found in $content_type (potential security risk)"
+            suspicious_found=true
+        fi
+    done <<< "$content"
+    
+    if [[ "$suspicious_found" == "true" ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
 # MODULE LOADING UND SCRIPT EXECUTION
 # ===============================================================================
 
