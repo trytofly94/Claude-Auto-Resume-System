@@ -217,6 +217,19 @@ load_dependencies() {
         "session-manager.sh"
     )
     
+    # Load Error Handling Modules (conditional - only if error handling is enabled)
+    local error_handling_modules=()
+    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]]; then
+        error_handling_modules=(
+            "task-timeout-monitor.sh"
+            "session-recovery.sh"
+            "task-state-backup.sh"
+            "usage-limit-recovery.sh"
+            "error-classification.sh"
+        )
+        log_debug "Error handling enabled - will load error handling modules"
+    fi
+    
     # Task Queue Module (optional - nur wenn verfügbar)
     # Note: task-queue.sh is designed as standalone script, not for sourcing
     # We'll use it via direct execution rather than sourcing
@@ -265,6 +278,26 @@ load_dependencies() {
             log_warn "Core module not found: $SCRIPT_DIR/$module_path"
         fi
     done
+    
+    # Load error handling modules if enabled
+    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]]; then
+        log_info "Loading error handling and recovery modules"
+        for module in "${error_handling_modules[@]}"; do
+            local module_path="$module"
+            log_debug "Attempting to load error handling module: $module from path: $SCRIPT_DIR/$module_path"
+            if [[ -f "$module_path" ]]; then
+                # shellcheck source=/dev/null
+                source "$module_path"
+                log_debug "Loaded error handling module: $module"
+            else
+                log_warn "Error handling module not found: $SCRIPT_DIR/$module_path"
+                log_warn "Some error handling features may not be available"
+            fi
+        done
+        log_info "Error handling system initialized"
+    else
+        log_debug "Error handling disabled - skipping error handling modules"
+    fi
     
     # Restore original directory
     cd "$original_dir"
@@ -1460,7 +1493,25 @@ execute_single_task() {
         fi
     fi
     
-    # Execute task with timeout and completion detection
+    # Start timeout monitoring if error handling is enabled
+    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f start_task_timeout_monitor >/dev/null 2>&1; then
+        start_task_timeout_monitor "$task_id" "$task_timeout" "$$"
+        log_debug "Timeout monitoring started for task $task_id"
+    fi
+    
+    # Start session health monitoring if error handling is enabled
+    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f monitor_session_health_during_task >/dev/null 2>&1; then
+        monitor_session_health_during_task "${MAIN_SESSION_ID:-unknown}" "$task_id"
+        log_debug "Session health monitoring started for task $task_id"
+    fi
+    
+    # Create initial checkpoint if backup system is enabled
+    if [[ "${BACKUP_ENABLED:-true}" == "true" ]] && declare -f create_task_checkpoint >/dev/null 2>&1; then
+        create_task_checkpoint "$task_id" "task_start"
+        log_debug "Initial checkpoint created for task $task_id"
+    fi
+    
+    # Execute task with enhanced monitoring and error handling
     local execution_result=0
     if execute_task_with_monitoring "$task_id" "$task_command" "$task_timeout"; then
         log_info "✓ Task execution completed successfully"
@@ -1481,6 +1532,33 @@ execute_single_task() {
     else
         log_warn "✗ Task execution failed or timed out"
         
+        # Enhanced error handling for task failures
+        if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f classify_error_severity >/dev/null 2>&1; then
+            local error_message="Task execution failed or timed out"
+            local error_severity
+            error_severity=$(classify_error_severity "$error_message" "task_execution" "$task_id")
+            
+            log_info "Error classified with severity level: $error_severity"
+            
+            # Determine and execute recovery strategy
+            if declare -f determine_recovery_strategy >/dev/null 2>&1; then
+                local retry_count=0
+                # Try to get current retry count from task data
+                if declare -f get_task_retry_count >/dev/null 2>&1; then
+                    retry_count=$(get_task_retry_count "$task_id" 2>/dev/null || echo "0")
+                fi
+                
+                local recovery_strategy
+                recovery_strategy=$(determine_recovery_strategy "$error_severity" "$task_id" "$retry_count" "task_execution")
+                
+                log_info "Executing recovery strategy: $recovery_strategy"
+                
+                if declare -f execute_recovery_strategy >/dev/null 2>&1; then
+                    execute_recovery_strategy "$recovery_strategy" "$task_id" "task_execution" "$error_message"
+                fi
+            fi
+        fi
+        
         # Update task status to failed (will be handled by failure handler)
         if ! update_task_status "$task_id" "failed"; then
             log_warn "Failed to update task status to failed"
@@ -1494,6 +1572,27 @@ execute_single_task() {
         fi
         
         execution_result=1
+    fi
+    
+    # Cleanup error handling resources
+    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]]; then
+        # Stop timeout monitoring
+        if declare -f stop_timeout_monitor >/dev/null 2>&1; then
+            stop_timeout_monitor "$task_id"
+            log_debug "Timeout monitoring stopped for task $task_id"
+        fi
+        
+        # Stop session health monitoring
+        if declare -f stop_session_health_monitoring >/dev/null 2>&1; then
+            stop_session_health_monitoring "$task_id"
+            log_debug "Session health monitoring stopped for task $task_id"
+        fi
+        
+        # Create final checkpoint if task completed successfully
+        if [[ $execution_result -eq 0 ]] && [[ "${BACKUP_ENABLED:-true}" == "true" ]] && declare -f create_task_checkpoint >/dev/null 2>&1; then
+            create_task_checkpoint "$task_id" "task_completion"
+            log_debug "Final checkpoint created for task $task_id"
+        fi
     fi
     
     return $execution_result
@@ -1616,10 +1715,25 @@ monitor_task_completion() {
                     # Don't immediately fail - let it timeout naturally in case it recovers
                 fi
                 
-                # Check for usage limit patterns
-                if echo "$session_output" | grep -qE "(usage limit reached|Usage limit|rate limit)"; then
-                    log_warn "Usage limit detected during task execution"
-                    # Let the normal usage limit handling in the monitoring loop handle this
+                # Enhanced usage limit detection and handling
+                if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f detect_usage_limit_in_queue >/dev/null 2>&1; then
+                    if detect_usage_limit_in_queue "$session_output" "$task_id"; then
+                        log_warn "Usage limit detected during task execution - initiating recovery"
+                        
+                        # Pause queue for usage limit with intelligent wait calculation
+                        if declare -f pause_queue_for_usage_limit >/dev/null 2>&1; then
+                            local wait_time
+                            wait_time=$(calculate_usage_limit_wait_time "$task_id" "usage_limit" 2>/dev/null || echo "$USAGE_LIMIT_COOLDOWN")
+                            pause_queue_for_usage_limit "$wait_time" "$task_id" "usage_limit"
+                            
+                            log_info "Task execution paused for usage limit recovery"
+                            return 1  # Signal that task needs to be handled by recovery system
+                        fi
+                    fi
+                elif echo "$session_output" | grep -qE "(usage limit reached|Usage limit|rate limit)"; then
+                    log_warn "Usage limit detected during task execution (fallback detection)"
+                    # Fallback for basic usage limit handling
+                    return 1
                 fi
             else
                 log_debug "Could not capture session output, continuing monitoring"
@@ -1642,6 +1756,13 @@ monitor_task_completion() {
                 local progress_message="Task execution in progress (${elapsed_time}s elapsed)..."
                 update_task_progress "$task_id" "$progress_percent" "$progress_message" 2>/dev/null || true
                 log_debug "Updated task progress: ${progress_percent}%"
+            fi
+            
+            # Create periodic checkpoint if backup system is enabled
+            if [[ "${BACKUP_ENABLED:-true}" == "true" ]] && declare -f create_periodic_checkpoint_if_needed >/dev/null 2>&1; then
+                local last_checkpoint_time=$((start_time))  # Use task start time as baseline
+                create_periodic_checkpoint_if_needed "$task_id" "$last_checkpoint_time" 2>/dev/null || true
+                log_debug "Periodic checkpoint check completed for task $task_id"
             fi
         fi
         
