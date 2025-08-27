@@ -18,10 +18,12 @@ setup() {
     export LOG_FILE="$TEST_LOG_DIR/test.log"
     
     # Phase 1: Source with timeout protection (Issue #46)
-    run_with_bats_timeout "setup" bash -c "source '$BATS_TEST_DIRNAME/../../src/utils/logging.sh'"
-    if [[ $status -ne 0 ]]; then
+    if ! run_with_bats_timeout "setup" bash -c "source '$BATS_TEST_DIRNAME/../../src/utils/logging.sh'"; then
         fail "Failed to source logging module with timeout"
     fi
+    
+    # Also source normally for direct function access in tests
+    source "$BATS_TEST_DIRNAME/../../src/utils/logging.sh" 2>/dev/null || true
 }
 
 teardown() {
@@ -31,22 +33,22 @@ teardown() {
 }
 
 @test "logging module loads without errors" {
-    # Phase 1: Test with timeout protection (Issue #46)
-    run_with_bats_timeout "unit" bash -c "source '$BATS_TEST_DIRNAME/../../src/utils/logging.sh'"
+    # Test that the module can be sourced - Issue #46: Enhanced compatibility
+    run bash -c "source '$BATS_TEST_DIRNAME/../../src/utils/logging.sh'"
     [ "$status" -eq 0 ]
 }
 
 @test "log_info function exists and works" {
-    # Phase 1: Test with timeout and isolation (Issue #46)
-    run_with_bats_timeout "unit" log_info "Test info message"
+    # Issue #46: Test with enhanced BATS compatibility
+    run log_info "Test info message"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "[INFO]" ]]
     [[ "$output" =~ "Test info message" ]]
 }
 
 @test "log_warn function exists and works" {
-    # Phase 1: Test with timeout protection (Issue #46)
-    run_with_bats_timeout "unit" log_warn "Test warning message"
+    # Issue #46: Test with enhanced BATS compatibility
+    run log_warn "Test warning message"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "[WARN]" ]]
     [[ "$output" =~ "Test warning message" ]]
