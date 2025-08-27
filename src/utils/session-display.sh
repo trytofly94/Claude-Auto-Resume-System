@@ -44,10 +44,13 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Lade Logging-Utilities falls verfügbar
+# Lade Logging-Utilities falls verfügbar (fallback für direkten Aufruf)
 if [[ -f "$SCRIPT_DIR/logging.sh" ]]; then
     # shellcheck source=./logging.sh
     source "$SCRIPT_DIR/logging.sh"
+elif declare -f log_debug >/dev/null 2>&1; then
+    # Logging bereits geladen - verwende existierende Funktionen
+    :
 else
     log_debug() { echo "[DEBUG] $*" >&2; }
     log_info() { echo "[INFO] $*" >&2; }
@@ -55,10 +58,15 @@ else
     log_error() { echo "[ERROR] $*" >&2; }
 fi
 
-# Lade Clipboard-Utilities
+# Lade Clipboard-Utilities falls verfügbar (fallback für direkten Aufruf)
 if [[ -f "$SCRIPT_DIR/clipboard.sh" ]]; then
     # shellcheck source=./clipboard.sh
     source "$SCRIPT_DIR/clipboard.sh"
+elif declare -f copy_to_clipboard >/dev/null 2>&1; then
+    # Clipboard bereits geladen - verwende existierende Funktionen
+    :
+else
+    log_debug "Clipboard utilities not available"
 fi
 
 # Formatiere Zeitstempel für Anzeige

@@ -32,10 +32,13 @@ CLIPBOARD_METHOD=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Lade Logging-Utilities falls verfügbar
+# Lade Logging-Utilities falls verfügbar (fallback für direkten Aufruf)
 if [[ -f "$SCRIPT_DIR/logging.sh" ]]; then
     # shellcheck source=./logging.sh
     source "$SCRIPT_DIR/logging.sh"
+elif declare -f log_debug >/dev/null 2>&1; then
+    # Logging bereits geladen - verwende existierende Funktionen
+    :
 else
     log_debug() { echo "[DEBUG] $*" >&2; }
     log_info() { echo "[INFO] $*" >&2; }

@@ -89,6 +89,13 @@ TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-false}"
 TASK_DEFAULT_TIMEOUT="${TASK_DEFAULT_TIMEOUT:-3600}"
 TASK_MAX_RETRIES="${TASK_MAX_RETRIES:-3}"
 TASK_DEFAULT_PRIORITY="${TASK_DEFAULT_PRIORITY:-5}"
+ADD_ISSUE=""
+ADD_PR=""
+ADD_CUSTOM=""
+LIST_QUEUE=false
+PAUSE_QUEUE=false
+RESUME_QUEUE=false
+CLEAR_QUEUE=false
 
 # ===============================================================================
 # UTILITY-FUNKTIONEN (früh definiert für Validierung)
@@ -202,6 +209,10 @@ load_dependencies() {
         "utils/terminal.sh"
         "utils/session-display.sh"
         "utils/clipboard.sh"
+    )
+    
+    # Lade Core-Module (vom src Verzeichnis)
+    local core_modules=(
         "claunch-integration.sh"
         "session-manager.sh"
     )
@@ -225,32 +236,51 @@ load_dependencies() {
         export TASK_QUEUE_AVAILABLE=false
     fi
     
+    # Change to script directory to ensure correct relative paths during sourcing
+    local original_dir="$(pwd)"
+    cd "$SCRIPT_DIR"
+    
+    # Load utility modules
     for module in "${modules[@]}"; do
-        local module_path="$SCRIPT_DIR/$module"
+        local module_path="$module"
+        log_debug "Attempting to load module: $module from path: $SCRIPT_DIR/$module_path"
         if [[ -f "$module_path" ]]; then
             # shellcheck source=/dev/null
             source "$module_path"
             log_debug "Loaded module: $module"
         else
-            log_warn "Module not found: $module_path"
+            log_warn "Module not found: $SCRIPT_DIR/$module_path"
         fi
     done
+    
+    # Load core modules
+    for module in "${core_modules[@]}"; do
+        local module_path="$module"
+        log_debug "Attempting to load core module: $module from path: $SCRIPT_DIR/$module_path"
+        if [[ -f "$module_path" ]]; then
+            # shellcheck source=/dev/null
+            source "$module_path"
+            log_debug "Loaded core module: $module"
+        else
+            log_warn "Core module not found: $SCRIPT_DIR/$module_path"
+        fi
+    done
+    
+    # Restore original directory
+    cd "$original_dir"
     
     # Task Queue Integration - Load only if enabled
     if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
         log_info "Task Queue processing enabled - loading integration modules"
         
-        # Load Task Queue Core Module
-        local task_queue_module="$SCRIPT_DIR/task-queue.sh"
-        if [[ -f "$task_queue_module" ]]; then
-            # shellcheck source=/dev/null
-            source "$task_queue_module"
-            log_debug "Task Queue Core Module loaded successfully"
-        else
-            log_error "Task Queue Core Module not found: $task_queue_module"
-            log_error "Please ensure the module is available for task queue functionality"
+        # Task Queue Core Module is already checked above and accessible via TASK_QUEUE_SCRIPT
+        if [[ "${TASK_QUEUE_AVAILABLE:-false}" != "true" ]]; then
+            log_error "Task Queue module not available but processing is enabled"
+            log_error "Please ensure task-queue.sh is executable and functional"
             exit 1
         fi
+        
+        log_debug "Task Queue Core Module is available at: $TASK_QUEUE_SCRIPT"
         
         # Load GitHub Integration Modules (conditional - non-fatal if missing)
         local github_modules=(
