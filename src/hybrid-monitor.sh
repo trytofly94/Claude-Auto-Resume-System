@@ -73,6 +73,14 @@ CLAUDE_ARGS=()
 TEST_MODE=false
 TEST_WAIT_SECONDS=30
 
+# Session ID Management-spezifische Variablen
+SHOW_SESSION_ID=false
+COPY_SESSION_ID=false
+COPY_SESSION_TARGET=""
+SHOW_FULL_SESSION_ID=false
+LIST_SESSIONS_MODE=false
+RESUME_SESSION_ID=""
+
 # Task Queue-spezifische Variablen
 QUEUE_MODE=false
 QUEUE_ACTION=""
@@ -192,6 +200,8 @@ load_dependencies() {
         "utils/logging.sh"
         "utils/network.sh" 
         "utils/terminal.sh"
+        "utils/session-display.sh"
+        "utils/clipboard.sh"
         "claunch-integration.sh"
         "session-manager.sh"
     )
@@ -914,6 +924,13 @@ STANDARD OPTIONS:
     --version                Show version information
     -h, --help               Show this help message
 
+SESSION ID MANAGEMENT:
+    --show-session-id        Display current session ID
+    --show-full-session-id   Display complete session ID (not shortened)  
+    --copy-session-id [ID]   Copy session ID to clipboard (current or specific)
+    --list-sessions          List all active sessions with copyable IDs
+    --resume-session ID      Resume specific session by ID
+
 TASK QUEUE OPTIONS:
     --queue-mode             Enable task queue processing mode
     
@@ -942,6 +959,12 @@ CLAUDE_ARGS:
 EXAMPLES:
     # Traditional monitoring mode
     $SCRIPT_NAME --continuous
+
+    # Session ID management
+    $SCRIPT_NAME --show-session-id
+    $SCRIPT_NAME --copy-session-id
+    $SCRIPT_NAME --list-sessions
+    $SCRIPT_NAME --resume-session project-name-1672531200-12345
 
     # Task queue mode with continuous processing
     $SCRIPT_NAME --queue-mode --continuous
@@ -1110,6 +1133,37 @@ parse_arguments() {
             --clear-queue)
                 CLEAR_QUEUE=true
                 shift
+                ;;
+            --show-session-id)
+                SHOW_SESSION_ID=true
+                shift
+                ;;
+            --show-full-session-id)
+                SHOW_SESSION_ID=true
+                SHOW_FULL_SESSION_ID=true
+                shift
+                ;;
+            --copy-session-id)
+                COPY_SESSION_ID=true
+                if [[ -n "${2:-}" && ! "${2:-}" =~ ^-- ]]; then
+                    COPY_SESSION_TARGET="$2"
+                    shift 2
+                else
+                    COPY_SESSION_TARGET="current"
+                    shift
+                fi
+                ;;
+            --list-sessions)
+                LIST_SESSIONS_MODE=true
+                shift
+                ;;
+            --resume-session)
+                if [[ -z "${2:-}" ]]; then
+                    log_error "Option $1 requires a session ID"
+                    exit 1
+                fi
+                RESUME_SESSION_ID="$2"
+                shift 2
                 ;;
             --version)
                 show_version
@@ -2034,6 +2088,122 @@ handle_queue_actions() {
 }
 
 # ===============================================================================
+# SESSION ID MANAGEMENT OPERATIONS
+# ===============================================================================
+
+# Handle Session ID Management CLI Operations
+handle_session_id_operations() {
+    log_debug "Processing session ID management operations"
+    
+    # Initialize session display system
+    if declare -f init_clipboard >/dev/null 2>&1; then
+        init_clipboard
+    fi
+    
+    # Initialize session manager if needed
+    if declare -f init_session_manager >/dev/null 2>&1; then
+        init_session_manager "${SPECIFIED_CONFIG:-$CONFIG_FILE}"
+    fi
+    
+    local operation_handled=false
+    
+    # Handle --show-session-id / --show-full-session-id
+    if [[ "$SHOW_SESSION_ID" == "true" ]]; then
+        log_info "Displaying session ID information"
+        if declare -f show_current_session_id >/dev/null 2>&1; then
+            show_current_session_id "$MAIN_SESSION_ID" "$SHOW_FULL_SESSION_ID"
+            operation_handled=true
+        else
+            log_error "Session display functions not available"
+            echo "Error: Session display module not loaded"
+            return 1
+        fi
+    fi
+    
+    # Handle --copy-session-id
+    if [[ "$COPY_SESSION_ID" == "true" ]]; then
+        local target_session_id=""
+        
+        if [[ "$COPY_SESSION_TARGET" == "current" || -z "$COPY_SESSION_TARGET" ]]; then
+            if [[ -n "$MAIN_SESSION_ID" ]]; then
+                target_session_id="$MAIN_SESSION_ID"
+                log_info "Copying current session ID to clipboard"
+            else
+                log_error "No current session ID available"
+                echo "Error: No active session found to copy"
+                return 1
+            fi
+        else
+            target_session_id="$COPY_SESSION_TARGET"
+            log_info "Copying specified session ID to clipboard: $(shorten_session_id "$target_session_id" 20)"
+        fi
+        
+        if declare -f show_and_copy_session_id >/dev/null 2>&1; then
+            if show_and_copy_session_id "$target_session_id" true false; then
+                operation_handled=true
+            else
+                log_error "Failed to copy session ID"
+                return 1
+            fi
+        else
+            log_error "Session copy functions not available"
+            echo "Error: Session display module not loaded"
+            return 1
+        fi
+    fi
+    
+    # Handle --list-sessions
+    if [[ "$LIST_SESSIONS_MODE" == "true" ]]; then
+        log_info "Listing all active sessions"
+        if declare -f list_sessions_with_copy_options >/dev/null 2>&1; then
+            list_sessions_with_copy_options "table" true
+            operation_handled=true
+        else
+            log_error "Session listing functions not available"
+            echo "Error: Session display module not loaded"
+            return 1
+        fi
+    fi
+    
+    # Handle --resume-session
+    if [[ -n "$RESUME_SESSION_ID" ]]; then
+        log_info "Resuming session: $RESUME_SESSION_ID"
+        
+        # Verify session exists
+        if declare -f get_session_info >/dev/null 2>&1; then
+            if ! get_session_info "$RESUME_SESSION_ID" >/dev/null 2>&1; then
+                log_error "Session not found: $RESUME_SESSION_ID"
+                echo "Error: Session '$RESUME_SESSION_ID' not found"
+                
+                # Show available sessions
+                echo ""
+                echo "Available sessions:"
+                if declare -f list_sessions_with_copy_options >/dev/null 2>&1; then
+                    list_sessions_with_copy_options "list" false
+                fi
+                return 1
+            fi
+        fi
+        
+        # Set the session for resuming
+        MAIN_SESSION_ID="$RESUME_SESSION_ID"
+        log_info "Set session ID for resume: $MAIN_SESSION_ID"
+        echo "Resuming session: $(shorten_session_id "$MAIN_SESSION_ID" 30)"
+        operation_handled=true
+        
+        # Continue with normal monitoring for this session
+        # (Don't exit - let continuous mode handle the session)
+    fi
+    
+    if [[ "$operation_handled" == "false" ]]; then
+        log_warn "No session ID operations were handled"
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
 # MAIN ENTRY POINT
 # ===============================================================================
 
@@ -2060,6 +2230,16 @@ main() {
         # Exit nach Queue-Operationen falls nicht in continuous mode
         if [[ "$CONTINUOUS_MODE" != "true" && "$QUEUE_MODE" != "true" ]]; then
             log_info "Queue operations completed"
+            exit 0
+        fi
+    fi
+    
+    # Handle Session ID Management Operations (falls CLI-Parameter gesetzt)
+    if [[ "$SHOW_SESSION_ID" == "true" || "$COPY_SESSION_ID" == "true" || "$LIST_SESSIONS_MODE" == "true" || -n "$RESUME_SESSION_ID" ]]; then
+        handle_session_id_operations
+        # Exit nach Session-Operationen falls nicht in continuous mode
+        if [[ "$CONTINUOUS_MODE" != "true" ]]; then
+            log_info "Session ID operations completed"
             exit 0
         fi
     fi
