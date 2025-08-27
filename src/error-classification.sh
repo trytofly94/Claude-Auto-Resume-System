@@ -167,7 +167,7 @@ classify_error_severity() {
     done
     
     # Unknown error pattern
-    log_warn "Unknown error pattern detected: '$error_message'"
+    log_debug "Unknown error pattern detected: '$error_message'"
     record_error_occurrence "$error_message" $ERROR_SEVERITY_UNKNOWN "$error_context" "$task_id"
     return $ERROR_SEVERITY_UNKNOWN
 }

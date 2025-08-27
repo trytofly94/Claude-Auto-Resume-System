@@ -1,0 +1,16 @@
+{
+    "backup_time": "2025-08-27T14:10:00+02:00",
+    "backup_reason": "timeout",
+    "task_id": "timeout-integration-test",
+    "timeout_info": {
+        "elapsed_time": 1756296600,
+        "start_time": 1756296600,
+        "timeout_threshold": "unknown"
+    },
+    "task_details": {},
+    "system_state": {
+        "hostname": "MacMini.fritz.box",
+        "pid": 14580,
+        "current_cycle": "0"
+    }
+}

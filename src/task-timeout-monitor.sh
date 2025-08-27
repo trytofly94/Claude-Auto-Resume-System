@@ -220,9 +220,18 @@ is_task_active() {
             [[ -f "$task_file" && $(find "$task_file" -mmin -5 2>/dev/null | wc -l) -gt 0 ]]
         fi
     else
-        # Ultimate fallback: assume active if timeout file exists
+        # Ultimate fallback: assume task is NOT active after first check
+        # This prevents infinite loops in test environments
         local timeout_file="$TIMEOUT_DIR/${task_id}.timeout"
-        [[ -f "$timeout_file" ]]
+        if [[ -f "$timeout_file" ]]; then
+            # Check if this is the first check by looking at file age
+            local file_age_seconds=$(( $(date +%s) - $(date -r "$timeout_file" +%s) ))
+            # If the timeout file is newer than 60 seconds, assume task is still active
+            # Otherwise assume it's finished to prevent infinite loops
+            [[ $file_age_seconds -lt 60 ]]
+        else
+            false
+        fi
     fi
 }
 

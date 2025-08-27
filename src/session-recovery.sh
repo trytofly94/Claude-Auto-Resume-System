@@ -531,12 +531,27 @@ is_task_active() {
             status=$(get_task_status "$task_id" 2>/dev/null || echo "unknown")
             [[ "$status" == "in_progress" || "$status" == "pending" ]]
         else
-            # Fallback: assume active if called
-            true
+            # Fallback: Check if task is in the recent file system
+            local task_queue_dir="${TASK_QUEUE_DIR:-queue}"
+            local task_file="$PROJECT_ROOT/$task_queue_dir/tasks/${task_id}.json"
+            [[ -f "$task_file" && $(find "$task_file" -mmin -5 2>/dev/null | wc -l) -gt 0 ]]
         fi
     else
-        # Ultimate fallback: assume active
-        true
+        # Ultimate fallback: limit active time to prevent infinite loops
+        # Assume task is not active after being called - this is safer for testing
+        local task_start_marker="/tmp/session-monitor-${task_id}-start"
+        if [[ ! -f "$task_start_marker" ]]; then
+            touch "$task_start_marker"
+            true  # First check - assume active
+        else
+            # Check if marker file is older than 5 minutes (300 seconds)
+            local marker_age=$(( $(date +%s) - $(date -r "$task_start_marker" +%s) ))
+            if [[ $marker_age -lt 300 ]]; then
+                true   # Still within 5 minutes - assume active
+            else
+                false  # Older than 5 minutes - assume completed to prevent infinite loop
+            fi
+        fi
     fi
 }
 
