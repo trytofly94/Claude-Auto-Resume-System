@@ -1012,11 +1012,14 @@ SETUP PROCESS:
     10. Optional demo
 
 EXAMPLES:
-    # Full interactive setup
+    # Full interactive setup with official claunch installer (recommended)
     $SCRIPT_NAME
 
     # Quick setup without interaction
     $SCRIPT_NAME --non-interactive
+
+    # Setup with specific claunch installation method
+    $SCRIPT_NAME --claunch-method npm
 
     # Development setup with tools
     $SCRIPT_NAME --dev
@@ -1050,6 +1053,23 @@ parse_arguments() {
             --skip-claunch)
                 SKIP_CLAUNCH=true
                 shift
+                ;;
+            --claunch-method)
+                if [[ -z "${2:-}" ]]; then
+                    log_error "Option $1 requires a method (official, npm, source, auto)"
+                    exit 1
+                fi
+                case "${2}" in
+                    "official"|"npm"|"source"|"auto")
+                        CLAUNCH_METHOD="$2"
+                        ;;
+                    *)
+                        log_error "Invalid claunch method: $2"
+                        log_error "Valid methods: official, npm, source, auto"
+                        exit 1
+                        ;;
+                esac
+                shift 2
                 ;;
             --skip-tests)
                 SKIP_TESTS=true
@@ -1099,6 +1119,7 @@ parse_arguments() {
     log_debug "Configuration:"
     log_debug "  SKIP_DEPENDENCIES=$SKIP_DEPENDENCIES"
     log_debug "  SKIP_CLAUNCH=$SKIP_CLAUNCH"
+    log_debug "  CLAUNCH_METHOD=$CLAUNCH_METHOD"
     log_debug "  SKIP_TESTS=$SKIP_TESTS"
     log_debug "  INSTALL_DEV_TOOLS=$INSTALL_DEV_TOOLS"
     log_debug "  FORCE_REINSTALL=$FORCE_REINSTALL"
