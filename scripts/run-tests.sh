@@ -23,7 +23,13 @@ VERBOSE_OUTPUT=false
 # GENERATE_COVERAGE=false
 STOP_ON_FAILURE=false
 PARALLEL_TESTS=false
-TEST_TIMEOUT=300
+# Phase 1: Granular timeout controls (Issue #46)
+UNIT_TEST_TIMEOUT=30        # Individual unit tests
+INTEGRATION_TEST_TIMEOUT=45 # Individual integration tests
+SETUP_TIMEOUT=10            # Test initialization
+CLEANUP_TIMEOUT=5           # Test cleanup
+TOTAL_SUITE_TIMEOUT=300     # Maximum total execution time (legacy TEST_TIMEOUT)
+TEST_TIMEOUT=300            # Backward compatibility
 DRY_RUN=false
 SKIP_BATS_TESTS=false
 INCLUDE_GITHUB_TESTS=false
@@ -124,6 +130,19 @@ validate_test_environment() {
     
     local issues=0
     
+    # Phase 1: Load BATS compatibility utilities (Issue #46)
+    local bats_compat_file="$PROJECT_ROOT/tests/utils/bats-compatibility.bash"
+    if [[ -f "$bats_compat_file" ]]; then
+        source "$bats_compat_file" 2>/dev/null || {
+            log_warn "Failed to load BATS compatibility utilities"
+            log_warn "Some advanced test features may not work properly"
+        }
+        log_info "BATS compatibility utilities loaded successfully"
+    else
+        log_warn "BATS compatibility utilities not found: $bats_compat_file"
+        log_warn "Advanced timeout and isolation features will not be available"
+    fi
+    
     # Prüfe BATS
     if ! has_command bats; then
         log_error "BATS (Bash Automated Testing System) not found"
@@ -151,6 +170,23 @@ validate_test_environment() {
             ((issues++))
         else
             log_success "BATS is functional and ready for testing"
+            
+            # Phase 1: Report environment detection results
+            if command -v detect_test_environment >/dev/null 2>&1; then
+                local platform
+                platform=$(uname -s)
+                case "$platform" in
+                    "Darwin") 
+                        log_info "Platform: macOS - file locking timeout: 15s"
+                        ;;
+                    "Linux") 
+                        log_info "Platform: Linux - file locking timeout: 5s"
+                        ;;
+                    *)
+                        log_info "Platform: $platform - using conservative settings"
+                        ;;
+                esac
+            fi
         fi
     fi
     
@@ -362,18 +398,35 @@ run_unit_tests() {
         bats_options+=("--jobs" "4")
     fi
     
-    # Setze Test-Umgebung
-    export BATS_TEST_TIMEOUT="$TEST_TIMEOUT"
+    # Phase 1: Enhanced timeout handling (Issue #46)
+    export BATS_TEST_TIMEOUT="$UNIT_TEST_TIMEOUT"
+    export TEST_PROJECT_DIR="$PROJECT_ROOT"
     
-    if timeout "$TEST_TIMEOUT" bats "${bats_options[@]}" "$unit_test_dir"/*.bats; then
+    # Use granular timeout for unit tests
+    local effective_timeout="$UNIT_TEST_TIMEOUT"
+    log_info "Using unit test timeout: ${effective_timeout}s per test"
+    
+    # Enhanced BATS execution with timeout warnings
+    local timeout_progress_pid=""
+    if command -v provide_timeout_progress >/dev/null 2>&1; then
+        timeout_progress_pid=$(provide_timeout_progress "unit tests" "$TOTAL_SUITE_TIMEOUT")
+    fi
+    
+    if timeout --preserve-status "$TOTAL_SUITE_TIMEOUT" bats "${bats_options[@]}" "$unit_test_dir"/*.bats; then
         unit_result=0
     else
         unit_result=$?
         if [[ $unit_result -eq 124 ]]; then
-            log_error "Unit tests timed out after $TEST_TIMEOUT seconds"
+            log_error "Unit tests timed out after $TOTAL_SUITE_TIMEOUT seconds (individual timeout: ${effective_timeout}s)"
+            log_error "Consider splitting large tests or optimizing slow operations"
         else
             log_error "Unit tests failed with exit code: $unit_result"
         fi
+    fi
+    
+    # Cleanup timeout progress indicator
+    if [[ -n "$timeout_progress_pid" ]]; then
+        kill "$timeout_progress_pid" 2>/dev/null || true
     fi
     
     local unit_end_time
@@ -426,8 +479,9 @@ run_integration_tests() {
         return 0
     fi
     
-    # Integration-Tests benötigen möglicherweise längere Timeouts
-    local integration_timeout=$((TEST_TIMEOUT * 2))
+    # Phase 1: Enhanced timeout handling for integration tests (Issue #46)
+    local effective_timeout="$INTEGRATION_TEST_TIMEOUT"
+    local total_timeout="$TOTAL_SUITE_TIMEOUT"
     
     # Führe BATS aus
     local bats_options=()
@@ -436,17 +490,32 @@ run_integration_tests() {
         bats_options+=("--verbose-run")
     fi
     
-    export BATS_TEST_TIMEOUT="$integration_timeout"
+    export BATS_TEST_TIMEOUT="$effective_timeout"
+    export TEST_PROJECT_DIR="$PROJECT_ROOT"
     
-    if timeout "$integration_timeout" bats "${bats_options[@]}" "$integration_test_dir"/*.bats; then
+    log_info "Using integration test timeout: ${effective_timeout}s per test, ${total_timeout}s total"
+    
+    # Enhanced BATS execution with timeout warnings
+    local timeout_progress_pid=""
+    if command -v provide_timeout_progress >/dev/null 2>&1; then
+        timeout_progress_pid=$(provide_timeout_progress "integration tests" "$total_timeout")
+    fi
+    
+    if timeout --preserve-status "$total_timeout" bats "${bats_options[@]}" "$integration_test_dir"/*.bats; then
         integration_result=0
     else
         integration_result=$?
         if [[ $integration_result -eq 124 ]]; then
-            log_error "Integration tests timed out after $integration_timeout seconds"
+            log_error "Integration tests timed out after $total_timeout seconds (individual timeout: ${effective_timeout}s)"
+            log_error "Consider reducing test scope or optimizing test setup"
         else
             log_error "Integration tests failed with exit code: $integration_result"
         fi
+    fi
+    
+    # Cleanup timeout progress indicator
+    if [[ -n "$timeout_progress_pid" ]]; then
+        kill "$timeout_progress_pid" 2>/dev/null || true
     fi
     
     local integration_end_time=$(date +%s)

@@ -2,17 +2,26 @@
 
 # Test helper functions for Claude Auto-Resume test suite
 # This file is loaded by all BATS test files
+# Enhanced with Issue #46 BATS compatibility improvements
 
 # Set up test environment
 export BATS_TEST_SKIPPED=
 export TEST_TEMP_DIR=""
 
+# Load BATS compatibility utilities (Issue #46 Phase 1)
+BATS_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$BATS_HELPER_DIR/utils/bats-compatibility.bash" ]]; then
+    source "$BATS_HELPER_DIR/utils/bats-compatibility.bash" 2>/dev/null || true
+fi
+
 # Test configuration
 setup_test_environment() {
+    # Phase 2: Enhanced test isolation (Issue #46)
     # Create isolated test environment
     export TEST_TEMP_DIR=$(mktemp -d)
     export HOME="$TEST_TEMP_DIR/home"
     export XDG_CONFIG_HOME="$TEST_TEMP_DIR/config"
+    export TEST_PROJECT_DIR="$BATS_HELPER_DIR/.."
     
     mkdir -p "$HOME" "$XDG_CONFIG_HOME"
     
@@ -26,12 +35,23 @@ setup_test_environment() {
     
     # Use test configuration
     export TEST_CONFIG_FILE="$BATS_TEST_DIRNAME/fixtures/test-config.conf"
+    
+    # Phase 2: Setup test-specific logging (Issue #46)
+    if command -v setup_test_logging >/dev/null 2>&1; then
+        setup_test_logging "${BATS_TEST_NAME:-unknown_test}"
+    fi
 }
 
 # Cleanup test environment
 teardown_test_environment() {
-    if [[ -n "$TEST_TEMP_DIR" && -d "$TEST_TEMP_DIR" ]]; then
-        rm -rf "$TEST_TEMP_DIR"
+    # Phase 2: Enhanced test cleanup (Issue #46)
+    if command -v enhanced_test_teardown >/dev/null 2>&1; then
+        enhanced_test_teardown
+    else
+        # Fallback to basic cleanup
+        if [[ -n "$TEST_TEMP_DIR" && -d "$TEST_TEMP_DIR" ]]; then
+            rm -rf "$TEST_TEMP_DIR"
+        fi
     fi
 }
 
@@ -361,4 +381,146 @@ default_setup() {
 default_teardown() {
     cleanup_test_artifacts
     teardown_test_environment
+}
+
+# ===============================================================================
+# ENHANCED FUNCTIONS FOR ISSUE #46 BATS COMPATIBILITY
+# ===============================================================================
+
+# Enhanced setup with BATS compatibility features
+enhanced_setup() {
+    setup_test_environment
+    
+    # Load common mocks
+    setup_mock_tmux
+    setup_mock_claude "success"
+    setup_mock_claunch "true"
+    
+    # Phase 1: Optimize BATS state tracking (Issue #46)
+    if command -v optimize_bats_state_tracking >/dev/null 2>&1; then
+        optimize_bats_state_tracking
+    fi
+}
+
+# Enhanced teardown with BATS compatibility features
+enhanced_teardown() {
+    # Phase 2: Use enhanced cleanup if available
+    if command -v enhanced_test_teardown >/dev/null 2>&1; then
+        enhanced_test_teardown
+    else
+        default_teardown
+    fi
+}
+
+# Timeout-aware test execution wrapper
+run_with_bats_timeout() {
+    local test_type="${1:-default}"
+    shift
+    
+    # Use BATS-compatible timeout if available
+    if command -v bats_safe_timeout >/dev/null 2>&1; then
+        case "$test_type" in
+            "unit")
+                bats_safe_timeout 30 "unit" "$@"
+                ;;
+            "integration") 
+                bats_safe_timeout 45 "integration" "$@"
+                ;;
+            "setup")
+                bats_safe_timeout 10 "setup" "$@"
+                ;;
+            "cleanup")
+                bats_safe_timeout 5 "cleanup" "$@"
+                ;;
+            *)
+                bats_safe_timeout 30 "default" "$@"
+                ;;
+        esac
+    else
+        # Fallback to run_with_timeout
+        run_with_timeout 30 "$@"
+    fi
+}
+
+# Platform-aware test skipping
+skip_if_platform_incompatible() {
+    local requirement="$1"
+    local message="${2:-Test incompatible with current platform}"
+    
+    if command -v skip_if_incompatible >/dev/null 2>&1; then
+        skip_if_incompatible "$requirement" "$message"
+    else
+        # Fallback platform detection
+        case "$requirement" in
+            "flock")
+                if [[ "$(uname -s)" == "Darwin" ]]; then
+                    skip "$message (macOS: flock unavailable)"
+                fi
+                ;;
+            "linux_only")
+                if [[ "$(uname -s)" != "Linux" ]]; then
+                    skip "$message (Linux required)"
+                fi
+                ;;
+            "macos_only")
+                if [[ "$(uname -s)" != "Darwin" ]]; then
+                    skip "$message (macOS required)"
+                fi
+                ;;
+        esac
+    fi
+}
+
+# Safe array operations for BATS
+test_array_operation() {
+    local operation="$1"
+    local array_name="$2"
+    shift 2
+    
+    if command -v bats_safe_array_operation >/dev/null 2>&1; then
+        bats_safe_array_operation "$operation" "$array_name" "$@"
+    else
+        # Fallback: basic array operations
+        case "$operation" in
+            "get")
+                local key="$1"
+                local -n array_ref="$array_name"
+                echo "${array_ref[$key]:-}"
+                ;;
+            "set")
+                local key="$1"
+                local value="$2"
+                local -n array_ref="$array_name"
+                array_ref["$key"]="$value"
+                ;;
+            "exists")
+                local key="$1"
+                local -n array_ref="$array_name"
+                [[ -v "array_ref[$key]" ]]
+                ;;
+            "clear")
+                unset "$array_name"
+                declare -gA "$array_name"
+                ;;
+        esac
+    fi
+}
+
+# Isolated test execution
+run_isolated_test() {
+    local test_function="$1"
+    shift
+    
+    if command -v bats_isolated_test_run >/dev/null 2>&1; then
+        bats_isolated_test_run "$test_function" "$@"
+    else
+        # Fallback: basic isolation
+        (
+            enhanced_setup
+            "$test_function" "$@"
+            local result=$?
+            enhanced_teardown
+            return $result
+        )
+    fi
 }
