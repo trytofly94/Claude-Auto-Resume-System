@@ -1,19 +1,19 @@
 {
   "test_run": {
-    "timestamp": "2025-08-06T22:21:58+02:00",
-    "test_type": "unit",
-    "duration": 0,
+    "timestamp": "2025-08-27T08:46:21+02:00",
+    "test_type": "syntax",
+    "duration": 1,
     "results": {
-      "total": 2,
+      "total": 1,
       "passed": 1,
       "failed": 0,
-      "skipped": 1
+      "skipped": 0
     },
     "environment": {
       "os": "Darwin",
-      "shell": "/bin/zsh",
-      "bats_available": false,
-      "shellcheck_available": false
+      "shell": "/usr/local/bin/bash",
+      "bats_available": true,
+      "shellcheck_available": true
     },
     "configuration": {
       "verbose": true,
