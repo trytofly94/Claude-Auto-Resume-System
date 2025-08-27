@@ -23,11 +23,21 @@ load '../test_helper'
 
 setup() {
     # Load test environment
-    load_test_environment
+    setup_test_environment
+    
+    # Source logging functions for tests
+    source "$BATS_TEST_DIRNAME/../../src/utils/logging.sh" 2>/dev/null || {
+        # Fallback logging functions for tests
+        log_debug() { echo "[DEBUG] $*" >&2; }
+        log_info() { echo "[INFO] $*" >&2; }
+        log_warn() { echo "[WARN] $*" >&2; }
+        log_error() { echo "[ERROR] $*" >&2; }
+    }
     
     # Set up security test configuration
     export SECURITY_AUDIT=true
     export LOG_LEVEL="DEBUG"  # Enable debug logging for security testing
+    export PROJECT_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     
     # Create isolated security test environment
     SECURITY_TEST_DIR="/tmp/security_test_$$"
@@ -52,7 +62,7 @@ teardown() {
     fi
     
     # Clean up any test files
-    cleanup_security_test_environment
+    teardown_test_environment
 }
 
 setup_security_test_environment() {

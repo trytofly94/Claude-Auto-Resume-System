@@ -20,7 +20,7 @@ load '../test_helper'
 
 setup() {
     # Load test environment
-    load_test_environment
+    setup_test_environment
     
     # Set up test-specific configuration
     export TASK_QUEUE_ENABLED=true

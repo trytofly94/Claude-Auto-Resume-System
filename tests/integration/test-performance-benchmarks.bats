@@ -21,7 +21,7 @@ load '../test_helper'
 
 setup() {
     # Load test environment
-    load_test_environment
+    setup_test_environment
     
     # Set up performance test configuration
     export PERFORMANCE_TESTING=true
