@@ -25,6 +25,12 @@ VERIFY_INSTALLATION=true
 # claunch-Konfiguration
 CLAUNCH_REPO="https://github.com/0xkaz/claunch.git"
 CLAUNCH_NPM_PACKAGE="@0xkaz/claunch"
+CLAUNCH_OFFICIAL_INSTALLER_URL="https://raw.githubusercontent.com/0xkaz/claunch/main/install.sh"
+
+# Network and retry configuration for official installer
+NETWORK_TIMEOUT=30
+MAX_RETRY_ATTEMPTS=3
+RETRY_DELAY=2
 
 # ===============================================================================
 # HILFSFUNKTIONEN
@@ -218,6 +224,110 @@ install_dependencies() {
 }
 
 # ===============================================================================
+# NETWORK AND DOWNLOAD UTILITIES
+# ===============================================================================
+
+# Test network connectivity to a given URL
+test_network_connectivity() {
+    local url="$1"
+    local timeout="${2:-$NETWORK_TIMEOUT}"
+    
+    log_debug "Testing connectivity to: $url"
+    
+    if has_command curl; then
+        if curl --connect-timeout "$timeout" --max-time "$timeout" --silent --head "$url" >/dev/null 2>&1; then
+            log_debug "Network connectivity test successful"
+            return 0
+        else
+            log_debug "Network connectivity test failed"
+            return 1
+        fi
+    elif has_command wget; then
+        if wget --timeout="$timeout" --tries=1 --spider --quiet "$url" 2>/dev/null; then
+            log_debug "Network connectivity test successful (wget)"
+            return 0
+        else
+            log_debug "Network connectivity test failed (wget)"
+            return 1
+        fi
+    else
+        log_warn "No network test tool available (curl or wget required)"
+        return 1
+    fi
+}
+
+# Download content with retry logic
+download_with_retry() {
+    local url="$1"
+    local output_file="${2:-}"
+    local max_attempts="${3:-$MAX_RETRY_ATTEMPTS}"
+    local delay="${4:-$RETRY_DELAY}"
+    
+    log_info "Downloading from: $url"
+    
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        log_debug "Download attempt $attempt/$max_attempts"
+        
+        # Test connectivity first
+        if ! test_network_connectivity "$url"; then
+            if [[ $attempt -lt $max_attempts ]]; then
+                log_warn "Network connectivity test failed, retrying in ${delay}s..."
+                sleep "$delay"
+                continue
+            else
+                log_error "Network connectivity test failed after $max_attempts attempts"
+                return 1
+            fi
+        fi
+        
+        # Attempt download
+        local download_success=false
+        
+        if has_command curl; then
+            if [[ -n "$output_file" ]]; then
+                if curl --fail --location --connect-timeout "$NETWORK_TIMEOUT" --max-time "$((NETWORK_TIMEOUT * 2))" --silent --output "$output_file" "$url" 2>/dev/null; then
+                    download_success=true
+                fi
+            else
+                # Download to stdout for piping
+                if curl --fail --location --connect-timeout "$NETWORK_TIMEOUT" --max-time "$((NETWORK_TIMEOUT * 2))" --silent "$url" 2>/dev/null; then
+                    download_success=true
+                fi
+            fi
+        elif has_command wget; then
+            if [[ -n "$output_file" ]]; then
+                if wget --timeout="$NETWORK_TIMEOUT" --tries=1 --output-document="$output_file" --quiet "$url" 2>/dev/null; then
+                    download_success=true
+                fi
+            else
+                # Download to stdout for piping
+                if wget --timeout="$NETWORK_TIMEOUT" --tries=1 --output-document=- --quiet "$url" 2>/dev/null; then
+                    download_success=true
+                fi
+            fi
+        else
+            log_error "No download tool available (curl or wget required)"
+            return 1
+        fi
+        
+        if [[ "$download_success" == "true" ]]; then
+            log_debug "Download successful on attempt $attempt"
+            return 0
+        fi
+        
+        if [[ $attempt -lt $max_attempts ]]; then
+            log_warn "Download failed, retrying in ${delay}s..."
+            sleep "$delay"
+            # Exponential backoff
+            delay=$((delay * 2))
+        fi
+    done
+    
+    log_error "Download failed after $max_attempts attempts"
+    return 1
+}
+
+# ===============================================================================
 # CLAUNCH-INSTALLATION
 # ===============================================================================
 
@@ -267,6 +377,92 @@ check_existing_claunch() {
     
     log_info "claunch not found - proceeding with installation"
     return 1
+}
+
+# Installiere claunch via official installer (GitHub #38)
+install_claunch_official() {
+    log_info "Installing claunch via official installer"
+    
+    # Verify network connectivity first
+    if ! test_network_connectivity "$CLAUNCH_OFFICIAL_INSTALLER_URL"; then
+        log_error "Cannot reach official installer URL"
+        log_error "Please check your internet connection"
+        return 1
+    fi
+    
+    log_info "Downloading and executing official installer from GitHub"
+    log_info "Installer URL: $CLAUNCH_OFFICIAL_INSTALLER_URL"
+    
+    # Download and execute the installer
+    local installer_success=false
+    local temp_installer
+    
+    # Create temporary file for installer
+    temp_installer=$(mktemp) || {
+        log_error "Failed to create temporary file for installer"
+        return 1
+    }
+    
+    # Cleanup function for temporary installer
+    cleanup_installer() {
+        rm -f "$temp_installer"
+    }
+    
+    trap cleanup_installer EXIT
+    
+    # Download installer script with retry logic
+    if download_with_retry "$CLAUNCH_OFFICIAL_INSTALLER_URL" "$temp_installer"; then
+        log_info "Installer downloaded successfully"
+        
+        # Verify the downloaded file is not empty and contains bash script
+        if [[ ! -s "$temp_installer" ]]; then
+            log_error "Downloaded installer is empty"
+            return 1
+        fi
+        
+        if ! head -1 "$temp_installer" | grep -q "^#!.*bash"; then
+            log_warn "Downloaded installer may not be a bash script"
+            log_info "First line: $(head -1 "$temp_installer")"
+        fi
+        
+        # Make installer executable
+        chmod +x "$temp_installer"
+        
+        # Execute installer
+        log_info "Executing official claunch installer..."
+        if bash "$temp_installer"; then
+            installer_success=true
+            log_info "Official installer completed successfully"
+        else
+            log_error "Official installer execution failed"
+            return 1
+        fi
+    else
+        log_error "Failed to download official installer"
+        return 1
+    fi
+    
+    # Verify installation was successful
+    if [[ "$installer_success" == "true" ]]; then
+        # Allow some time for installer to complete its work
+        sleep 2
+        
+        # Refresh shell environment to pick up any PATH changes
+        refresh_shell_path
+        
+        # Check if claunch is now available
+        if has_command claunch || [[ -x "$INSTALL_TARGET/claunch" ]]; then
+            log_info "claunch official installation completed successfully"
+            return 0
+        else
+            log_warn "Official installer completed but claunch not found in PATH"
+            log_warn "You may need to restart your terminal or update your PATH"
+            return 0  # Don't fail here as installer may have succeeded
+        fi
+    else
+        log_error "Official installer failed"
+        return 1
+    fi
 }
 
 # Installiere claunch via npm
@@ -404,8 +600,13 @@ install_claunch_source() {
 install_claunch_auto() {
     log_info "Installing claunch with automatic method selection"
     
-    # Prüfe welche Methoden verfügbar sind
+    # Prüfe welche Methoden verfügbar sind (prioritized order: official -> npm -> source)
     local methods=()
+    
+    # Check if we have network tools for official installation
+    if has_command curl || has_command wget; then
+        methods+=("official")
+    fi
     
     if has_command npm; then
         methods+=("npm")
@@ -417,15 +618,22 @@ install_claunch_auto() {
     
     if [[ ${#methods[@]} -eq 0 ]]; then
         log_error "No installation methods available"
-        log_error "Please install npm or git first"
+        log_error "Please install curl/wget for official installer, npm for npm method, or git for source method"
         return 1
     fi
+    
+    log_info "Available installation methods: ${methods[*]}"
     
     # Versuche Installationsmethoden in der Reihenfolge
     for method in "${methods[@]}"; do
         log_info "Trying installation method: $method"
         
         case "$method" in
+            "official")
+                if install_claunch_official; then
+                    return 0
+                fi
+                ;;
             "npm")
                 if install_claunch_npm; then
                     return 0
@@ -462,6 +670,9 @@ install_claunch() {
     
     # Installiere claunch basierend auf Methode
     case "$INSTALL_METHOD" in
+        "official")
+            install_claunch_official
+            ;;
         "npm")
             install_claunch_npm
             ;;
@@ -473,6 +684,7 @@ install_claunch() {
             ;;
         *)
             log_error "Unknown installation method: $INSTALL_METHOD"
+            log_error "Valid methods: official, npm, source, auto"
             return 1
             ;;
     esac
@@ -482,9 +694,9 @@ install_claunch() {
 # PATH AND ENVIRONMENT MANAGEMENT
 # ===============================================================================
 
-# Refresh shell PATH environment (addresses GitHub issue #4)
+# Enhanced shell PATH environment refresh (addresses GitHub issue #4)
 refresh_shell_path() {
-    log_debug "Refreshing shell PATH environment"
+    log_debug "Refreshing shell PATH environment with enhanced detection"
     
     # Add install target to current PATH if not already present
     if [[ ":$PATH:" != *":$INSTALL_TARGET:"* ]]; then
@@ -492,19 +704,68 @@ refresh_shell_path() {
         log_debug "Added $INSTALL_TARGET to current PATH"
     fi
     
-    # Source common shell configuration files to pick up PATH changes
-    local shell_configs=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.profile")
+    # Add common claunch installation paths to PATH
+    local common_claunch_paths=(
+        "$HOME/.local/bin"
+        "$HOME/bin"
+        "/usr/local/bin"
+        "$HOME/.npm-global/bin"
+        "$HOME/.nvm/versions/node/*/bin"
+    )
     
-    for config in "${shell_configs[@]}"; do
-        if [[ -f "$config" ]]; then
-            log_debug "Sourcing $config"
-            # shellcheck disable=SC1090
-            source "$config" 2>/dev/null || true
+    for path in "${common_claunch_paths[@]}"; do
+        # Handle glob patterns for NVM paths
+        if [[ "$path" == *"*"* ]]; then
+            for expanded_path in $path; do
+                if [[ -d "$expanded_path" ]] && [[ ":$PATH:" != *":$expanded_path:"* ]]; then
+                    export PATH="$expanded_path:$PATH"
+                    log_debug "Added NVM path $expanded_path to current PATH"
+                fi
+            done
+        else
+            if [[ -d "$path" ]] && [[ ":$PATH:" != *":$path:"* ]]; then
+                export PATH="$path:$PATH"
+                log_debug "Added common path $path to current PATH"
+            fi
         fi
     done
     
+    # Source shell configuration files in priority order
+    local shell_configs=()
+    
+    # Detect current shell and prioritize its config
+    if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+        shell_configs+=("$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv")
+    elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+        shell_configs+=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login")
+    fi
+    
+    # Add common configs
+    shell_configs+=("$HOME/.profile" "$HOME/.shellrc")
+    
+    local configs_sourced=0
+    for config in "${shell_configs[@]}"; do
+        if [[ -f "$config" ]] && [[ -r "$config" ]]; then
+            log_debug "Sourcing $config"
+            # shellcheck disable=SC1090
+            if source "$config" 2>/dev/null; then
+                ((configs_sourced++))
+                log_debug "Successfully sourced $config"
+            else
+                log_debug "Failed to source $config (may contain syntax errors)"
+            fi
+        fi
+    done
+    
+    log_debug "Sourced $configs_sourced shell configuration files"
+    
+    # Refresh hash table for command lookups
+    hash -r 2>/dev/null || true
+    
     # Allow a moment for environment changes to take effect
     sleep 1
+    
+    log_debug "PATH refresh completed. Current PATH length: ${#PATH}"
 }
 
 # Ensure PATH is configured in shell configuration files
@@ -556,89 +817,348 @@ ensure_path_configuration() {
 # INSTALLATION-VERIFIZIERUNG
 # ===============================================================================
 
-# Enhanced claunch installation verification (addresses GitHub issue #4)
+# Enhanced claunch installation verification with comprehensive detection (addresses GitHub issue #4)
 verify_installation() {
-    log_info "Verifying claunch installation with enhanced detection"
+    log_info "Verifying claunch installation with comprehensive detection"
     
-    # First, try to refresh PATH environment
+    # First, refresh PATH environment to pick up any new installations
     refresh_shell_path
     
-    # Multi-strategy verification
+    # Multi-round verification with different strategies
     local claunch_path=""
-    local verification_attempts=3
+    local verification_attempts=5
     local attempt=1
+    local verification_methods=()
     
     while [[ $attempt -le $verification_attempts ]]; do
         log_info "Verification attempt $attempt/$verification_attempts"
         
+        # Method 1: Check if claunch is in PATH
         if has_command claunch; then
-            claunch_path=$(command -v claunch)
-            log_info "Found claunch via command: $claunch_path"
-            break
-        elif [[ -x "$INSTALL_TARGET/claunch" ]]; then
-            claunch_path="$INSTALL_TARGET/claunch"
-            log_info "Found claunch at install target: $claunch_path"
-            break
-        else
-            # Check common paths
-            local common_paths=("$HOME/.local/bin/claunch" "$HOME/bin/claunch" "/usr/local/bin/claunch")
-            local found_alt=false
-            
-            for path in "${common_paths[@]}"; do
-                if [[ -x "$path" ]]; then
-                    claunch_path="$path"
-                    log_info "Found claunch at alternative path: $claunch_path"
-                    found_alt=true
-                    break
-                fi
-            done
-            
-            if [[ "$found_alt" == "true" ]]; then
+            claunch_path=$(command -v claunch 2>/dev/null)
+            if [[ -n "$claunch_path" && -x "$claunch_path" ]]; then
+                verification_methods+=("PATH lookup")
+                log_info "Found claunch via PATH: $claunch_path"
                 break
             fi
         fi
         
+        # Method 2: Check install target directory
+        if [[ -x "$INSTALL_TARGET/claunch" ]]; then
+            claunch_path="$INSTALL_TARGET/claunch"
+            verification_methods+=("Install target")
+            log_info "Found claunch at install target: $claunch_path"
+            break
+        fi
+        
+        # Method 3: Check common installation paths
+        local common_paths=(
+            "$HOME/.local/bin/claunch"
+            "$HOME/bin/claunch"
+            "/usr/local/bin/claunch"
+            "$HOME/.npm-global/bin/claunch"
+            "/opt/homebrew/bin/claunch"
+            "/usr/bin/claunch"
+        )
+        
+        local found_common=false
+        for path in "${common_paths[@]}"; do
+            if [[ -x "$path" ]]; then
+                claunch_path="$path"
+                verification_methods+=("Common path")
+                log_info "Found claunch at common path: $claunch_path"
+                found_common=true
+                break
+            fi
+        done
+        
+        if [[ "$found_common" == "true" ]]; then
+            break
+        fi
+        
+        # Method 4: Search in NVM paths (for npm installations)
+        local nvm_search_paths=("$HOME/.nvm/versions/node/*/bin/claunch")
+        for nvm_path in $nvm_search_paths; do
+            if [[ -x "$nvm_path" ]]; then
+                claunch_path="$nvm_path"
+                verification_methods+=("NVM path")
+                log_info "Found claunch in NVM path: $claunch_path"
+                found_common=true
+                break
+            fi
+        done
+        
+        if [[ "$found_common" == "true" ]]; then
+            break
+        fi
+        
+        # Method 5: Search via which/whereis commands
+        if has_command which; then
+            local which_result
+            which_result=$(which claunch 2>/dev/null) || true
+            if [[ -n "$which_result" && -x "$which_result" ]]; then
+                claunch_path="$which_result"
+                verification_methods+=("which command")
+                log_info "Found claunch via 'which': $claunch_path"
+                break
+            fi
+        fi
+        
+        if has_command whereis; then
+            local whereis_result
+            whereis_result=$(whereis claunch 2>/dev/null | cut -d: -f2 | awk '{print $1}') || true
+            if [[ -n "$whereis_result" && -x "$whereis_result" ]]; then
+                claunch_path="$whereis_result"
+                verification_methods+=("whereis command")
+                log_info "Found claunch via 'whereis': $claunch_path"
+                break
+            fi
+        fi
+        
+        # If not found and we have more attempts, wait and refresh
         if [[ $attempt -lt $verification_attempts ]]; then
-            log_info "claunch not found, waiting 2s and refreshing environment..."
-            sleep 2
+            log_info "claunch not found, waiting 3s and refreshing environment..."
+            sleep 3
             refresh_shell_path
+            hash -r 2>/dev/null || true
         fi
         
         ((attempt++))
     done
     
+    # Report verification results
     if [[ -z "$claunch_path" ]]; then
-        log_error "claunch command not found after installation and verification attempts"
-        log_error "Please check if $INSTALL_TARGET is in your PATH or restart your terminal"
+        log_error "claunch not found after $verification_attempts comprehensive verification attempts"
+        log_error "Searched in:"
+        log_error "  - PATH directories"
+        log_error "  - Install target: $INSTALL_TARGET"
+        log_error "  - Common installation paths"
+        log_error "  - NVM node versions"
+        log_error ""
+        log_error "Possible solutions:"
+        log_error "  1. Restart your terminal to refresh PATH"
+        log_error "  2. Run: source ~/.bashrc (or ~/.zshrc)"
+        log_error "  3. Add claunch location to PATH manually"
+        log_error "  4. Reinstall with: $0 --force --method official"
         return 1
     fi
     
-    log_info "claunch found at: $claunch_path"
+    log_info "claunch successfully located at: $claunch_path"
+    log_info "Detection method(s): ${verification_methods[*]}"
     
-    # Teste Basis-Funktionalität
+    # Comprehensive functionality testing
+    local tests_passed=0
+    local tests_failed=0
+    
+    # Test 1: Version check
+    log_info "Testing claunch version command..."
     local version_output
     if version_output=$("$claunch_path" --version 2>&1); then
-        log_info "claunch version: $version_output"
+        log_info "✓ Version test passed: $version_output"
+        ((tests_passed++))
     else
-        log_warn "Could not determine claunch version"
+        log_warn "✗ Version test failed"
+        ((tests_failed++))
     fi
     
-    # Teste Hilfe-Kommando
+    # Test 2: Help command
+    log_info "Testing claunch help command..."
     if "$claunch_path" --help >/dev/null 2>&1; then
-        log_info "claunch help command works"
+        log_info "✓ Help command test passed"
+        ((tests_passed++))
     else
-        log_warn "claunch help command failed"
+        log_warn "✗ Help command test failed"
+        ((tests_failed++))
     fi
     
-    # Teste list-Kommando
+    # Test 3: List command (non-critical, may fail if no sessions)
+    log_info "Testing claunch list command..."
     if "$claunch_path" list >/dev/null 2>&1; then
-        log_info "claunch list command works"
+        log_info "✓ List command test passed"
+        ((tests_passed++))
     else
-        log_warn "claunch list command failed (may be normal if no sessions exist)"
+        log_info "○ List command test inconclusive (no sessions may exist)"
+        # Don't count as failure
     fi
     
-    log_info "claunch installation verification completed"
-    return 0
+    # Test 4: File permissions and executable check
+    log_info "Testing file permissions..."
+    if [[ -x "$claunch_path" ]]; then
+        log_info "✓ Executable permissions test passed"
+        ((tests_passed++))
+    else
+        log_error "✗ Executable permissions test failed"
+        ((tests_failed++))
+    fi
+    
+    # Test 5: File type check (should be script or binary)
+    log_info "Testing file type..."
+    local file_type
+    if file_type=$(file "$claunch_path" 2>/dev/null); then
+        log_info "✓ File type: $file_type"
+        ((tests_passed++))
+    else
+        log_warn "✗ Could not determine file type"
+        ((tests_failed++))
+    fi
+    
+    # Summary
+    local total_tests=$((tests_passed + tests_failed))
+    log_info ""
+    log_info "Verification summary:"
+    log_info "  Tests passed: $tests_passed"
+    log_info "  Tests failed: $tests_failed"
+    log_info "  Total tests: $total_tests"
+    
+    if [[ $tests_failed -eq 0 ]]; then
+        log_info "🎉 claunch installation verification completed successfully!"
+        return 0
+    elif [[ $tests_failed -le 1 ]]; then
+        log_warn "⚠️  claunch installation verification completed with minor issues"
+        return 0
+    else
+        log_error "❌ claunch installation verification failed with $tests_failed critical issues"
+        return 1
+    fi
+}
+
+# ===============================================================================
+# INSTALLATION STATUS REPORTING
+# ===============================================================================
+
+# Report comprehensive installation status with guidance
+report_installation_status() {
+    local install_success="$1"
+    local installation_method="${2:-unknown}"
+    
+    echo
+    echo "╭─────────────────────────────────────────────────────────────╮"
+    echo "│                Installation Status Report                   │"
+    echo "╰─────────────────────────────────────────────────────────────╯"
+    echo
+    
+    # System information
+    log_info "System Information:"
+    log_info "  Operating System: $(detect_os)"
+    log_info "  Package Manager: $(detect_package_manager)"
+    log_info "  Shell: $(basename "$SHELL")"
+    log_info "  Install Method: $installation_method"
+    log_info "  Install Target: $INSTALL_TARGET"
+    echo
+    
+    # Installation result
+    if [[ "$install_success" == "true" ]]; then
+        log_info "✅ Installation Status: SUCCESS"
+        
+        # Find claunch location
+        local claunch_location=""
+        if has_command claunch; then
+            claunch_location=$(command -v claunch)
+            log_info "✅ claunch Command: Available in PATH ($claunch_location)"
+        elif [[ -x "$INSTALL_TARGET/claunch" ]]; then
+            claunch_location="$INSTALL_TARGET/claunch"
+            log_info "⚠️  claunch Command: Available at install target (may need PATH update)"
+        else
+            log_warn "❌ claunch Command: Not found in PATH"
+        fi
+        
+        # Version information
+        if [[ -n "$claunch_location" && -x "$claunch_location" ]]; then
+            local version_info
+            if version_info=$("$claunch_location" --version 2>/dev/null); then
+                log_info "📋 claunch Version: $version_info"
+            else
+                log_warn "📋 claunch Version: Could not determine"
+            fi
+        fi
+        
+        echo
+        log_info "🎉 claunch installation completed successfully!"
+        echo
+        log_info "Next Steps:"
+        log_info "  1. You can now use claunch for Claude CLI session management"
+        log_info "  2. Try: claunch --help to see available options"
+        log_info "  3. Try: claunch to start Claude in current project"
+        log_info "  4. Try: claunch --tmux for persistent sessions"
+        
+        # PATH guidance if needed
+        if [[ -n "$claunch_location" ]] && ! has_command claunch; then
+            echo
+            log_info "PATH Configuration:"
+            log_info "  claunch is installed but not in PATH"
+            local claunch_dir
+            claunch_dir=$(dirname "$claunch_location")
+            log_info "  Add to your shell profile: export PATH=\"$claunch_dir:\$PATH\""
+            log_info "  Or restart your terminal to pick up PATH changes"
+        fi
+        
+    else
+        log_error "❌ Installation Status: FAILED"
+        echo
+        log_error "Installation Diagnostics:"
+        
+        # Check system requirements
+        local missing_deps=()
+        if ! has_command curl && ! has_command wget; then
+            missing_deps+=("curl or wget (for official installer)")
+        fi
+        if ! has_command npm && ! has_command git; then
+            missing_deps+=("npm or git (for fallback methods)")
+        fi
+        
+        if [[ ${#missing_deps[@]} -gt 0 ]]; then
+            log_error "  Missing dependencies: ${missing_deps[*]}"
+        fi
+        
+        # Check network connectivity
+        if ! test_network_connectivity "$CLAUNCH_OFFICIAL_INSTALLER_URL" 5; then
+            log_error "  Network: Cannot reach official installer"
+        else
+            log_info "  Network: OK (can reach official installer)"
+        fi
+        
+        # Check permissions
+        if [[ ! -w "$INSTALL_TARGET" ]]; then
+            if [[ ! -d "$INSTALL_TARGET" ]]; then
+                log_error "  Permissions: Install target directory does not exist: $INSTALL_TARGET"
+            else
+                log_error "  Permissions: Cannot write to install target: $INSTALL_TARGET"
+            fi
+        else
+            log_info "  Permissions: OK (can write to install target)"
+        fi
+        
+        echo
+        log_error "Troubleshooting Suggestions:"
+        log_error "  1. Check your internet connection"
+        log_error "  2. Install missing dependencies (curl, npm, or git)"
+        log_error "  3. Try a different installation method:"
+        log_error "     • $0 --method npm"
+        log_error "     • $0 --method source"
+        log_error "  4. Try with debug output: $0 --debug"
+        log_error "  5. Check permissions for: $INSTALL_TARGET"
+        log_error "  6. Force reinstall: $0 --force"
+    fi
+    
+    echo
+    log_info "Installation Details:"
+    log_info "  Script Version: $VERSION"
+    log_info "  Timestamp: $(date)"
+    log_info "  Configuration:"
+    log_info "    METHOD=$INSTALL_METHOD"
+    log_info "    TARGET=$INSTALL_TARGET" 
+    log_info "    FORCE_REINSTALL=$FORCE_REINSTALL"
+    log_info "    SKIP_DEPENDENCIES=$SKIP_DEPENDENCIES"
+    log_info "    VERIFY_INSTALLATION=$VERIFY_INSTALLATION"
+    log_info "    NETWORK_TIMEOUT=$NETWORK_TIMEOUT"
+    log_info "    MAX_RETRY_ATTEMPTS=$MAX_RETRY_ATTEMPTS"
+    
+    echo
+    log_info "For more help, visit:"
+    log_info "  • claunch GitHub: https://github.com/0xkaz/claunch"
+    log_info "  • Claude CLI: https://claude.ai/code"
+    log_info "  • This project: $(pwd)"
+    echo
 }
 
 # ===============================================================================
@@ -653,19 +1173,22 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Install claunch for Claude CLI session management.
 
 OPTIONS:
-    --method METHOD         Installation method: npm, source, auto (default: auto)
+    --method METHOD         Installation method: official, npm, source, auto (default: auto)
     --target DIR           Installation target directory (default: $INSTALL_TARGET)
     --force                Force reinstallation if claunch already exists
     --skip-deps            Skip dependency installation
     --no-verify            Skip installation verification
+    --timeout SECONDS      Network timeout for downloads (default: $NETWORK_TIMEOUT)
+    --max-retries N        Maximum retry attempts for downloads (default: $MAX_RETRY_ATTEMPTS)
     --debug                Enable debug output
     -h, --help             Show this help message
     --version              Show version information
 
 INSTALLATION METHODS:
-    npm         Install via npm package manager (recommended)
+    official    Install via official GitHub installer (recommended, addresses issue #38)
+    npm         Install via npm package manager
     source      Install from GitHub source repository
-    auto        Try npm first, then source (default)
+    auto        Try official first, then npm, then source (default)
 
 EXAMPLES:
     # Install with default settings
@@ -696,7 +1219,7 @@ parse_arguments() {
         case "$1" in
             --method)
                 if [[ -z "${2:-}" ]]; then
-                    log_error "Option $1 requires a method (npm, source, auto)"
+                    log_error "Option $1 requires a method (official, npm, source, auto)"
                     exit 1
                 fi
                 INSTALL_METHOD="$2"
@@ -708,6 +1231,22 @@ parse_arguments() {
                     exit 1
                 fi
                 INSTALL_TARGET="$2"
+                shift 2
+                ;;
+            --timeout)
+                if [[ -z "${2:-}" ]] || ! [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                    log_error "Option $1 requires a numeric timeout value in seconds"
+                    exit 1
+                fi
+                NETWORK_TIMEOUT="$2"
+                shift 2
+                ;;
+            --max-retries)
+                if [[ -z "${2:-}" ]] || ! [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                    log_error "Option $1 requires a numeric retry count"
+                    exit 1
+                fi
+                MAX_RETRY_ATTEMPTS="$2"
                 shift 2
                 ;;
             --force)
@@ -744,10 +1283,10 @@ parse_arguments() {
     
     # Validiere Installation-Methode
     case "$INSTALL_METHOD" in
-        "npm"|"source"|"auto") ;;
+        "official"|"npm"|"source"|"auto") ;;
         *)
             log_error "Invalid installation method: $INSTALL_METHOD"
-            log_error "Valid methods: npm, source, auto"
+            log_error "Valid methods: official, npm, source, auto"
             exit 1
             ;;
     esac
@@ -758,6 +1297,8 @@ parse_arguments() {
     log_debug "  FORCE_REINSTALL=$FORCE_REINSTALL"
     log_debug "  SKIP_DEPENDENCIES=$SKIP_DEPENDENCIES"
     log_debug "  VERIFY_INSTALLATION=$VERIFY_INSTALLATION"
+    log_debug "  NETWORK_TIMEOUT=$NETWORK_TIMEOUT"
+    log_debug "  MAX_RETRY_ATTEMPTS=$MAX_RETRY_ATTEMPTS"
 }
 
 # ===============================================================================
@@ -773,35 +1314,40 @@ main() {
     # Parse Argumente
     parse_arguments "$@"
     
+    # Track installation method that was used
+    local actual_method="$INSTALL_METHOD"
+    local install_success=false
+    
     # Installiere claunch
     if install_claunch; then
+        install_success=true
         log_info "claunch installation successful!"
+        
+        # Ensure PATH configuration (addresses GitHub issue #4)
+        ensure_path_configuration
+        
+        # Verifiziere Installation
+        if [[ "$VERIFY_INSTALLATION" == "true" ]]; then
+            if ! verify_installation; then
+                log_warn "Installation verification had issues, but installation may still be functional"
+                # Don't fail here as installation might still work
+            fi
+        fi
+        
     else
+        install_success=false
         log_error "claunch installation failed"
+    fi
+    
+    # Always show comprehensive status report
+    report_installation_status "$install_success" "$actual_method"
+    
+    # Exit with appropriate code
+    if [[ "$install_success" == "true" ]]; then
+        exit 0
+    else
         exit 1
     fi
-    
-    # Ensure PATH configuration (addresses GitHub issue #4)
-    ensure_path_configuration
-    
-    # Verifiziere Installation
-    if [[ "$VERIFY_INSTALLATION" == "true" ]]; then
-        if ! verify_installation; then
-            log_error "Installation verification failed"
-            exit 1
-        fi
-    fi
-    
-    echo ""
-    log_info "claunch installation completed successfully!"
-    log_info ""
-    log_info "You can now use claunch for Claude CLI session management:"
-    log_info "  claunch                    # Start Claude in current project"
-    log_info "  claunch --tmux            # Start with tmux persistence"
-    log_info "  claunch list              # List active sessions"
-    log_info "  claunch clean             # Clean up orphaned sessions"
-    log_info ""
-    log_info "For more information, visit: https://github.com/0xkaz/claunch"
 }
 
 # Führe main nur aus wenn Skript direkt aufgerufen wird

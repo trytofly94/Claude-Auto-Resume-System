@@ -94,6 +94,7 @@ INSTALL_DEV_TOOLS=false
 FORCE_REINSTALL=false
 DRY_RUN=false
 INTERACTIVE_MODE=true
+CLAUNCH_METHOD="official"  # Use official installer by default (GitHub issue #38)
 
 # System-Information
 OS=""
@@ -344,6 +345,9 @@ install_claunch() {
     
     # Baue Argumente für claunch-Installer
     local claunch_args=()
+    
+    # Use specified claunch installation method
+    claunch_args+=("--method" "$CLAUNCH_METHOD")
     
     if [[ "$FORCE_REINSTALL" == "true" ]]; then
         claunch_args+=("--force")
@@ -984,6 +988,7 @@ Complete setup script for Claude Auto-Resume system.
 OPTIONS:
     --skip-deps             Skip system dependency installation
     --skip-claunch          Skip claunch installation
+    --claunch-method METHOD claunch installation method: official, npm, source, auto (default: official)
     --skip-tests            Skip setup validation tests
     --dev                   Install development tools (ShellCheck, BATS)
     --force                 Force reinstallation of components
