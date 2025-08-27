@@ -93,8 +93,18 @@ ensure_log_directory() {
 # Konvertiert Größenangabe (z.B. 100M) zu Bytes
 size_to_bytes() {
     local size="$1"
+    
+    # Remove any quotes first
+    size=$(echo "$size" | sed 's/^["'\'']\|["'\'']$//g')
+    
     local number="${size%[KMG]*}"
     local unit="${size#"$number"}"
+    
+    # Validate that number is actually numeric
+    if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+        echo "0"
+        return 1
+    fi
     
     case "$(echo "$unit" | tr '[:lower:]' '[:upper:]')" in
         "K"|"KB") echo $((number * 1024)) ;;

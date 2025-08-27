@@ -83,6 +83,11 @@ PAUSE_QUEUE=false
 RESUME_QUEUE=false
 CLEAR_QUEUE=false
 
+# Session Management Argumente
+LIST_SESSIONS=false
+SHOW_SESSION_ID=false
+SYSTEM_STATUS=false
+
 # ===============================================================================
 # UTILITY-FUNKTIONEN (früh definiert für Validierung)
 # ===============================================================================
@@ -224,7 +229,7 @@ load_configuration() {
             
             # Setze bekannte Konfigurationsvariablen
             case "$key" in
-                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR)
+                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|LOG_ROTATION|MAX_LOG_SIZE|LOG_FILE|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR)
                     eval "$key='$value'"
                     log_debug "Config: $key=$value"
                     ;;
@@ -708,6 +713,85 @@ continuous_monitoring_loop() {
 }
 
 # ===============================================================================
+# SESSION MANAGEMENT OPERATIONS
+# ===============================================================================
+
+# Handle Session Management Operations (non-queue operations)
+handle_session_management_operations() {
+    log_debug "Processing session management operations"
+    
+    local operation_handled=false
+    
+    if [[ "$LIST_SESSIONS" == "true" ]]; then
+        log_info "Listing active Claude sessions"
+        if declare -f list_sessions >/dev/null 2>&1; then
+            list_sessions
+            operation_handled=true
+        else
+            log_error "Session management module not available"
+            return 1
+        fi
+    fi
+    
+    if [[ "$SHOW_SESSION_ID" == "true" ]]; then
+        log_info "Showing current session ID"
+        if [[ -n "${MAIN_SESSION_ID:-}" ]]; then
+            echo "Current session ID: $MAIN_SESSION_ID"
+            operation_handled=true
+        elif declare -f get_current_session_id >/dev/null 2>&1; then
+            local session_id
+            if session_id=$(get_current_session_id); then
+                echo "Current session ID: $session_id"
+                operation_handled=true
+            else
+                echo "No active session found"
+                operation_handled=true
+            fi
+        else
+            echo "Session management not initialized - no session ID available"
+            operation_handled=true
+        fi
+    fi
+    
+    if [[ "$SYSTEM_STATUS" == "true" ]]; then
+        log_info "Showing system status"
+        echo "=== Hybrid Claude Monitor System Status ==="
+        echo "Version: $VERSION"
+        echo "Script Directory: $SCRIPT_DIR"
+        echo "Working Directory: $WORKING_DIR"
+        echo "Configuration: ${SPECIFIED_CONFIG:-$CONFIG_FILE}"
+        echo ""
+        echo "=== Module Status ==="
+        echo "Task Queue Available: ${TASK_QUEUE_AVAILABLE:-false}"
+        echo "Task Queue Processing: ${TASK_QUEUE_PROCESSING:-false}"
+        echo "Claude Integration: $USE_CLAUNCH"
+        echo "Claunch Mode: $CLAUNCH_MODE"
+        echo ""
+        echo "=== Dependencies ==="
+        echo "Claude CLI: $(which claude 2>/dev/null || echo 'Not found')"
+        echo "Claunch: $(which claunch 2>/dev/null || echo 'Not found')"
+        echo "tmux: $(which tmux 2>/dev/null || echo 'Not found')"
+        echo "jq: $(which jq 2>/dev/null || echo 'Not found')"
+        echo ""
+        if [[ "${TASK_QUEUE_AVAILABLE:-false}" == "true" ]]; then
+            echo "=== Task Queue Status ==="
+            "${TASK_QUEUE_SCRIPT:-src/task-queue.sh}" status 2>/dev/null || echo "Task queue status unavailable"
+        else
+            echo "=== Task Queue Status ==="
+            echo "Task Queue module not available"
+        fi
+        operation_handled=true
+    fi
+    
+    if [[ "$operation_handled" == "false" ]]; then
+        log_error "No valid session management operations specified"
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
 # COMMAND-LINE-INTERFACE
 # ===============================================================================
 
@@ -739,6 +823,11 @@ TASK QUEUE OPTIONS:
     --pause-queue            Pause task queue processing
     --resume-queue           Resume task queue processing
     --clear-queue            Clear all tasks from queue
+
+SESSION MANAGEMENT OPTIONS:
+    --list-sessions          List active Claude sessions
+    --show-session-id        Display current session ID
+    --system-status          Show system status and diagnostics
 
 CLAUDE_ARGS:
     Any arguments to pass to the Claude CLI (e.g., "continue", --model opus)
@@ -910,6 +999,18 @@ parse_arguments() {
                 CLEAR_QUEUE=true
                 shift
                 ;;
+            --list-sessions)
+                LIST_SESSIONS=true
+                shift
+                ;;
+            --show-session-id)
+                SHOW_SESSION_ID=true
+                shift
+                ;;
+            --system-status)
+                SYSTEM_STATUS=true
+                shift
+                ;;
             --version)
                 show_version
                 exit 0
@@ -963,6 +1064,16 @@ main() {
     
     # Lade Dependencies
     load_dependencies
+    
+    # Handle Session Management Operations (these work even if task queue is unavailable)
+    if [[ "$LIST_SESSIONS" == "true" || "$SHOW_SESSION_ID" == "true" || "$SYSTEM_STATUS" == "true" ]]; then
+        handle_session_management_operations
+        # Exit after session operations unless in continuous mode
+        if [[ "$CONTINUOUS_MODE" != "true" && "$QUEUE_MODE" != "true" ]]; then
+            log_info "Session management operations completed"
+            exit 0
+        fi
+    fi
     
     # Lade Task Queue Konfiguration
     load_task_queue_config

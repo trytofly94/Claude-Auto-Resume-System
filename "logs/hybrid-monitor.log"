@@ -1,15 +1,1 @@
-[2025-08-25T19:14:35+0200] [WARN] [hybrid-monitor] [terminal.sh:init_terminal_utils():490]: Preferred terminal '"auto"' not available, falling back to auto-detection
-[2025-08-25T19:14:35+0200] [INFO] [hybrid-monitor] [terminal.sh:select_best_terminal():233]: Detected terminal: terminal (path: /Applications/Utilities/Terminal.app)
-[2025-08-25T19:14:35+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:main():981]: Initializing claunch integration
-[2025-08-25T19:14:36+0200] [INFO] [hybrid-monitor] [claunch-integration.sh:init_claunch_integration():412]: claunch validated: claunch v0.0.4
-[2025-08-25T19:14:36+0200] [INFO] [hybrid-monitor] [claunch-integration.sh:init_claunch_integration():418]: Detected project: Claude-Auto-Resume-System
-[2025-08-25T19:14:37+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:main():981]: claunch integration initialized successfully
-[2025-08-25T19:14:37+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:main():985]: Initializing session manager
-[2025-08-25T19:14:38+0200] [INFO] [hybrid-monitor] [session-manager.sh:init_session_manager():547]: Initializing claunch integration
-[2025-08-25T19:14:39+0200] [INFO] [hybrid-monitor] [claunch-integration.sh:init_claunch_integration():412]: claunch validated: claunch v0.0.4
-[2025-08-25T19:14:39+0200] [INFO] [hybrid-monitor] [claunch-integration.sh:init_claunch_integration():418]: Detected project: Claude-Auto-Resume-System
-[2025-08-25T19:14:39+0200] [INFO] [hybrid-monitor] [session-manager.sh:init_session_manager():547]: claunch integration initialized successfully
-[2025-08-25T19:14:39+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:main():985]: Session manager initialized successfully
-[2025-08-25T19:14:39+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:main():989]: Validating system requirements
-[2025-08-25T19:14:40+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:validate_system_requirements():303]: Starting comprehensive network connectivity check
-[2025-08-25T19:14:41+0200] [INFO] [hybrid-monitor] [network.sh:test_http_connectivity():1]: Interrupt signal received (Ctrl+C)
+[2025-08-27T23:24:08+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:continuous_monitoring_loop():1]: Hybrid monitor shutting down (exit code: 1)

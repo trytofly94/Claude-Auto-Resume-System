@@ -83,10 +83,8 @@ check_dependencies() {
         missing_deps+=("jq")
     fi
     
-    # flock is optional - we'll use alternative locking on systems without it
-    if ! has_command flock; then
-        log_warn "flock not available - using alternative file locking (may be less reliable)"
-    fi
+    # Using atomic directory-based locking (cross-platform reliable)
+    # No flock dependency required
     
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         log_error "Missing required dependencies: ${missing_deps[*]}"
@@ -437,7 +435,7 @@ EOF
 acquire_queue_lock_atomic() {
     local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
     local attempts=0
-    local max_attempts=$([[ "${CLI_MODE:-false}" == "true" ]] && echo 5 || echo "$QUEUE_LOCK_TIMEOUT")
+    local max_attempts=$([[ "${CLI_MODE:-false}" == "true" ]] && echo 10 || echo "$QUEUE_LOCK_TIMEOUT")
     
     while [[ $attempts -lt $max_attempts ]]; do
         if mkdir "$lock_dir" 2>/dev/null; then
@@ -522,56 +520,17 @@ release_queue_lock_atomic() {
 # FILE-LOCKING FÜR ATOMIC OPERATIONS - Updated to use Enhanced System
 # ===============================================================================
 
-# Acquire queue lock für sichere Operationen
+# Acquire queue lock für sichere Operationen - always use atomic directory-based locking
 acquire_queue_lock() {
-    local lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
-    local lock_fd=200
-    local attempts=0
-    local max_attempts=$((QUEUE_LOCK_TIMEOUT))
-    
-    ensure_queue_directories || return 1
-    
-    # For CLI operations, use a shorter timeout to prevent hanging
-    if [[ "${CLI_MODE:-false}" == "true" ]]; then
-        max_attempts=5  # Maximum 5 seconds for CLI operations
-    fi
-    
-    if has_command flock; then
-        # Use flock if available (Linux)
-        exec 200>"$lock_file"
-        
-        if flock -x -w "$max_attempts" 200; then
-            log_debug "Acquired queue lock (flock, fd: $lock_fd, timeout: ${max_attempts}s)"
-            return 0
-        else
-            log_error "Failed to acquire queue lock within ${max_attempts}s"
-            return 1
-        fi
-    else
-        # Use atomic directory-based locking for systems without flock (macOS, etc.)
-        acquire_queue_lock_atomic
-    fi
+    # Always use atomic directory-based locking for better cross-platform reliability
+    # This eliminates the need for flock and provides more robust locking
+    acquire_queue_lock_atomic "$@"
 }
 
-# Release queue lock
+# Release queue lock - always use atomic directory-based locking
 release_queue_lock() {
-    local lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
-    local lock_fd=200
-    
-    if has_command flock; then
-        # Release flock
-        flock -u 200 2>/dev/null || {
-            log_warn "Failed to release queue lock (may have been released already)"
-        }
-        
-        # Close file descriptor
-        exec 200>&- 2>/dev/null || true
-        
-        log_debug "Released queue lock (flock, fd: $lock_fd)"
-    else
-        # Use atomic directory-based lock release for systems without flock (macOS, etc.)
-        release_queue_lock_atomic
-    fi
+    # Always use atomic directory-based locking for better cross-platform reliability
+    release_queue_lock_atomic "$@"
 }
 
 # Enhanced lock wrapper with monitoring and nested lock prevention
