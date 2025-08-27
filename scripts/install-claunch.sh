@@ -405,7 +405,9 @@ install_claunch_official() {
     
     # Cleanup function for temporary installer
     cleanup_installer() {
-        rm -f "$temp_installer"
+        if [[ -n "${temp_installer:-}" ]]; then
+            rm -f "$temp_installer"
+        fi
     }
     
     trap cleanup_installer EXIT
@@ -878,7 +880,7 @@ verify_installation() {
         
         # Method 4: Search in NVM paths (for npm installations)
         local nvm_search_paths=("$HOME/.nvm/versions/node/*/bin/claunch")
-        for nvm_path in $nvm_search_paths; do
+        for nvm_path in "${nvm_search_paths[@]}"; do
             if [[ -x "$nvm_path" ]]; then
                 claunch_path="$nvm_path"
                 verification_methods+=("NVM path")

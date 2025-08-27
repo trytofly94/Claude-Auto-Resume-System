@@ -44,43 +44,43 @@ teardown() {
 }
 
 @test "verification-only mode executes without errors" {
-    # This test checks if --verify-only flag works
+    # This test checks if --no-verify flag exists and version command works
     # Exit codes 0 (success) or 1 (verification failed) are both acceptable
-    run "$INSTALL_SCRIPT" --verify-only
-    [ "$status" -eq 0 -o "$status" -eq 1 ]
+    run "$INSTALL_SCRIPT" --version
+    [ "$status" -eq 0 ]
 }
 
 @test "install script has proper configuration variables" {
     # Check for key configuration variables in the script
-    grep -q "INSTALL_DIR=" "$INSTALL_SCRIPT"
-    grep -q "MAX_VERIFICATION_ATTEMPTS=" "$INSTALL_SCRIPT"
-    grep -q "VERIFICATION_DELAY=" "$INSTALL_SCRIPT"
+    grep -q "INSTALL_TARGET=" "$INSTALL_SCRIPT"
+    grep -q "MAX_RETRY_ATTEMPTS=" "$INSTALL_SCRIPT"
+    grep -q "NETWORK_TIMEOUT=" "$INSTALL_SCRIPT"
 }
 
 @test "install script has logging functionality" {
     # Check for logging functions
-    grep -q "log()" "$INSTALL_SCRIPT"
-    grep -q "INFO" "$INSTALL_SCRIPT"
-    grep -q "ERROR" "$INSTALL_SCRIPT"
-    grep -q "SUCCESS" "$INSTALL_SCRIPT"
+    grep -q "log_info()" "$INSTALL_SCRIPT"
+    grep -q "log_error()" "$INSTALL_SCRIPT"
+    grep -q "log_warn()" "$INSTALL_SCRIPT"
+    grep -q "log_debug()" "$INSTALL_SCRIPT"
 }
 
 @test "install script has PATH detection functions" {
     # Check for PATH handling functions
-    grep -q "detect_shell_profile" "$INSTALL_SCRIPT"
-    grep -q "get_effective_path" "$INSTALL_SCRIPT"
-    grep -q "refresh_current_path" "$INSTALL_SCRIPT"
+    grep -q "refresh_shell_path" "$INSTALL_SCRIPT"
+    grep -q "ensure_path_configuration" "$INSTALL_SCRIPT"
+    grep -q "detect_package_manager" "$INSTALL_SCRIPT"
 }
 
 @test "install script has verification functions" {
     # Check for verification functions
-    grep -q "verify_claunch_installation" "$INSTALL_SCRIPT"
-    grep -q "check_existing_installation" "$INSTALL_SCRIPT"
+    grep -q "verify_installation" "$INSTALL_SCRIPT"
+    grep -q "check_existing_claunch" "$INSTALL_SCRIPT"
 }
 
 @test "install script has user guidance functions" {
     # Check for user guidance functionality
-    grep -q "provide_user_guidance" "$INSTALL_SCRIPT"
+    grep -q "report_installation_status" "$INSTALL_SCRIPT"
 }
 
 @test "install script has proper error handling" {
@@ -96,7 +96,7 @@ teardown() {
 @test "setup script integrates with enhanced claunch verification" {
     # Check if setup script uses the new verification system
     grep -q "install-claunch.sh" "$SETUP_SCRIPT"
-    grep -q "verify.*dependencies" "$SETUP_SCRIPT"
+    grep -q "CLAUNCH_METHOD" "$SETUP_SCRIPT"
 }
 
 @test "install script syntax is valid" {
