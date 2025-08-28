@@ -206,124 +206,37 @@ validate_task_data() {
 # Enhanced stale lock cleanup with better timeout handling and graceful termination
 cleanup_stale_lock() {
     local lock_dir="$1"
-    local pid_file="$lock_dir/pid"
-    local timestamp_file="$lock_dir/timestamp"
-    local hostname_file="$lock_dir/hostname"
-    local operation_file="$lock_dir/operation"
-    local user_file="$lock_dir/user"
     
+    # No lock directory = nothing to clean
     [[ -d "$lock_dir" ]] || return 0
     
-    # Enhanced multi-criteria validation
+    local pid_file="$lock_dir/pid"
+    
+    # No PID file = invalid lock, clean it up
+    if [[ ! -f "$pid_file" ]]; then
+        log_debug "Lock has no PID file - cleaning up"
+        rm -rf "$lock_dir" 2>/dev/null
+        return 0
+    fi
+    
     local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
-    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "")
-    local lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
-    local lock_user=$(cat "$user_file" 2>/dev/null || echo "$USER")
     
-    local should_cleanup=false
-    local cleanup_reason=""
-    
-    # Check 1: Invalid or missing PID
+    # Empty PID = invalid lock, clean it up  
     if [[ -z "$lock_pid" ]]; then
         log_debug "Lock has empty PID - cleaning up"
-        should_cleanup=true
-        cleanup_reason="empty_pid"
-    # Check 2: Process exists and is running
-    elif ! kill -0 "$lock_pid" 2>/dev/null; then
-        log_info "Lock process $lock_pid is dead ($lock_operation) - cleaning up"
-        should_cleanup=true
-        cleanup_reason="dead_process"
+        rm -rf "$lock_dir" 2>/dev/null
+        return 0
     fi
     
-    # Check 3: Age-based cleanup with configurable threshold
-    if [[ -n "$lock_timestamp" ]] && [[ "$should_cleanup" == "false" ]]; then
-        local current_time=$(date +%s)
-        # Cross-platform timestamp parsing
-        local lock_time
-        if command -v gdate >/dev/null 2>&1; then
-            # Use GNU date if available (brew install coreutils)
-            lock_time=$(gdate -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
-        elif date --version 2>/dev/null | grep -q "GNU"; then
-            # GNU date on Linux
-            lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
-        else
-            # macOS date - convert ISO timestamp to epoch
-            # Format: 2025-08-25T13:52:20+02:00 -> 202508251352.20
-            local formatted_date
-            formatted_date=$(echo "$lock_timestamp" | sed -E 's/([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})[+\-].*$/\1\2\3\4\5.\6/' 2>/dev/null || echo "")
-            if [[ -n "$formatted_date" ]]; then
-                lock_time=$(date -j -f "%Y%m%d%H%M.%S" "$formatted_date" +%s 2>/dev/null || echo 0)
-            else
-                lock_time=0
-            fi
-        fi
-        local age=$((current_time - lock_time))
-        local max_lock_age=${QUEUE_LOCK_STALE_THRESHOLD:-300}  # 5 minutes default
-        
-        if [[ $age -gt $max_lock_age ]]; then
-            log_warn "Lock older than ${max_lock_age}s (age: ${age}s, operation: $lock_operation) - attempting cleanup"
-            
-            # Only attempt termination if it's our hostname and user
-            if [[ "$lock_hostname" == "$HOSTNAME" && "$lock_user" == "$USER" ]]; then
-                # Try graceful termination first
-                if kill -TERM "$lock_pid" 2>/dev/null; then
-                    log_info "Sent SIGTERM to stale lock process $lock_pid"
-                    sleep 2
-                    if ! kill -0 "$lock_pid" 2>/dev/null; then
-                        log_info "Successfully terminated stale lock process"
-                        should_cleanup=true
-                        cleanup_reason="graceful_termination"
-                    else
-                        # Force kill as last resort
-                        log_warn "Force killing stale lock process $lock_pid"
-                        kill -KILL "$lock_pid" 2>/dev/null || true
-                        sleep 1
-                        should_cleanup=true
-                        cleanup_reason="force_termination"
-                    fi
-                else
-                    log_debug "Could not signal process $lock_pid - may have exited"
-                    should_cleanup=true
-                    cleanup_reason="signal_failed"
-                fi
-            else
-                log_warn "Stale lock from different host/user ($lock_hostname/$lock_user vs $HOSTNAME/$USER) - leaving for manual cleanup"
-                return 1
-            fi
-        fi
+    # Check if process is still running
+    if ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_debug "Lock process $lock_pid is dead - cleaning up"
+        rm -rf "$lock_dir" 2>/dev/null
+        return 0
+    else
+        log_debug "Lock process $lock_pid is alive - not cleaning up"
+        return 1
     fi
-    
-    # Check 4: Different hostname validation (with age consideration)
-    if [[ -n "$lock_hostname" && "$lock_hostname" != "$HOSTNAME" ]] && [[ "$should_cleanup" == "false" ]]; then
-        log_debug "Lock from different host ($lock_hostname vs $HOSTNAME) - validating"
-        
-        # Only cleanup cross-host locks if they're very old (> 1 hour) and process is definitely dead
-        if [[ -n "$lock_timestamp" ]]; then
-            local current_time=$(date +%s)
-            local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
-            local age=$((current_time - lock_time))
-            
-            if [[ $age -gt 3600 ]] && [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
-                log_info "Very old cross-host lock with dead process - cleaning up (age: ${age}s)"
-                should_cleanup=true
-                cleanup_reason="old_cross_host"
-            fi
-        fi
-    fi
-    
-    # Perform cleanup if needed
-    if [[ "$should_cleanup" == "true" ]]; then
-        if rm -rf "$lock_dir" 2>/dev/null; then
-            log_debug "Cleaned up stale lock directory: $cleanup_reason"
-            return 0
-        else
-            log_warn "Failed to clean up stale lock directory: $lock_dir"
-            return 1
-        fi
-    fi
-    
-    return 1  # Lock is still valid
 }
 
 # Clean up all stale locks in queue directory
@@ -449,10 +362,10 @@ acquire_queue_lock_atomic() {
     local attempts=0
     
     # Clean up any stale locks first
-    cleanup_stale_lock "$lock_dir" 2>/dev/null || true
+    cleanup_stale_lock "$lock_dir"
     
-    # Single attempt for atomic operation
-    local max_attempts=1
+    # Multiple attempts with proper retry logic for atomic operations
+    local max_attempts=10
     
     while [[ $attempts -lt $max_attempts ]]; do
         if mkdir "$lock_dir" 2>/dev/null; then
@@ -511,7 +424,7 @@ acquire_queue_lock_atomic() {
     done
     
     # Final cleanup attempt before giving up
-    cleanup_stale_lock "$lock_dir" 2>/dev/null || true
+    cleanup_stale_lock "$lock_dir"
     
     log_error "Failed to acquire atomic queue lock after $max_attempts attempts"
     return 1
@@ -1450,7 +1363,7 @@ add_task_to_queue() {
     validate_task_data "$task_type" "$priority" || return 1
     log_debug "Passed validate_task_data"
     
-    # Ensure arrays are initialized before accessing them
+    # Ensure arrays are initialized - caller should have loaded queue state
     log_debug "About to check if TASK_STATES is declared"
     if ! declare -p TASK_STATES >/dev/null 2>&1; then
         log_debug "TASK_STATES not declared, initializing arrays"
@@ -1547,6 +1460,11 @@ add_task_to_queue() {
         
         ((i += 2))
     done
+    
+    # Save queue state to persist the new task
+    save_queue_state || {
+        log_warn "Failed to save queue state after adding task $task_id"
+    }
     
     log_info "Task added to queue: $task_id ($task_type, priority=$priority)"
     echo "$task_id"  # Return task ID for caller
@@ -2505,10 +2423,28 @@ cli_operation_wrapper() {
 }
 
 # CLI Command Implementations (mit verbesserter Fehlerbehandlung)
+# Wrapper that loads queue state before adding task
+add_task_with_state_load() {
+    # Load queue state first
+    load_queue_state || {
+        log_debug "Failed to load queue state, initializing empty state"
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+    }
+    
+    # Now add the task
+    add_task_to_queue "$@"
+}
+
 add_task_cmd() {
     if [[ $# -ge 2 ]]; then
         local task_id
-        task_id=$(with_queue_lock add_task_to_queue "$1" "$2" "${3:-}" "${@:4}")
+        # Note: This function is called within a locked context by cli_operation_wrapper
+        # so we don't need with_queue_lock here
+        task_id=$(add_task_with_state_load "$1" "$2" "${3:-}" "${@:4}")
         if [[ $? -eq 0 && -n "$task_id" ]]; then
             echo "Task added: $task_id"
             return 0
