@@ -11,9 +11,11 @@ set -euo pipefail
 # BASH VERSION VALIDATION (ADDRESSES GITHUB ISSUE #6)
 # ===============================================================================
 
-# Script-Informationen
-readonly SCRIPT_NAME="hybrid-monitor"
-readonly VERSION="1.0.0-alpha"
+# Script-Informationen - protect against re-sourcing
+if [[ -z "${SCRIPT_NAME:-}" ]]; then
+    readonly SCRIPT_NAME="hybrid-monitor"
+    readonly VERSION="1.0.0-alpha"
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source bash version check utility - use absolute path resolution
@@ -73,22 +75,8 @@ CLAUDE_ARGS=()
 TEST_MODE=false
 TEST_WAIT_SECONDS=30
 
-# Session ID Management-spezifische Variablen
-SHOW_SESSION_ID=false
-COPY_SESSION_ID=false
-COPY_SESSION_TARGET=""
-SHOW_FULL_SESSION_ID=false
-LIST_SESSIONS_MODE=false
-RESUME_SESSION_ID=""
-
-# Task Queue-spezifische Variablen
+# Task Queue Mode Argumente
 QUEUE_MODE=false
-QUEUE_ACTION=""
-QUEUE_ITEM=""
-TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-false}"
-TASK_DEFAULT_TIMEOUT="${TASK_DEFAULT_TIMEOUT:-3600}"
-TASK_MAX_RETRIES="${TASK_MAX_RETRIES:-3}"
-TASK_DEFAULT_PRIORITY="${TASK_DEFAULT_PRIORITY:-5}"
 ADD_ISSUE=""
 ADD_PR=""
 ADD_CUSTOM=""
@@ -97,6 +85,11 @@ PAUSE_QUEUE=false
 RESUME_QUEUE=false
 CLEAR_QUEUE=false
 
+# Session Management Argumente
+LIST_SESSIONS=false
+SHOW_SESSION_ID=false
+SYSTEM_STATUS=false
+
 # ===============================================================================
 # UTILITY-FUNKTIONEN (früh definiert für Validierung)
 # ===============================================================================
@@ -104,34 +97,6 @@ CLEAR_QUEUE=false
 # Prüfe ob Kommando verfügbar ist
 has_command() {
     command -v "$1" >/dev/null 2>&1
-}
-
-# Validiere numerische Parameter mit optionalen Bereichen
-validate_number_parameter() {
-    local option_name="$1"
-    local value="$2"
-    local min_value="${3:-}"
-    local max_value="${4:-}"
-    
-    if [[ -z "$value" ]]; then
-        log_error "Option $option_name requires a numeric value"
-        exit 1
-    fi
-    
-    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-        log_error "Option $option_name requires a valid number, got: $value"
-        exit 1
-    fi
-    
-    if [[ -n "$min_value" && "$value" -lt "$min_value" ]]; then
-        log_error "Option $option_name value must be >= $min_value, got: $value"
-        exit 1
-    fi
-    
-    if [[ -n "$max_value" && "$value" -gt "$max_value" ]]; then
-        log_error "Option $option_name value must be <= $max_value, got: $value"
-        exit 1
-    fi
 }
 
 # ===============================================================================
@@ -207,28 +172,9 @@ load_dependencies() {
         "utils/logging.sh"
         "utils/network.sh" 
         "utils/terminal.sh"
-        "utils/session-display.sh"
-        "utils/clipboard.sh"
-    )
-    
-    # Lade Core-Module (vom src Verzeichnis)
-    local core_modules=(
         "claunch-integration.sh"
         "session-manager.sh"
     )
-    
-    # Load Error Handling Modules (conditional - only if error handling is enabled)
-    local error_handling_modules=()
-    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]]; then
-        error_handling_modules=(
-            "task-timeout-monitor.sh"
-            "session-recovery.sh"
-            "task-state-backup.sh"
-            "usage-limit-recovery.sh"
-            "error-classification.sh"
-        )
-        log_debug "Error handling enabled - will load error handling modules"
-    fi
     
     # Task Queue Module (optional - nur wenn verfügbar)
     # Note: task-queue.sh is designed as standalone script, not for sourcing
@@ -249,117 +195,16 @@ load_dependencies() {
         export TASK_QUEUE_AVAILABLE=false
     fi
     
-    # Change to script directory to ensure correct relative paths during sourcing
-    local original_dir="$(pwd)"
-    cd "$SCRIPT_DIR"
-    
-    # Load utility modules
     for module in "${modules[@]}"; do
-        local module_path="$module"
-        log_debug "Attempting to load module: $module from path: $SCRIPT_DIR/$module_path"
+        local module_path="$SCRIPT_DIR/$module"
         if [[ -f "$module_path" ]]; then
             # shellcheck source=/dev/null
             source "$module_path"
             log_debug "Loaded module: $module"
         else
-            log_warn "Module not found: $SCRIPT_DIR/$module_path"
+            log_warn "Module not found: $module_path"
         fi
     done
-    
-    # Load core modules
-    for module in "${core_modules[@]}"; do
-        local module_path="$module"
-        log_debug "Attempting to load core module: $module from path: $SCRIPT_DIR/$module_path"
-        if [[ -f "$module_path" ]]; then
-            # shellcheck source=/dev/null
-            source "$module_path"
-            log_debug "Loaded core module: $module"
-        else
-            log_warn "Core module not found: $SCRIPT_DIR/$module_path"
-        fi
-    done
-    
-    # Load error handling modules if enabled
-    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]]; then
-        log_info "Loading error handling and recovery modules"
-        for module in "${error_handling_modules[@]}"; do
-            local module_path="$module"
-            log_debug "Attempting to load error handling module: $module from path: $SCRIPT_DIR/$module_path"
-            if [[ -f "$module_path" ]]; then
-                # shellcheck source=/dev/null
-                source "$module_path"
-                log_debug "Loaded error handling module: $module"
-            else
-                log_warn "Error handling module not found: $SCRIPT_DIR/$module_path"
-                log_warn "Some error handling features may not be available"
-            fi
-        done
-        log_info "Error handling system initialized"
-    else
-        log_debug "Error handling disabled - skipping error handling modules"
-    fi
-    
-    # Restore original directory
-    cd "$original_dir"
-    
-    # Task Queue Integration - Load only if enabled
-    if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
-        log_info "Task Queue processing enabled - loading integration modules"
-        
-        # Task Queue Core Module is already checked above and accessible via TASK_QUEUE_SCRIPT
-        if [[ "${TASK_QUEUE_AVAILABLE:-false}" != "true" ]]; then
-            log_error "Task Queue module not available but processing is enabled"
-            log_error "Please ensure task-queue.sh is executable and functional"
-            exit 1
-        fi
-        
-        log_debug "Task Queue Core Module is available at: $TASK_QUEUE_SCRIPT"
-        
-        # Load GitHub Integration Modules (conditional - non-fatal if missing)
-        local github_modules=(
-            "github-integration.sh"
-            "github-integration-comments.sh" 
-            "github-task-integration.sh"
-        )
-        
-        for module in "${github_modules[@]}"; do
-            local github_module="$SCRIPT_DIR/$module"
-            if [[ -f "$github_module" ]]; then
-                # shellcheck source=/dev/null
-                source "$github_module"
-                log_debug "GitHub integration module loaded: $module"
-            else
-                log_warn "Optional GitHub module not found: $module"
-                log_warn "GitHub integration features may be limited"
-            fi
-        done
-        
-        # Initialize Task Queue System
-        if declare -f init_task_queue >/dev/null 2>&1; then
-            log_debug "Initializing Task Queue system"
-            if init_task_queue; then
-                log_info "Task Queue system initialized successfully"
-            else
-                log_error "Failed to initialize Task Queue system"
-                exit 1
-            fi
-        else
-            log_error "Task Queue initialization function not available"
-            exit 1
-        fi
-        
-        # Initialize GitHub Integration (if available and enabled)
-        if [[ "${GITHUB_INTEGRATION_ENABLED:-false}" == "true" ]] && declare -f init_github_integration >/dev/null 2>&1; then
-            log_debug "Initializing GitHub integration"
-            if init_github_integration; then
-                log_info "GitHub integration initialized successfully"
-            else
-                log_warn "GitHub integration initialization failed - continuing without GitHub features"
-            fi
-        fi
-        
-        log_info "Task execution engine modules loaded successfully"
-    fi
 }
 
 
@@ -386,12 +231,7 @@ load_configuration() {
             
             # Setze bekannte Konfigurationsvariablen
             case "$key" in
-                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR)
-                    eval "$key='$value'"
-                    log_debug "Config: $key=$value"
-                    ;;
-                # Task Queue Configuration Parameters
-                TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR|QUEUE_SESSION_CLEAR_BETWEEN_TASKS)
+                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|LOG_ROTATION|MAX_LOG_SIZE|LOG_FILE|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR|QUEUE_SESSION_CLEAR_BETWEEN_TASKS)
                     eval "$key='$value'"
                     log_debug "Config: $key=$value"
                     ;;
@@ -471,27 +311,6 @@ validate_system_requirements() {
         fi
     fi
     
-    # Task Queue Dependencies (wenn aktiviert)
-    if [[ "$TASK_QUEUE_ENABLED" == "true" ]]; then
-        log_debug "Validating Task Queue system dependencies"
-        
-        # jq für JSON-Verarbeitung
-        if ! has_command jq; then
-            log_error "jq not found but Task Queue is enabled"
-            log_error "Please install jq: brew install jq (macOS) or apt install jq (Ubuntu)"
-            ((errors++))
-        fi
-        
-        # GitHub CLI für GitHub Integration (optional aber empfohlen)
-        if [[ "${GITHUB_INTEGRATION_ENABLED:-false}" == "true" ]]; then
-            if ! has_command gh; then
-                log_warn "GitHub CLI not found but GitHub integration is enabled"
-                log_warn "Please install GitHub CLI for full GitHub integration: https://cli.github.com/"
-                log_warn "GitHub features will be limited or disabled"
-            fi
-        fi
-    fi
-    
     # Netzwerk-Connectivity prüfen
     if ! check_network_connectivity >/dev/null 2>&1; then
         log_warn "Network connectivity issues detected"
@@ -548,7 +367,7 @@ handle_task_queue_operations() {
         log_info "Adding custom task to queue: $ADD_CUSTOM"
         # Generate unique task ID
         local task_id="custom-$(date +%s)"
-        if "${TASK_QUEUE_SCRIPT}" add custom "$task_id" "$ADD_CUSTOM"; then
+        if "${TASK_QUEUE_SCRIPT}" add custom 3 "$task_id" "description" "$ADD_CUSTOM"; then
             log_info "Successfully added custom task to queue: $task_id"
             operation_handled=true
         else
@@ -651,7 +470,7 @@ check_usage_limits() {
     # Test-Modus für Entwicklung
     if [[ "$TEST_MODE" == "true" ]]; then
         log_info "[TEST MODE] Simulating usage limit with ${TEST_WAIT_SECONDS}s wait"
-        resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+"${TEST_WAIT_SECONDS}"S +%s 2>/dev/null || echo $(($(date +%s) + TEST_WAIT_SECONDS)))
+        resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+${TEST_WAIT_SECONDS}S +%s 2>/dev/null || echo $(($(date +%s) + TEST_WAIT_SECONDS)))
         limit_detected=true
     else
         # Echte Limit-Prüfung
@@ -678,7 +497,7 @@ check_usage_limits() {
                     resume_timestamp="$extracted_timestamp"
                 else
                     # Standard-Wartezeit falls kein Timestamp verfügbar
-                    resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+"${USAGE_LIMIT_COOLDOWN:-300}"S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
+                    resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+${USAGE_LIMIT_COOLDOWN:-300}S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
                 fi
             fi
         else
@@ -698,8 +517,7 @@ check_usage_limits() {
 # Behandle Usage-Limit mit intelligentem Warten
 handle_usage_limit() {
     local resume_timestamp="$1"
-    local current_timestamp
-    current_timestamp=$(date +%s)
+    local current_timestamp=$(date +%s)
     local wait_seconds=$((resume_timestamp - current_timestamp))
     
     if [[ $wait_seconds -le 0 ]]; then
@@ -743,33 +561,6 @@ start_or_continue_claude_session() {
         
         if MAIN_SESSION_ID=$(start_managed_session "$project_name" "$WORKING_DIR" "$USE_NEW_TERMINAL" "${CLAUDE_ARGS[@]}"); then
             log_info "Claude session started successfully (ID: $MAIN_SESSION_ID)"
-            
-            # Initialize session for task processing if task queue is enabled
-            if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
-                log_debug "Preparing session for task queue processing"
-                
-                # Brief pause to let session stabilize
-                sleep 3
-                
-                # Verify session is responsive
-                if declare -f verify_session_responsiveness >/dev/null 2>&1; then
-                    if ! verify_session_responsiveness "$MAIN_SESSION_ID"; then
-                        log_warn "Session not responsive after startup, attempting recovery"
-                        if declare -f recover_session >/dev/null 2>&1; then
-                            if ! recover_session "$MAIN_SESSION_ID"; then
-                                log_error "Session recovery failed"
-                                return 1
-                            fi
-                        else
-                            log_warn "Session recovery function not available"
-                        fi
-                    fi
-                fi
-                
-                # Initialize session for task processing
-                initialize_session_for_tasks "$MAIN_SESSION_ID"
-            fi
-            
             return 0
         else
             log_error "Failed to start Claude session via claunch"
@@ -822,7 +613,7 @@ send_recovery_command() {
 
 # Kontinuierliches Monitoring
 continuous_monitoring_loop() {
-    log_info "Starting enhanced continuous monitoring mode"
+    log_info "Starting continuous monitoring mode"
     log_info "Configuration:"
     log_info "  Check interval: $CHECK_INTERVAL_MINUTES minutes"
     log_info "  Max cycles: $MAX_RESTARTS"
@@ -831,20 +622,7 @@ continuous_monitoring_loop() {
     log_info "  Use new terminal: $USE_NEW_TERMINAL"
     log_info "  Task queue processing: ${TASK_QUEUE_PROCESSING:-false}"
     
-    # Task Queue Configuration Display
-    if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
-        log_info "Task Queue Configuration:"
-        log_info "  Task queue enabled: true"
-        log_info "  Default timeout: ${TASK_DEFAULT_TIMEOUT:-3600}s"
-        log_info "  Max retries: ${TASK_MAX_RETRIES:-3}"
-        log_info "  Queue processing delay: ${QUEUE_PROCESSING_DELAY:-30}s"
-        log_info "  Completion pattern: ${TASK_COMPLETION_PATTERN:-###TASK_COMPLETE###}"
-        log_info "  GitHub integration: ${GITHUB_INTEGRATION_ENABLED:-false}"
-    else
-        log_info "  Task queue: disabled"
-    fi
-    
-    if [[ "${#CLAUDE_ARGS[@]}" -gt 0 && "$QUEUE_MODE" == "false" ]]; then
+    if [[ "${#CLAUDE_ARGS[@]}" -gt 0 ]]; then
         log_info "  Claude arguments: ${CLAUDE_ARGS[*]}"
     fi
     
@@ -856,8 +634,8 @@ continuous_monitoring_loop() {
     while [[ "$MONITORING_ACTIVE" == "true" && $CURRENT_CYCLE -lt $MAX_RESTARTS ]]; do
         ((CURRENT_CYCLE++))
         
-        log_info "=== Enhanced Monitoring Cycle $CURRENT_CYCLE/$MAX_RESTARTS ==="
-        echo "$(date): Starting enhanced check cycle $CURRENT_CYCLE"
+        log_info "=== Monitoring Cycle $CURRENT_CYCLE/$MAX_RESTARTS ==="
+        echo "$(date): Starting check cycle $CURRENT_CYCLE"
         
         # Schritt 1: Prüfe Usage-Limits
         log_debug "Step 1: Checking usage limits"
@@ -913,39 +691,16 @@ continuous_monitoring_loop() {
             fi
         fi
         
-        # Schritt 3: Task Queue Processing (NEW)
-        if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
-            log_debug "Step 3: Processing task queue"
-            
-            # Ensure session is ready for task processing if we have one
-            if [[ -n "$MAIN_SESSION_ID" ]] && [[ "$USE_CLAUNCH" == "true" ]]; then
-                # Verify session is responsive before processing tasks
-                if declare -f verify_session_responsiveness >/dev/null 2>&1; then
-                    if ! verify_session_responsiveness "$MAIN_SESSION_ID"; then
-                        log_warn "Session not responsive for task processing, attempting recovery"
-                        if ! start_or_continue_claude_session; then
-                            log_error "Failed to establish session for task processing"
-                            continue
-                        fi
-                    fi
-                fi
-                
-                # Initialize session for tasks if needed
-                if declare -f initialize_session_for_tasks >/dev/null 2>&1; then
-                    initialize_session_for_tasks "$MAIN_SESSION_ID"
-                fi
-            fi
-            
-            # Process task queue
-            process_task_queue_cycle
-        else
-            log_debug "Step 3: Task queue disabled - performing regular monitoring"
+        # Schritt 2.5: Task Queue Processing (NEU)
+        if [[ "${TASK_QUEUE_PROCESSING:-false}" == "true" ]]; then
+            log_debug "Step 2.5: Processing task queue"
+            process_task_queue
         fi
         
-        # Schritt 4: Nächster Check
+        # Schritt 3: Nächster Check
         if [[ $CURRENT_CYCLE -lt $MAX_RESTARTS && "$MONITORING_ACTIVE" == "true" ]]; then
             local next_check_time
-            next_check_time=$(date -d "+$CHECK_INTERVAL_MINUTES minutes" 2>/dev/null || date -v+"${CHECK_INTERVAL_MINUTES}"M 2>/dev/null || echo "in $CHECK_INTERVAL_MINUTES minutes")
+            next_check_time=$(date -d "+$CHECK_INTERVAL_MINUTES minutes" 2>/dev/null || date -v+${CHECK_INTERVAL_MINUTES}M 2>/dev/null || echo "in $CHECK_INTERVAL_MINUTES minutes")
             
             log_info "Next check at: $next_check_time"
             log_debug "Waiting $CHECK_INTERVAL_MINUTES minutes before next check"
@@ -965,112 +720,157 @@ continuous_monitoring_loop() {
 }
 
 # ===============================================================================
+# SESSION MANAGEMENT OPERATIONS
+# ===============================================================================
+
+# Handle Session Management Operations (non-queue operations)
+handle_session_management_operations() {
+    log_debug "Processing session management operations"
+    
+    local operation_handled=false
+    
+    if [[ "$LIST_SESSIONS" == "true" ]]; then
+        log_info "Listing active Claude sessions"
+        if declare -f list_sessions >/dev/null 2>&1; then
+            list_sessions
+            operation_handled=true
+        else
+            log_error "Session management module not available"
+            return 1
+        fi
+    fi
+    
+    if [[ "$SHOW_SESSION_ID" == "true" ]]; then
+        log_info "Showing current session ID"
+        if [[ -n "${MAIN_SESSION_ID:-}" ]]; then
+            echo "Current session ID: $MAIN_SESSION_ID"
+            operation_handled=true
+        elif declare -f get_current_session_id >/dev/null 2>&1; then
+            local session_id
+            if session_id=$(get_current_session_id); then
+                echo "Current session ID: $session_id"
+                operation_handled=true
+            else
+                echo "No active session found"
+                operation_handled=true
+            fi
+        else
+            echo "Session management not initialized - no session ID available"
+            operation_handled=true
+        fi
+    fi
+    
+    if [[ "$SYSTEM_STATUS" == "true" ]]; then
+        log_info "Showing system status"
+        echo "=== Hybrid Claude Monitor System Status ==="
+        echo "Version: $VERSION"
+        echo "Script Directory: $SCRIPT_DIR"
+        echo "Working Directory: $WORKING_DIR"
+        echo "Configuration: ${SPECIFIED_CONFIG:-$CONFIG_FILE}"
+        echo ""
+        echo "=== Module Status ==="
+        echo "Task Queue Available: ${TASK_QUEUE_AVAILABLE:-false}"
+        echo "Task Queue Processing: ${TASK_QUEUE_PROCESSING:-false}"
+        echo "Claude Integration: $USE_CLAUNCH"
+        echo "Claunch Mode: $CLAUNCH_MODE"
+        echo ""
+        echo "=== Dependencies ==="
+        echo "Claude CLI: $(which claude 2>/dev/null || echo 'Not found')"
+        echo "Claunch: $(which claunch 2>/dev/null || echo 'Not found')"
+        echo "tmux: $(which tmux 2>/dev/null || echo 'Not found')"
+        echo "jq: $(which jq 2>/dev/null || echo 'Not found')"
+        echo ""
+        if [[ "${TASK_QUEUE_AVAILABLE:-false}" == "true" ]]; then
+            echo "=== Task Queue Status ==="
+            "${TASK_QUEUE_SCRIPT:-src/task-queue.sh}" status 2>/dev/null || echo "Task queue status unavailable"
+        else
+            echo "=== Task Queue Status ==="
+            echo "Task Queue module not available"
+        fi
+        operation_handled=true
+    fi
+    
+    if [[ "$operation_handled" == "false" ]]; then
+        log_error "No valid session management operations specified"
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
 # COMMAND-LINE-INTERFACE
 # ===============================================================================
 
 # Zeige Hilfe
 show_help() {
-    cat << 'EOF'
-Claude Auto-Resume - Intelligent Task Queue Management System
-============================================================
+    cat << EOF
+Usage: $SCRIPT_NAME [OPTIONS] [CLAUDE_ARGS...]
 
-SYNOPSIS
-    ./src/hybrid-monitor.sh [OPTIONS] [TASK_COMMANDS]
+Hybrid monitoring system for Claude CLI sessions with claunch integration.
 
-DESCRIPTION
-    Intelligent automation system for Claude CLI session management with comprehensive 
-    task queue processing, error recovery, and GitHub integration capabilities.
+OPTIONS:
+    --continuous              Enable continuous monitoring mode
+    --check-interval MINUTES  Monitoring check interval (default: $CHECK_INTERVAL_MINUTES)
+    --max-cycles COUNT        Maximum monitoring cycles (default: $MAX_RESTARTS)
+    --new-terminal           Open Claude in new terminal windows
+    --config FILE            Use specific configuration file
+    --test-mode SECONDS      [DEV] Simulate usage limit with specified wait time
+    --debug                  Enable debug output
+    --dry-run                Preview actions without executing them
+    --version                Show version information
+    -h, --help               Show this help message
 
-BASIC OPERATIONS
-    --continuous                 Start continuous monitoring mode
-    --check-health              Verify system health and dependencies  
-    --version                   Display version information
-    --help                      Display this help message
+TASK QUEUE OPTIONS:
+    --queue-mode             Enable task queue processing mode
+    --add-issue NUMBER       Add GitHub issue to task queue
+    --add-pr NUMBER          Add GitHub PR to task queue  
+    --add-custom "TASK"      Add custom task to queue
+    --list-queue             Display current task queue
+    --pause-queue            Pause task queue processing
+    --resume-queue           Resume task queue processing
+    --clear-queue            Clear all tasks from queue
 
-TASK QUEUE OPERATIONS
-    --queue-mode                Enable task queue processing mode
-    --add-issue N               Add GitHub issue #N to processing queue
-    --add-pr N                  Add GitHub PR #N to processing queue  
-    --add-custom "DESC"         Add custom task with description
-    --add-github-url "URL"      Add task from GitHub issue/PR URL
-    --list-queue                Display current task queue status
-    --clear-queue               Remove all tasks from queue
-    --pause-queue               Pause queue processing
-    --resume-queue              Resume paused queue processing
+SESSION MANAGEMENT OPTIONS:
+    --list-sessions          List active Claude sessions
+    --show-session-id        Display current session ID
+    --system-status          Show system status and diagnostics
 
-QUEUE CONFIGURATION  
-    --task-timeout SECONDS      Default task timeout (default: 3600)
-    --task-retries N            Maximum retry attempts (default: 3)
-    --task-priority N           Default priority for new tasks (1-10)
-    --queue-delay SECONDS       Delay between queue checks (default: 30)
+CLAUDE_ARGS:
+    Any arguments to pass to the Claude CLI (e.g., "continue", --model opus)
+    If no arguments provided, defaults to "continue"
 
-SESSION MANAGEMENT
-    --recover-session           Attempt to recover failed Claude session
-    --new-session              Force creation of new Claude session
-    --list-sessions             Show all active Claude sessions
-    --cleanup-sessions          Remove orphaned/inactive sessions
-    --show-session-id           Display current session ID
-    --copy-session-id [ID]      Copy session ID to clipboard
-    --resume-session ID         Resume specific session by ID
+EXAMPLES:
+    # Start continuous monitoring with default settings
+    $SCRIPT_NAME --continuous
 
-ERROR HANDLING & RECOVERY
-    --recovery-mode             Enable enhanced error recovery
-    --backup-state              Create manual system state backup
-    --restore-from-backup FILE  Restore from specified backup file
-    --emergency-cleanup         Perform emergency system cleanup
+    # Monitor with new terminal windows every 3 minutes
+    $SCRIPT_NAME --continuous --check-interval 3 --new-terminal
 
-TESTING & DEVELOPMENT
-    --test-mode SECONDS         Enable test mode with fast cycles
-    --dry-run                   Show what would be done without executing
-    --verbose                   Enable verbose logging output
-    --debug                     Enable debug mode with detailed logs
+    # Single run with specific Claude arguments
+    $SCRIPT_NAME "implement a new feature" --model claude-3-opus-20240229
 
-DIAGNOSTICS & MONITORING
-    --system-status             Display comprehensive system status
-    --diagnostic-report         Generate detailed diagnostic report
-    --performance-stats         Show performance statistics
-    --check-config              Validate configuration settings
+    # Test mode with 30-second simulated usage limit
+    $SCRIPT_NAME --continuous --test-mode 30 --debug
 
-EXAMPLES
-    # Basic monitoring
-    ./src/hybrid-monitor.sh --continuous
-    
-    # Process GitHub issue in queue mode
-    ./src/hybrid-monitor.sh --add-issue 123 --queue-mode
-    
-    # Add multiple tasks and process
-    ./src/hybrid-monitor.sh --add-issue 123 --add-custom "Fix bug" --queue-mode
-    
-    # Test mode with fast processing
-    ./src/hybrid-monitor.sh --queue-mode --test-mode 30
-    
-    # Enhanced error recovery mode
-    ./src/hybrid-monitor.sh --queue-mode --recovery-mode --verbose
+    # Dry run to preview actions
+    $SCRIPT_NAME --continuous --dry-run --debug
 
-CONFIGURATION
-    Configuration is loaded from config/default.conf. Key settings:
-    
-    TASK_QUEUE_ENABLED=true
-    TASK_DEFAULT_TIMEOUT=3600
-    GITHUB_AUTO_COMMENT=true
-    ERROR_HANDLING_ENABLED=true
-    
-    See README.md for complete configuration documentation.
+    # Queue mode examples
+    $SCRIPT_NAME --add-custom "Implement user authentication feature"
+    $SCRIPT_NAME --add-issue 123
+    $SCRIPT_NAME --queue-mode --continuous
 
-TROUBLESHOOTING
-    - Use --verbose or --debug for detailed output
-    - Check logs in logs/hybrid-monitor.log
-    - Use --check-health to verify system status
-    - Use --diagnostic-report for comprehensive system info
+CONFIGURATION:
+    Configuration is loaded from $CONFIG_FILE by default.
+    Use --config to specify an alternative configuration file.
 
-PERFORMANCE
-    - Handles 1000+ tasks efficiently (<100MB memory)
-    - <1 second per queue operation
-    - <10 second overhead per task processing
-    - Automatic optimization for large queues
+DEPENDENCIES:
+    - Claude CLI (required)
+    - claunch (optional but recommended)
+    - tmux (required if using claunch in tmux mode)
 
-For detailed documentation, examples, and troubleshooting guides, see:
-https://github.com/trytofly94/Claude-Auto-Resume-System/blob/main/README.md
+For more information, see README.md or visit the project repository.
 EOF
 }
 
@@ -1108,12 +908,18 @@ parse_arguments() {
                 shift
                 ;;
             --check-interval)
-                validate_number_parameter "$1" "${2:-}"
+                if [[ -z "${2:-}" ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Option $1 requires a valid number of minutes"
+                    exit 1
+                fi
                 CHECK_INTERVAL_MINUTES="$2"
                 shift 2
                 ;;
             --max-cycles)
-                validate_number_parameter "$1" "${2:-}"
+                if [[ -z "${2:-}" ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Option $1 requires a valid number"
+                    exit 1
+                fi
                 MAX_RESTARTS="$2"
                 shift 2
                 ;;
@@ -1130,7 +936,10 @@ parse_arguments() {
                 shift 2
                 ;;
             --test-mode)
-                validate_number_parameter "$1" "${2:-}"
+                if [[ -z "${2:-}" ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "Option $1 requires a valid number of seconds"
+                    exit 1
+                fi
                 TEST_MODE=true
                 TEST_WAIT_SECONDS="$2"
                 shift 2
@@ -1197,36 +1006,17 @@ parse_arguments() {
                 CLEAR_QUEUE=true
                 shift
                 ;;
+            --list-sessions)
+                LIST_SESSIONS=true
+                shift
+                ;;
             --show-session-id)
                 SHOW_SESSION_ID=true
                 shift
                 ;;
-            --show-full-session-id)
-                SHOW_SESSION_ID=true
-                SHOW_FULL_SESSION_ID=true
+            --system-status)
+                SYSTEM_STATUS=true
                 shift
-                ;;
-            --copy-session-id)
-                COPY_SESSION_ID=true
-                if [[ -n "${2:-}" && ! "${2:-}" =~ ^-- ]]; then
-                    COPY_SESSION_TARGET="$2"
-                    shift 2
-                else
-                    COPY_SESSION_TARGET="current"
-                    shift
-                fi
-                ;;
-            --list-sessions)
-                LIST_SESSIONS_MODE=true
-                shift
-                ;;
-            --resume-session)
-                if [[ -z "${2:-}" ]]; then
-                    log_error "Option $1 requires a session ID"
-                    exit 1
-                fi
-                RESUME_SESSION_ID="$2"
-                shift 2
                 ;;
             --version)
                 show_version
@@ -1236,111 +1026,6 @@ parse_arguments() {
                 show_help
                 exit 0
                 ;;
-                
-            # ============ NEW: Task Queue Parameters ============
-            
-            # Queue Mode Activation
-            --queue-mode)
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true  # Auto-enable task queue
-                shift
-                ;;
-            
-            # Task Management
-            --add-issue)
-                validate_number_parameter "$1" "${2:-}"
-                QUEUE_ACTION="add_issue"
-                QUEUE_ITEM="$2"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift 2
-                ;;
-                
-            --add-pr)
-                validate_number_parameter "$1" "${2:-}"
-                QUEUE_ACTION="add_pr" 
-                QUEUE_ITEM="$2"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift 2
-                ;;
-                
-            --add-custom)
-                if [[ -z "${2:-}" ]]; then
-                    log_error "Option $1 requires a task description"
-                    exit 1
-                fi
-                QUEUE_ACTION="add_custom"
-                QUEUE_ITEM="$2"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift 2
-                ;;
-                
-            --list-queue)
-                QUEUE_ACTION="list_queue"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift
-                ;;
-                
-            --clear-queue)
-                QUEUE_ACTION="clear_queue"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift
-                ;;
-                
-            # Queue Control
-            --pause-queue)
-                QUEUE_ACTION="pause_queue"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift
-                ;;
-                
-            --resume-queue)
-                QUEUE_ACTION="resume_queue"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift
-                ;;
-                
-            --skip-current)
-                QUEUE_ACTION="skip_current"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift
-                ;;
-                
-            --retry-current)
-                QUEUE_ACTION="retry_current"
-                QUEUE_MODE=true
-                TASK_QUEUE_ENABLED=true
-                shift
-                ;;
-                
-            # Queue Configuration
-            --queue-timeout)
-                validate_number_parameter "$1" "${2:-}" 60 86400  # 1 minute to 24 hours
-                TASK_DEFAULT_TIMEOUT="$2"
-                shift 2
-                ;;
-                
-            --queue-retries)
-                validate_number_parameter "$1" "${2:-}" 0 10  # 0 to 10 retries
-                TASK_MAX_RETRIES="$2"
-                shift 2
-                ;;
-                
-            --queue-priority)
-                validate_number_parameter "$1" "${2:-}" 1 10  # Priority 1-10
-                TASK_DEFAULT_PRIORITY="$2"
-                shift 2
-                ;;
-                
-            # ============ END: Task Queue Parameters ============
-            
             -*)
                 # Unbekannte Option - zu Claude-Args hinzufügen
                 CLAUDE_ARGS+=("$1")
@@ -1355,12 +1040,9 @@ parse_arguments() {
     done
     
     # Standard-Argumente falls keine spezifiziert
-    if [[ ${#CLAUDE_ARGS[@]} -eq 0 && "$QUEUE_MODE" == "false" ]]; then
+    if [[ ${#CLAUDE_ARGS[@]} -eq 0 ]]; then
         CLAUDE_ARGS=("continue")
     fi
-    
-    # Export Task Queue variables for use in functions
-    export QUEUE_MODE QUEUE_ACTION QUEUE_ITEM TASK_QUEUE_ENABLED TASK_DEFAULT_TIMEOUT TASK_MAX_RETRIES TASK_DEFAULT_PRIORITY
     
     log_debug "Parsed arguments:"
     log_debug "  CONTINUOUS_MODE=$CONTINUOUS_MODE"
@@ -1370,988 +1052,6 @@ parse_arguments() {
     log_debug "  TEST_MODE=$TEST_MODE"
     log_debug "  DEBUG_MODE=$DEBUG_MODE"
     log_debug "  DRY_RUN=$DRY_RUN"
-    log_debug "  QUEUE_MODE=$QUEUE_MODE"
-    log_debug "  QUEUE_ACTION=$QUEUE_ACTION"
-    log_debug "  TASK_QUEUE_ENABLED=$TASK_QUEUE_ENABLED"
-}
-
-# ===============================================================================
-# TASK QUEUE PROCESSING ENGINE
-# ===============================================================================
-
-# Process task queue cycle (called from monitoring loop)
-process_task_queue_cycle() {
-    log_debug "Starting task queue processing cycle"
-    
-    # Check if queue processing is paused
-    if declare -f is_queue_paused >/dev/null 2>&1 && is_queue_paused; then
-        log_debug "Task queue processing is paused - skipping cycle"
-        return 0
-    fi
-    
-    # Get next task to process
-    local next_task_id
-    if ! next_task_id=$(get_next_task 2>/dev/null); then
-        log_debug "No tasks available for processing (or error getting next task)"
-        return 0
-    fi
-    
-    if [[ -z "$next_task_id" ]]; then
-        log_debug "Task queue is empty"
-        return 0
-    fi
-    
-    log_info "Processing task from queue: $next_task_id"
-    
-    # Execute single task with comprehensive error handling
-    if execute_single_task "$next_task_id"; then
-        log_info "✓ Task $next_task_id completed successfully"
-        
-        # Brief pause before continuing to next task
-        local processing_delay="${QUEUE_PROCESSING_DELAY:-30}"
-        log_debug "Task completed - waiting ${processing_delay}s before next cycle"
-        sleep "$processing_delay"
-    else
-        log_warn "✗ Task $next_task_id failed or timed out"
-        handle_task_failure "$next_task_id" "execution_failure"
-        
-        # Longer pause after failure
-        local processing_delay="${QUEUE_PROCESSING_DELAY:-30}"
-        local failure_delay=$((processing_delay * 2))
-        log_debug "Task failed - waiting ${failure_delay}s before next cycle"
-        sleep "$failure_delay"
-    fi
-    
-    return 0
-}
-
-# Execute single task with full lifecycle management
-execute_single_task() {
-    local task_id="$1"
-    
-    if [[ -z "$task_id" ]]; then
-        log_error "execute_single_task: Task ID is required"
-        return 1
-    fi
-    
-    log_info "Executing task: $task_id"
-    
-    # Get task details
-    local task_data
-    if ! task_data=$(get_task_details "$task_id" 2>/dev/null); then
-        log_error "Failed to retrieve task details for: $task_id"
-        return 1
-    fi
-    
-    if [[ -z "$task_data" ]]; then
-        log_error "Task data is empty for task: $task_id"
-        return 1
-    fi
-    
-    # Parse task information using jq
-    local task_type task_command task_timeout task_description
-    
-    if ! task_type=$(echo "$task_data" | jq -r '.type // "unknown"' 2>/dev/null); then
-        log_error "Failed to parse task type from task data"
-        return 1
-    fi
-    
-    if ! task_command=$(echo "$task_data" | jq -r '.command // ""' 2>/dev/null); then
-        log_error "Failed to parse task command from task data" 
-        return 1
-    fi
-    
-    if ! task_timeout=$(echo "$task_data" | jq -r '.timeout // 3600' 2>/dev/null); then
-        log_warn "Failed to parse task timeout, using default"
-        task_timeout="${TASK_DEFAULT_TIMEOUT:-3600}"
-    fi
-    
-    if ! task_description=$(echo "$task_data" | jq -r '.description // ""' 2>/dev/null); then
-        log_debug "No task description available"
-        task_description="Task $task_id"
-    fi
-    
-    log_info "Task details: type=$task_type, timeout=${task_timeout}s"
-    log_info "Task command: $task_command"
-    
-    # Validate task command
-    if [[ -z "$task_command" ]]; then
-        log_error "Task command is empty for task: $task_id"
-        return 1
-    fi
-    
-    # Update task status to in_progress
-    if ! update_task_status "$task_id" "in_progress"; then
-        log_error "Failed to update task status to in_progress"
-        return 1
-    fi
-    
-    # Post GitHub start notification if applicable
-    if [[ "$task_type" =~ ^github_ ]]; then
-        if declare -f post_task_start_notification >/dev/null 2>&1; then
-            post_task_start_notification "$task_id" "$task_description"
-        fi
-    fi
-    
-    # Start timeout monitoring if error handling is enabled
-    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f start_task_timeout_monitor >/dev/null 2>&1; then
-        start_task_timeout_monitor "$task_id" "$task_timeout" "$$"
-        log_debug "Timeout monitoring started for task $task_id"
-    fi
-    
-    # Start session health monitoring if error handling is enabled
-    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f monitor_session_health_during_task >/dev/null 2>&1; then
-        monitor_session_health_during_task "${MAIN_SESSION_ID:-unknown}" "$task_id"
-        log_debug "Session health monitoring started for task $task_id"
-    fi
-    
-    # Create initial checkpoint if backup system is enabled
-    if [[ "${BACKUP_ENABLED:-true}" == "true" ]] && declare -f create_task_checkpoint >/dev/null 2>&1; then
-        create_task_checkpoint "$task_id" "task_start"
-        log_debug "Initial checkpoint created for task $task_id"
-    fi
-    
-    # Execute task with enhanced monitoring and error handling
-    local execution_result=0
-    if execute_task_with_monitoring "$task_id" "$task_command" "$task_timeout"; then
-        log_info "✓ Task execution completed successfully"
-        
-        # Update task status to completed
-        if ! update_task_status "$task_id" "completed"; then
-            log_warn "Failed to update task status to completed"
-        fi
-        
-        # Post GitHub completion notification
-        if [[ "$task_type" =~ ^github_ ]]; then
-            if declare -f post_task_completion_notification >/dev/null 2>&1; then
-                post_task_completion_notification "$task_id" "success" "Task completed successfully"
-            fi
-        fi
-        
-        execution_result=0
-    else
-        log_warn "✗ Task execution failed or timed out"
-        
-        # Enhanced error handling for task failures
-        if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f classify_error_severity >/dev/null 2>&1; then
-            local error_message="Task execution failed or timed out"
-            local error_severity
-            error_severity=$(classify_error_severity "$error_message" "task_execution" "$task_id")
-            
-            log_info "Error classified with severity level: $error_severity"
-            
-            # Determine and execute recovery strategy
-            if declare -f determine_recovery_strategy >/dev/null 2>&1; then
-                local retry_count=0
-                # Try to get current retry count from task data
-                if declare -f get_task_retry_count >/dev/null 2>&1; then
-                    retry_count=$(get_task_retry_count "$task_id" 2>/dev/null || echo "0")
-                fi
-                
-                local recovery_strategy
-                recovery_strategy=$(determine_recovery_strategy "$error_severity" "$task_id" "$retry_count" "task_execution")
-                
-                log_info "Executing recovery strategy: $recovery_strategy"
-                
-                if declare -f execute_recovery_strategy >/dev/null 2>&1; then
-                    execute_recovery_strategy "$recovery_strategy" "$task_id" "task_execution" "$error_message"
-                fi
-            fi
-        fi
-        
-        # Update task status to failed (will be handled by failure handler)
-        if ! update_task_status "$task_id" "failed"; then
-            log_warn "Failed to update task status to failed"
-        fi
-        
-        # Post GitHub failure notification
-        if [[ "$task_type" =~ ^github_ ]]; then
-            if declare -f post_task_completion_notification >/dev/null 2>&1; then
-                post_task_completion_notification "$task_id" "failure" "Task execution failed or timed out"
-            fi
-        fi
-        
-        execution_result=1
-    fi
-    
-    # Cleanup error handling resources
-    if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]]; then
-        # Stop timeout monitoring
-        if declare -f stop_timeout_monitor >/dev/null 2>&1; then
-            stop_timeout_monitor "$task_id"
-            log_debug "Timeout monitoring stopped for task $task_id"
-        fi
-        
-        # Stop session health monitoring
-        if declare -f stop_session_health_monitoring >/dev/null 2>&1; then
-            stop_session_health_monitoring "$task_id"
-            log_debug "Session health monitoring stopped for task $task_id"
-        fi
-        
-        # Create final checkpoint if task completed successfully
-        if [[ $execution_result -eq 0 ]] && [[ "${BACKUP_ENABLED:-true}" == "true" ]] && declare -f create_task_checkpoint >/dev/null 2>&1; then
-            create_task_checkpoint "$task_id" "task_completion"
-            log_debug "Final checkpoint created for task $task_id"
-        fi
-    fi
-    
-    return $execution_result
-}
-
-# Execute task with monitoring and completion detection
-execute_task_with_monitoring() {
-    local task_id="$1"
-    local task_command="$2"
-    local timeout="${3:-3600}"
-    
-    if [[ -z "$task_id" || -z "$task_command" ]]; then
-        log_error "execute_task_with_monitoring: Task ID and command are required"
-        return 1
-    fi
-    
-    log_info "Starting task execution with ${timeout}s timeout"
-    
-    # Ensure we have an active session
-    if [[ -z "$MAIN_SESSION_ID" ]]; then
-        log_error "No active Claude session available for task execution"
-        return 1
-    fi
-    
-    # Clear session before starting new task (if configured)
-    if [[ "${QUEUE_SESSION_CLEAR_BETWEEN_TASKS:-true}" == "true" ]]; then
-        log_debug "Clearing session before task execution"
-        
-        if declare -f send_command_to_session >/dev/null 2>&1; then
-            if ! send_command_to_session "/clear"; then
-                log_warn "Failed to clear session, continuing anyway"
-            else
-                log_debug "Session cleared successfully"
-                sleep 2  # Brief pause for clear to complete
-            fi
-        else
-            log_debug "send_command_to_session function not available"
-        fi
-    fi
-    
-    # Send task command to Claude session
-    log_info "Sending task command to Claude session"
-    log_debug "Command: $task_command"
-    
-    if declare -f send_command_to_session >/dev/null 2>&1; then
-        if ! send_command_to_session "$task_command"; then
-            log_error "Failed to send command to Claude session"
-            return 1
-        fi
-    else
-        log_error "send_command_to_session function not available"
-        return 1
-    fi
-    
-    log_info "Command sent successfully, monitoring for completion..."
-    
-    # Monitor for completion with timeout
-    if monitor_task_completion "$MAIN_SESSION_ID" "$timeout" "$task_id"; then
-        log_info "✓ Task completed successfully within timeout"
-        return 0
-    else
-        log_warn "✗ Task timed out or failed completion detection"
-        return 1
-    fi
-}
-
-# Monitor task completion using pattern detection
-monitor_task_completion() {
-    local session_id="$1"
-    local timeout="$2"
-    local task_id="${3:-unknown}"
-    
-    if [[ -z "$session_id" || -z "$timeout" ]]; then
-        log_error "monitor_task_completion: Session ID and timeout are required"
-        return 1
-    fi
-    
-    local start_time completion_pattern check_interval
-    start_time=$(date +%s)
-    completion_pattern="${TASK_COMPLETION_PATTERN:-###TASK_COMPLETE###}"
-    check_interval=10  # Check every 10 seconds
-    
-    log_debug "Monitoring task completion for session: $session_id"
-    log_debug "Timeout: ${timeout}s, Pattern: $completion_pattern"
-    log_info "Task execution started - monitoring for completion pattern..."
-    
-    while true; do
-        local current_time elapsed_time
-        current_time=$(date +%s)
-        elapsed_time=$((current_time - start_time))
-        
-        # Check for timeout
-        if [[ $elapsed_time -gt $timeout ]]; then
-            log_warn "Task timeout reached after ${elapsed_time}s (limit: ${timeout}s)"
-            return 1
-        fi
-        
-        # Show progress every minute
-        if [[ $((elapsed_time % 60)) -eq 0 && $elapsed_time -gt 0 ]]; then
-            local remaining_time=$((timeout - elapsed_time))
-            log_info "Task running for ${elapsed_time}s, ${remaining_time}s remaining..."
-        fi
-        
-        # Capture current session output
-        local session_output=""
-        if declare -f capture_recent_session_output >/dev/null 2>&1; then
-            if session_output=$(capture_recent_session_output "$session_id" 2>/dev/null); then
-                log_debug "Captured ${#session_output} characters of session output"
-                
-                # Check for completion pattern
-                if echo "$session_output" | grep -q "$completion_pattern"; then
-                    log_info "✓ Completion pattern detected after ${elapsed_time}s"
-                    log_debug "Task completion confirmed via pattern: $completion_pattern"
-                    return 0
-                fi
-                
-                # Check for common error patterns (but don't fail immediately)
-                if echo "$session_output" | grep -qE "(Error:|Failed:|Exception:|CRITICAL:|ERROR:)"; then
-                    log_debug "Error pattern detected in session output, but continuing monitoring"
-                    # Don't immediately fail - let it timeout naturally in case it recovers
-                fi
-                
-                # Enhanced usage limit detection and handling
-                if [[ "${ERROR_HANDLING_ENABLED:-true}" == "true" ]] && declare -f detect_usage_limit_in_queue >/dev/null 2>&1; then
-                    if detect_usage_limit_in_queue "$session_output" "$task_id"; then
-                        log_warn "Usage limit detected during task execution - initiating recovery"
-                        
-                        # Pause queue for usage limit with intelligent wait calculation
-                        if declare -f pause_queue_for_usage_limit >/dev/null 2>&1; then
-                            local wait_time
-                            wait_time=$(calculate_usage_limit_wait_time "$task_id" "usage_limit" 2>/dev/null || echo "$USAGE_LIMIT_COOLDOWN")
-                            pause_queue_for_usage_limit "$wait_time" "$task_id" "usage_limit"
-                            
-                            log_info "Task execution paused for usage limit recovery"
-                            return 1  # Signal that task needs to be handled by recovery system
-                        fi
-                    fi
-                elif echo "$session_output" | grep -qE "(usage limit reached|Usage limit|rate limit)"; then
-                    log_warn "Usage limit detected during task execution (fallback detection)"
-                    # Fallback for basic usage limit handling
-                    return 1
-                fi
-            else
-                log_debug "Could not capture session output, continuing monitoring"
-            fi
-        else
-            log_debug "capture_recent_session_output function not available"
-        fi
-        
-        # Update task progress in GitHub if available (every 5 minutes)
-        if [[ $((elapsed_time % 300)) -eq 0 && $elapsed_time -gt 0 ]]; then
-            if declare -f update_task_progress >/dev/null 2>&1; then
-                local progress_percent
-                progress_percent=$(( (elapsed_time * 100) / timeout ))
-                
-                # Cap progress at 95% since we're not actually done
-                if [[ $progress_percent -gt 95 ]]; then
-                    progress_percent=95
-                fi
-                
-                local progress_message="Task execution in progress (${elapsed_time}s elapsed)..."
-                update_task_progress "$task_id" "$progress_percent" "$progress_message" 2>/dev/null || true
-                log_debug "Updated task progress: ${progress_percent}%"
-            fi
-            
-            # Create periodic checkpoint if backup system is enabled
-            if [[ "${BACKUP_ENABLED:-true}" == "true" ]] && declare -f create_periodic_checkpoint_if_needed >/dev/null 2>&1; then
-                local last_checkpoint_time=$((start_time))  # Use task start time as baseline
-                create_periodic_checkpoint_if_needed "$task_id" "$last_checkpoint_time" 2>/dev/null || true
-                log_debug "Periodic checkpoint check completed for task $task_id"
-            fi
-        fi
-        
-        # Brief pause before next check
-        sleep "$check_interval"
-    done
-}
-
-# Initialize Claude session for task queue processing
-initialize_session_for_tasks() {
-    local session_id="$1"
-    
-    if [[ -z "$session_id" ]]; then
-        log_error "initialize_session_for_tasks: Session ID is required"
-        return 1
-    fi
-    
-    log_debug "Initializing session $session_id for task processing"
-    
-    # Check if send_command_to_session function is available
-    if ! declare -f send_command_to_session >/dev/null 2>&1; then
-        log_warn "send_command_to_session function not available - skipping session initialization"
-        return 0
-    fi
-    
-    # Send initialization commands to prepare Claude for task processing
-    local init_commands=(
-        "I'm ready to work with the Claude Auto-Resume task queue system."
-        "I understand that I should complete each task thoroughly and end my response with: ###TASK_COMPLETE###"
-        "I'll process tasks individually and wait for the next task after completion."
-        "Please proceed with the first task when ready."
-    )
-    
-    log_info "Sending task processing initialization to Claude session"
-    
-    local command_count=0
-    for cmd in "${init_commands[@]}"; do
-        ((command_count++))
-        log_debug "Sending initialization command $command_count/${#init_commands[@]}: $cmd"
-        
-        if ! send_command_to_session "$cmd"; then
-            log_warn "Failed to send initialization command $command_count: $cmd"
-            # Don't fail completely, just warn and continue
-        else
-            log_debug "Initialization command $command_count sent successfully"
-        fi
-        
-        # Brief pause between commands to avoid overwhelming the session
-        sleep 1
-    done
-    
-    # Wait for Claude to process initialization
-    log_debug "Waiting for Claude to process initialization..."
-    sleep 3
-    
-    # Optionally verify Claude is ready by checking session output
-    if declare -f capture_recent_session_output >/dev/null 2>&1; then
-        local session_output
-        if session_output=$(capture_recent_session_output "$session_id" 2>/dev/null); then
-            if echo "$session_output" | grep -qE "(ready|understand|proceed)"; then
-                log_info "✓ Session initialized successfully for task processing"
-            else
-                log_debug "Session initialization response received (content not validated)"
-            fi
-        else
-            log_debug "Could not capture initialization response"
-        fi
-    fi
-    
-    log_info "Task processing session initialization completed"
-    return 0
-}
-
-# ===============================================================================
-# TASK QUEUE ERROR HANDLING & RECOVERY
-# ===============================================================================
-
-# Handle task failure with retry logic and recovery
-handle_task_failure() {
-    local task_id="$1"
-    local failure_reason="${2:-unknown_failure}"
-    
-    if [[ -z "$task_id" ]]; then
-        log_error "handle_task_failure: Task ID is required"
-        return 1
-    fi
-    
-    log_warn "Handling task failure: $task_id (reason: $failure_reason)"
-    
-    # Get current retry count
-    local retry_count
-    if ! retry_count=$(get_task_retry_count "$task_id" 2>/dev/null); then
-        log_warn "Could not get retry count for task $task_id, assuming 0"
-        retry_count=0
-    fi
-    
-    local max_retries="${TASK_MAX_RETRIES:-3}"
-    
-    if [[ $retry_count -lt $max_retries ]]; then
-        local next_retry=$((retry_count + 1))
-        log_info "Scheduling retry $next_retry/$max_retries for task $task_id"
-        
-        # Calculate retry delay with exponential backoff
-        local base_delay="${TASK_RETRY_DELAY:-300}"
-        local retry_delay=$((base_delay * next_retry))
-        
-        # Cap maximum retry delay at 30 minutes
-        if [[ $retry_delay -gt 1800 ]]; then
-            retry_delay=1800
-        fi
-        
-        log_info "Task $task_id will be retried in ${retry_delay}s (exponential backoff)"
-        
-        # Increment retry counter
-        if declare -f increment_task_retry_count >/dev/null 2>&1; then
-            if ! increment_task_retry_count "$task_id"; then
-                log_warn "Failed to increment retry count for task $task_id"
-            fi
-        fi
-        
-        # Update task status back to pending for retry
-        if declare -f update_task_status >/dev/null 2>&1; then
-            if ! update_task_status "$task_id" "pending"; then
-                log_error "Failed to update task status to pending for retry"
-                return 1
-            fi
-        fi
-        
-        # Post GitHub retry notification if applicable
-        if declare -f post_task_retry_notification >/dev/null 2>&1; then
-            post_task_retry_notification "$task_id" "$next_retry" "$max_retries" "$failure_reason"
-        fi
-        
-        log_info "✓ Task $task_id scheduled for retry (attempt $next_retry/$max_retries)"
-        return 0
-        
-    else
-        log_error "Task $task_id permanently failed after $max_retries retry attempts"
-        
-        # Mark task as permanently failed
-        if declare -f update_task_status >/dev/null 2>&1; then
-            if ! update_task_status "$task_id" "failed_permanent"; then
-                log_warn "Failed to update task status to failed_permanent"
-            fi
-        fi
-        
-        # Post GitHub permanent failure notification
-        if declare -f post_task_permanent_failure_notification >/dev/null 2>&1; then
-            post_task_permanent_failure_notification "$task_id" "$max_retries" "$failure_reason"
-        fi
-        
-        # Check if queue should be auto-paused
-        if [[ "${QUEUE_AUTO_PAUSE_ON_ERROR:-true}" == "true" ]]; then
-            log_warn "Auto-pausing task queue due to permanent task failure"
-            
-            if declare -f pause_task_queue >/dev/null 2>&1; then
-                if pause_task_queue "auto_pause_permanent_failure"; then
-                    log_info "✓ Task queue paused automatically due to permanent failure"
-                else
-                    log_warn "Failed to auto-pause task queue"
-                fi
-            fi
-        fi
-        
-        log_error "✗ Task $task_id marked as permanently failed"
-        return 1
-    fi
-}
-
-# Recover from critical task processing errors
-recover_from_task_processing_error() {
-    local error_type="${1:-general_error}"
-    local session_id="${2:-$MAIN_SESSION_ID}"
-    
-    log_warn "Attempting recovery from task processing error: $error_type"
-    
-    case "$error_type" in
-        "session_unresponsive")
-            log_info "Attempting session recovery for unresponsive session"
-            
-            if [[ -n "$session_id" ]] && declare -f perform_session_recovery >/dev/null 2>&1; then
-                if perform_session_recovery "$session_id" "task_processing_recovery"; then
-                    log_info "✓ Session recovery successful"
-                    
-                    # Re-initialize session for tasks
-                    if initialize_session_for_tasks "$session_id"; then
-                        log_info "✓ Session re-initialized for task processing"
-                        return 0
-                    else
-                        log_warn "Session recovery succeeded but re-initialization failed"
-                        return 1
-                    fi
-                else
-                    log_error "Session recovery failed"
-                    return 1
-                fi
-            else
-                log_warn "No session recovery function available or session ID missing"
-                return 1
-            fi
-            ;;
-            
-        "queue_corruption")
-            log_error "Task queue corruption detected - this requires manual intervention"
-            log_error "Please check the task queue files and consider running queue repair"
-            
-            # Auto-pause queue to prevent further issues
-            if declare -f pause_task_queue >/dev/null 2>&1; then
-                pause_task_queue "auto_pause_queue_corruption"
-            fi
-            
-            return 1
-            ;;
-            
-        "module_failure")
-            log_warn "Task queue module failure detected - attempting to reload modules"
-            
-            # Try to reload task queue modules
-            if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" ]]; then
-                log_info "Attempting to reload task queue modules"
-                
-                # This would require re-sourcing the modules
-                local task_queue_module="$SCRIPT_DIR/task-queue.sh"
-                if [[ -f "$task_queue_module" ]]; then
-                    # shellcheck source=/dev/null
-                    if source "$task_queue_module"; then
-                        log_info "✓ Task queue module reloaded successfully"
-                        
-                        # Re-initialize if function is available
-                        if declare -f init_task_queue >/dev/null 2>&1; then
-                            if init_task_queue; then
-                                log_info "✓ Task queue system re-initialized"
-                                return 0
-                            fi
-                        fi
-                    else
-                        log_error "Failed to reload task queue module"
-                        return 1
-                    fi
-                else
-                    log_error "Task queue module not found for reload"
-                    return 1
-                fi
-            fi
-            ;;
-            
-        *)
-            log_warn "Unknown error type for recovery: $error_type"
-            log_info "Attempting generic recovery procedures"
-            
-            # Generic recovery: brief pause and continue
-            sleep 10
-            return 0
-            ;;
-    esac
-    
-    return 1
-}
-
-# ===============================================================================
-# TASK QUEUE ACTION HANDLERS
-# ===============================================================================
-
-# Handle immediate queue actions (non-monitoring mode)
-handle_queue_actions() {
-    if [[ -z "$QUEUE_ACTION" ]]; then
-        return 0  # No action specified
-    fi
-    
-    log_info "Processing queue action: $QUEUE_ACTION"
-    
-    case "$QUEUE_ACTION" in
-        "add_issue")
-            log_info "Adding GitHub issue #$QUEUE_ITEM to task queue"
-            
-            if declare -f create_github_issue_task >/dev/null 2>&1; then
-                local task_id
-                if task_id=$(create_github_issue_task "$QUEUE_ITEM" "${TASK_DEFAULT_PRIORITY:-5}"); then
-                    log_info "✓ Issue #$QUEUE_ITEM added to queue successfully (Task ID: $task_id)"
-                    
-                    # Display queue status after adding
-                    if declare -f display_queue_status >/dev/null 2>&1; then
-                        echo ""
-                        log_info "Current queue status:"
-                        display_queue_status
-                    fi
-                else
-                    log_error "Failed to add issue #$QUEUE_ITEM to queue"
-                    exit 1
-                fi
-            else
-                log_error "GitHub issue integration not available"
-                log_error "Please ensure GitHub integration modules are loaded and configured"
-                exit 1
-            fi
-            ;;
-            
-        "add_pr")
-            log_info "Adding GitHub PR #$QUEUE_ITEM to task queue"
-            
-            if declare -f create_github_pr_task >/dev/null 2>&1; then
-                local task_id
-                if task_id=$(create_github_pr_task "$QUEUE_ITEM" "${TASK_DEFAULT_PRIORITY:-5}"); then
-                    log_info "✓ PR #$QUEUE_ITEM added to queue successfully (Task ID: $task_id)"
-                    
-                    # Display queue status after adding
-                    if declare -f display_queue_status >/dev/null 2>&1; then
-                        echo ""
-                        log_info "Current queue status:"
-                        display_queue_status
-                    fi
-                else
-                    log_error "Failed to add PR #$QUEUE_ITEM to queue"
-                    exit 1
-                fi
-            else
-                log_error "GitHub PR integration not available"
-                log_error "Please ensure GitHub integration modules are loaded and configured"
-                exit 1
-            fi
-            ;;
-            
-        "add_custom")
-            log_info "Adding custom task to queue: $QUEUE_ITEM"
-            
-            if declare -f add_task_to_queue >/dev/null 2>&1; then
-                local task_id
-                if task_id=$(add_task_to_queue "custom" "${TASK_DEFAULT_PRIORITY:-5}" "" "$QUEUE_ITEM"); then
-                    log_info "✓ Custom task added to queue successfully (Task ID: $task_id)"
-                    
-                    # Display queue status after adding
-                    if declare -f display_queue_status >/dev/null 2>&1; then
-                        echo ""
-                        log_info "Current queue status:"
-                        display_queue_status
-                    fi
-                else
-                    log_error "Failed to add custom task to queue"
-                    exit 1
-                fi
-            else
-                log_error "Task queue system not available"
-                log_error "Please ensure task queue module is loaded"
-                exit 1
-            fi
-            ;;
-            
-        "list_queue")
-            log_info "Displaying current task queue status"
-            
-            if declare -f display_queue_status >/dev/null 2>&1; then
-                echo ""
-                display_queue_status
-                echo ""
-                
-                # Additional queue statistics if available
-                if declare -f get_queue_statistics >/dev/null 2>&1; then
-                    local stats
-                    if stats=$(get_queue_statistics); then
-                        echo "Queue Statistics:"
-                        echo "$stats"
-                    fi
-                fi
-            else
-                log_error "Task queue system not available"
-                log_error "Please ensure task queue module is loaded"
-                exit 1
-            fi
-            ;;
-            
-        "clear_queue")
-            log_warn "Clearing entire task queue - this will remove ALL tasks"
-            echo ""
-            echo "⚠️  WARNING: This will permanently delete all tasks in the queue!"
-            echo "   This action cannot be undone."
-            echo ""
-            
-            # Show current queue before clearing
-            if declare -f display_queue_status >/dev/null 2>&1; then
-                echo "Current queue contents:"
-                display_queue_status
-                echo ""
-            fi
-            
-            read -p "Are you absolutely sure you want to clear the entire queue? (y/N): " -n 1 -r
-            echo ""
-            
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                if declare -f clear_task_queue >/dev/null 2>&1; then
-                    if clear_task_queue; then
-                        log_info "✓ Task queue cleared successfully"
-                    else
-                        log_error "Failed to clear task queue"
-                        exit 1
-                    fi
-                else
-                    log_error "Task queue system not available"
-                    exit 1
-                fi
-            else
-                log_info "Queue clearing cancelled - no changes made"
-            fi
-            ;;
-            
-        "pause_queue")
-            log_info "Pausing task queue processing"
-            
-            if declare -f pause_task_queue >/dev/null 2>&1; then
-                if pause_task_queue "manual_pause"; then
-                    log_info "✓ Task queue processing paused successfully"
-                else
-                    log_error "Failed to pause task queue"
-                    exit 1
-                fi
-            else
-                log_error "Task queue system not available"
-                exit 1
-            fi
-            ;;
-            
-        "resume_queue")
-            log_info "Resuming task queue processing"
-            
-            if declare -f resume_task_queue >/dev/null 2>&1; then
-                if resume_task_queue; then
-                    log_info "✓ Task queue processing resumed successfully"
-                else
-                    log_error "Failed to resume task queue"
-                    exit 1
-                fi
-            else
-                log_error "Task queue system not available"
-                exit 1
-            fi
-            ;;
-            
-        "skip_current")
-            log_info "Skipping current task"
-            
-            if declare -f skip_current_task >/dev/null 2>&1; then
-                if skip_current_task; then
-                    log_info "✓ Current task skipped successfully"
-                else
-                    log_error "Failed to skip current task (may not be running)"
-                    exit 1
-                fi
-            else
-                log_error "Task queue system not available"
-                exit 1
-            fi
-            ;;
-            
-        "retry_current")
-            log_info "Retrying current failed task"
-            
-            if declare -f retry_current_task >/dev/null 2>&1; then
-                if retry_current_task; then
-                    log_info "✓ Current task scheduled for retry"
-                else
-                    log_error "Failed to retry current task (may not be in failed state)"
-                    exit 1
-                fi
-            else
-                log_error "Task queue system not available"
-                exit 1
-            fi
-            ;;
-            
-        *)
-            log_error "Unknown queue action: $QUEUE_ACTION"
-            exit 1
-            ;;
-    esac
-}
-
-# ===============================================================================
-# SESSION ID MANAGEMENT OPERATIONS
-# ===============================================================================
-
-# Handle Session ID Management CLI Operations
-handle_session_id_operations() {
-    log_debug "Processing session ID management operations"
-    
-    # Initialize session display system
-    if declare -f init_clipboard >/dev/null 2>&1; then
-        init_clipboard
-    fi
-    
-    # Initialize session manager if needed
-    if declare -f init_session_manager >/dev/null 2>&1; then
-        init_session_manager "${SPECIFIED_CONFIG:-$CONFIG_FILE}"
-    fi
-    
-    local operation_handled=false
-    
-    # Handle --show-session-id / --show-full-session-id
-    if [[ "$SHOW_SESSION_ID" == "true" ]]; then
-        log_info "Displaying session ID information"
-        if declare -f show_current_session_id >/dev/null 2>&1; then
-            show_current_session_id "$MAIN_SESSION_ID" "$SHOW_FULL_SESSION_ID"
-            operation_handled=true
-        else
-            log_error "Session display functions not available"
-            echo "Error: Session display module not loaded"
-            return 1
-        fi
-    fi
-    
-    # Handle --copy-session-id
-    if [[ "$COPY_SESSION_ID" == "true" ]]; then
-        local target_session_id=""
-        
-        if [[ "$COPY_SESSION_TARGET" == "current" || -z "$COPY_SESSION_TARGET" ]]; then
-            if [[ -n "$MAIN_SESSION_ID" ]]; then
-                target_session_id="$MAIN_SESSION_ID"
-                log_info "Copying current session ID to clipboard"
-            else
-                log_error "No current session ID available"
-                echo "Error: No active session found to copy"
-                return 1
-            fi
-        else
-            target_session_id="$COPY_SESSION_TARGET"
-            log_info "Copying specified session ID to clipboard: $(shorten_session_id "$target_session_id" 20)"
-        fi
-        
-        if declare -f show_and_copy_session_id >/dev/null 2>&1; then
-            if show_and_copy_session_id "$target_session_id" true false; then
-                operation_handled=true
-            else
-                log_error "Failed to copy session ID"
-                return 1
-            fi
-        else
-            log_error "Session copy functions not available"
-            echo "Error: Session display module not loaded"
-            return 1
-        fi
-    fi
-    
-    # Handle --list-sessions
-    if [[ "$LIST_SESSIONS_MODE" == "true" ]]; then
-        log_info "Listing all active sessions"
-        if declare -f list_sessions_with_copy_options >/dev/null 2>&1; then
-            list_sessions_with_copy_options "table" true
-            operation_handled=true
-        else
-            log_error "Session listing functions not available"
-            echo "Error: Session display module not loaded"
-            return 1
-        fi
-    fi
-    
-    # Handle --resume-session
-    if [[ -n "$RESUME_SESSION_ID" ]]; then
-        log_info "Resuming session: $RESUME_SESSION_ID"
-        
-        # Verify session exists
-        if declare -f get_session_info >/dev/null 2>&1; then
-            if ! get_session_info "$RESUME_SESSION_ID" >/dev/null 2>&1; then
-                log_error "Session not found: $RESUME_SESSION_ID"
-                echo "Error: Session '$RESUME_SESSION_ID' not found"
-                
-                # Show available sessions
-                echo ""
-                echo "Available sessions:"
-                if declare -f list_sessions_with_copy_options >/dev/null 2>&1; then
-                    list_sessions_with_copy_options "list" false
-                fi
-                return 1
-            fi
-        fi
-        
-        # Set the session for resuming
-        MAIN_SESSION_ID="$RESUME_SESSION_ID"
-        log_info "Set session ID for resume: $MAIN_SESSION_ID"
-        echo "Resuming session: $(shorten_session_id "$MAIN_SESSION_ID" 30)"
-        operation_handled=true
-        
-        # Continue with normal monitoring for this session
-        # (Don't exit - let continuous mode handle the session)
-    fi
-    
-    if [[ "$operation_handled" == "false" ]]; then
-        log_warn "No session ID operations were handled"
-        return 1
-    fi
-    
-    return 0
 }
 
 # ===============================================================================
@@ -2372,6 +1072,16 @@ main() {
     # Lade Dependencies
     load_dependencies
     
+    # Handle Session Management Operations (these work even if task queue is unavailable)
+    if [[ "$LIST_SESSIONS" == "true" || "$SHOW_SESSION_ID" == "true" || "$SYSTEM_STATUS" == "true" ]]; then
+        handle_session_management_operations
+        # Exit after session operations unless in continuous mode
+        if [[ "$CONTINUOUS_MODE" != "true" && "$QUEUE_MODE" != "true" ]]; then
+            log_info "Session management operations completed"
+            exit 0
+        fi
+    fi
+    
     # Lade Task Queue Konfiguration
     load_task_queue_config
     
@@ -2381,16 +1091,6 @@ main() {
         # Exit nach Queue-Operationen falls nicht in continuous mode
         if [[ "$CONTINUOUS_MODE" != "true" && "$QUEUE_MODE" != "true" ]]; then
             log_info "Queue operations completed"
-            exit 0
-        fi
-    fi
-    
-    # Handle Session ID Management Operations (falls CLI-Parameter gesetzt)
-    if [[ "$SHOW_SESSION_ID" == "true" || "$COPY_SESSION_ID" == "true" || "$LIST_SESSIONS_MODE" == "true" || -n "$RESUME_SESSION_ID" ]]; then
-        handle_session_id_operations
-        # Exit nach Session-Operationen falls nicht in continuous mode
-        if [[ "$CONTINUOUS_MODE" != "true" ]]; then
-            log_info "Session ID operations completed"
             exit 0
         fi
     fi
@@ -2417,17 +1117,6 @@ main() {
     if ! validate_system_requirements; then
         log_error "System requirements not met - exiting"
         exit 1
-    fi
-    
-    # Handle immediate queue actions first (non-continuous mode)
-    if [[ -n "$QUEUE_ACTION" ]]; then
-        handle_queue_actions
-        
-        # If not in continuous mode, exit after handling the action
-        if [[ "$CONTINUOUS_MODE" == "false" ]]; then
-            log_info "Queue action completed - exiting"
-            exit 0
-        fi
     fi
     
     # Hauptfunktionalität ausführen

@@ -12,7 +12,7 @@ set -euo pipefail
 # ===============================================================================
 
 # Standard-Konfiguration (wird von config/default.conf überschrieben)
-TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-false}"
+# TASK_QUEUE_ENABLED will be loaded from config file - don't set a default here
 TASK_QUEUE_DIR="${TASK_QUEUE_DIR:-queue}"
 TASK_DEFAULT_TIMEOUT="${TASK_DEFAULT_TIMEOUT:-3600}"
 TASK_MAX_RETRIES="${TASK_MAX_RETRIES:-3}"
@@ -25,33 +25,50 @@ QUEUE_LOCK_TIMEOUT="${QUEUE_LOCK_TIMEOUT:-30}"
 
 # Task-State-Tracking (global associative arrays)
 # Initialize arrays at script load time to ensure availability in all contexts
+# Use fallback syntax for better compatibility
 if ! declare -p TASK_STATES >/dev/null 2>&1; then
-    declare -gA TASK_STATES
+    if ! declare -gA TASK_STATES 2>/dev/null; then
+        # Fallback for older bash versions
+        declare -A TASK_STATES
+    fi
 fi
 if ! declare -p TASK_METADATA >/dev/null 2>&1; then
-    declare -gA TASK_METADATA
+    if ! declare -gA TASK_METADATA 2>/dev/null; then
+        declare -A TASK_METADATA
+    fi
 fi
 if ! declare -p TASK_RETRY_COUNTS >/dev/null 2>&1; then
-    declare -gA TASK_RETRY_COUNTS
+    if ! declare -gA TASK_RETRY_COUNTS 2>/dev/null; then
+        declare -A TASK_RETRY_COUNTS
+    fi
 fi
 if ! declare -p TASK_TIMESTAMPS >/dev/null 2>&1; then
-    declare -gA TASK_TIMESTAMPS
+    if ! declare -gA TASK_TIMESTAMPS 2>/dev/null; then
+        declare -A TASK_TIMESTAMPS
+    fi
 fi
 if ! declare -p TASK_PRIORITIES >/dev/null 2>&1; then
-    declare -gA TASK_PRIORITIES
+    if ! declare -gA TASK_PRIORITIES 2>/dev/null; then
+        declare -A TASK_PRIORITIES
+    fi
 fi
 
 # Task-Status-Konstanten
-readonly TASK_STATE_PENDING="pending"
-readonly TASK_STATE_IN_PROGRESS="in_progress"
-readonly TASK_STATE_COMPLETED="completed"
-readonly TASK_STATE_FAILED="failed"
-readonly TASK_STATE_TIMEOUT="timeout"
+# Protect against re-sourcing - only declare readonly if not already set
+if [[ -z "${TASK_STATE_PENDING:-}" ]]; then
+    readonly TASK_STATE_PENDING="pending"
+    readonly TASK_STATE_IN_PROGRESS="in_progress"
+    readonly TASK_STATE_COMPLETED="completed"
+    readonly TASK_STATE_FAILED="failed"
+    readonly TASK_STATE_TIMEOUT="timeout"
+fi
 
 # Task-Typ-Konstanten
-readonly TASK_TYPE_GITHUB_ISSUE="github_issue"
-readonly TASK_TYPE_GITHUB_PR="github_pr"
-readonly TASK_TYPE_CUSTOM="custom"
+if [[ -z "${TASK_TYPE_GITHUB_ISSUE:-}" ]]; then
+    readonly TASK_TYPE_GITHUB_ISSUE="github_issue"
+    readonly TASK_TYPE_GITHUB_PR="github_pr"
+    readonly TASK_TYPE_CUSTOM="custom"
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN UND DEPENDENCIES
@@ -83,10 +100,8 @@ check_dependencies() {
         missing_deps+=("jq")
     fi
     
-    # flock is optional - we'll use alternative locking on systems without it
-    if ! has_command flock; then
-        log_warn "flock not available - using alternative file locking (may be less reliable)"
-    fi
+    # Using atomic directory-based locking (cross-platform reliable)
+    # No flock dependency required
     
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         log_error "Missing required dependencies: ${missing_deps[*]}"
@@ -185,115 +200,560 @@ validate_task_data() {
 }
 
 # ===============================================================================
-# FILE-LOCKING FÜR ATOMIC OPERATIONS
+# ENHANCED ATOMIC LOCKING SYSTEM - Phase 1 Implementation
 # ===============================================================================
 
-# Acquire queue lock für sichere Operationen
-acquire_queue_lock() {
-    local lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
-    local lock_fd=200
-    local attempts=0
-    local max_attempts=$((QUEUE_LOCK_TIMEOUT))
+# Comprehensive stale lock detection and cleanup
+# ===============================================================================
+# ENHANCED STALE LOCK DETECTION AND CLEANUP (Directory-Based System)
+# ===============================================================================
+
+# Enhanced stale lock cleanup with better timeout handling and graceful termination
+cleanup_stale_lock() {
+    local lock_dir="$1"
     
-    ensure_queue_directories || return 1
+    # No lock directory = nothing to clean
+    [[ -d "$lock_dir" ]] || return 0
     
-    if has_command flock; then
-        # Use flock if available (Linux)
-        exec 200>"$lock_file"
-        
-        if flock -x -w "$QUEUE_LOCK_TIMEOUT" 200; then
-            log_debug "Acquired queue lock (flock, fd: $lock_fd, timeout: ${QUEUE_LOCK_TIMEOUT}s)"
-            return 0
-        else
-            log_error "Failed to acquire queue lock within ${QUEUE_LOCK_TIMEOUT}s"
-            return 1
-        fi
+    local pid_file="$lock_dir/pid"
+    
+    # No PID file = invalid lock, clean it up
+    if [[ ! -f "$pid_file" ]]; then
+        log_debug "Lock has no PID file - cleaning up"
+        rm -rf "$lock_dir" 2>/dev/null
+        return 0
+    fi
+    
+    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    
+    # Empty PID = invalid lock, clean it up  
+    if [[ -z "$lock_pid" ]]; then
+        log_debug "Lock has empty PID - cleaning up"
+        rm -rf "$lock_dir" 2>/dev/null
+        return 0
+    fi
+    
+    # Check if process is still running
+    if ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_debug "Lock process $lock_pid is dead - cleaning up"
+        rm -rf "$lock_dir" 2>/dev/null
+        return 0
     else
-        # Alternative locking for macOS/systems without flock
-        local pid_file="$lock_file.pid"
-        
-        while [[ $attempts -lt $max_attempts ]]; do
-            # Check if lock file exists and is valid
-            if [[ -f "$pid_file" ]]; then
-                local lock_pid
-                lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-                
-                # Check if process is still running
-                if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-                    log_debug "Queue lock held by process $lock_pid (attempt $((attempts + 1))/$max_attempts)"
-                    sleep 1
-                    ((attempts++))
-                    continue
-                else
-                    log_debug "Removing stale lock file (pid: $lock_pid)"
-                    rm -f "$pid_file" "$lock_file" 2>/dev/null || true
-                fi
-            fi
-            
-            # Try to acquire lock
-            if (set -C; echo $$ > "$pid_file") 2>/dev/null; then
-                # Create main lock file
-                touch "$lock_file"
-                log_debug "Acquired queue lock (alternative method, pid: $$)"
-                return 0
-            else
-                log_debug "Failed to acquire lock, retrying... (attempt $((attempts + 1))/$max_attempts)"
-                sleep 1
-                ((attempts++))
-            fi
-        done
-        
-        log_error "Failed to acquire queue lock within ${max_attempts}s (alternative method)"
+        log_debug "Lock process $lock_pid is alive - not cleaning up"
         return 1
     fi
 }
 
-# Release queue lock
-release_queue_lock() {
-    local lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
-    local lock_fd=200
+# Clean up all stale locks in queue directory
+cleanup_all_stale_locks() {
+    local queue_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR"
+    local cleaned_count=0
+    local total_count=0
     
-    if has_command flock; then
-        # Release flock
-        flock -u 200 2>/dev/null || {
-            log_warn "Failed to release queue lock (may have been released already)"
-        }
-        
-        # Close file descriptor
-        exec 200>&- 2>/dev/null || true
-        
-        log_debug "Released queue lock (flock, fd: $lock_fd)"
-    else
-        # Release alternative lock
-        local pid_file="$lock_file.pid"
-        
-        if [[ -f "$pid_file" ]]; then
-            local lock_pid
-            lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-            
-            if [[ "$lock_pid" == "$$" ]]; then
-                rm -f "$pid_file" "$lock_file" 2>/dev/null || {
-                    log_warn "Failed to remove lock files"
-                }
-                log_debug "Released queue lock (alternative method, pid: $$)"
-            else
-                log_warn "Lock file belongs to different process: $lock_pid (current: $$)"
-            fi
-        else
-            log_debug "No lock file to release"
+    log_info "Scanning for stale locks in: $queue_dir"
+    
+    # Find all lock directories
+    while IFS= read -r -d '' lock_dir; do
+        ((total_count++))
+        if cleanup_stale_lock "$lock_dir"; then
+            ((cleaned_count++))
+            log_debug "Cleaned stale lock: $(basename "$lock_dir")"
         fi
+    done < <(find "$queue_dir" -name "*.lock.d" -type d -print0 2>/dev/null || true)
+    
+    if [[ $total_count -gt 0 ]]; then
+        log_info "Stale lock cleanup: $cleaned_count/$total_count locks cleaned"
+    else
+        log_debug "No lock directories found for cleanup"
+    fi
+    
+    return 0
+}
+
+# Validate lock directory integrity
+validate_lock_integrity() {
+    local lock_dir="$1"
+    local pid_file="$lock_dir/pid"
+    local timestamp_file="$lock_dir/timestamp"
+    local hostname_file="$lock_dir/hostname"
+    
+    # Check if lock directory exists
+    if [[ ! -d "$lock_dir" ]]; then
+        log_debug "Lock directory does not exist: $lock_dir"
+        return 1
+    fi
+    
+    # Check if required files exist
+    if [[ ! -f "$pid_file" ]]; then
+        log_debug "Missing PID file: $pid_file"
+        return 1
+    fi
+    
+    # Validate PID file content
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    if [[ ! "$lock_pid" =~ ^[0-9]+$ ]]; then
+        log_debug "Invalid PID in lock file: $lock_pid"
+        return 1
+    fi
+    
+    # Check timestamp file if it exists
+    if [[ -f "$timestamp_file" ]]; then
+        local timestamp
+        timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
+        if [[ -z "$timestamp" ]]; then
+            log_debug "Empty timestamp file: $timestamp_file"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Get detailed lock information for directory-based locks
+get_lock_info() {
+    local lock_dir="$1"
+    local pid_file="$lock_dir/pid"
+    local timestamp_file="$lock_dir/timestamp"
+    local hostname_file="$lock_dir/hostname"
+    local operation_file="$lock_dir/operation"
+    local user_file="$lock_dir/user"
+    
+    if [[ ! -d "$lock_dir" ]]; then
+        echo "No lock found"
+        return 1
+    fi
+    
+    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "unknown")
+    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "unknown")
+    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "unknown")
+    local lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
+    local lock_user=$(cat "$user_file" 2>/dev/null || echo "unknown")
+    
+    local age="unknown"
+    if [[ "$lock_timestamp" != "unknown" ]]; then
+        local current_time=$(date +%s)
+        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        if [[ $lock_time -gt 0 ]]; then
+            age=$((current_time - lock_time))
+        fi
+    fi
+    
+    local status="unknown"
+    if [[ "$lock_pid" != "unknown" ]]; then
+        if kill -0 "$lock_pid" 2>/dev/null; then
+            status="active"
+        else
+            status="stale"
+        fi
+    fi
+    
+    cat <<EOF
+Lock Information:
+  Directory: $(basename "$lock_dir")
+  PID: $lock_pid
+  Status: $status
+  Operation: $lock_operation
+  Age: ${age}s
+  Hostname: $lock_hostname
+  User: $lock_user
+  Timestamp: $lock_timestamp
+EOF
+}
+
+# Atomic directory-based lock acquisition
+acquire_queue_lock_atomic() {
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    local attempts=0
+    
+    # Clean up any stale locks first
+    cleanup_stale_lock "$lock_dir"
+    
+    # Multiple attempts with proper retry logic for atomic operations
+    local max_attempts=10
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            # Successfully acquired lock - write metadata
+            echo $$ > "$lock_dir/pid" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write PID to lock directory"
+                return 1
+            }
+            
+            date -Iseconds > "$lock_dir/timestamp" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write timestamp to lock directory"
+                return 1
+            }
+            
+            echo "$HOSTNAME" > "$lock_dir/hostname" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write hostname to lock directory"
+                return 1
+            }
+            
+            # Write additional metadata for enhanced cleanup
+            echo "$USER" > "$lock_dir/user" 2>/dev/null || true
+            echo "${1:-unknown}" > "$lock_dir/operation" 2>/dev/null || true
+            echo "${CLI_MODE:-false}" > "$lock_dir/cli_mode" 2>/dev/null || true
+            
+            log_debug "Acquired atomic queue lock (pid: $$, attempt: $attempts, operation: ${1:-unknown})"
+            return 0
+        fi
+        
+        # Stale lock cleanup before retry
+        if cleanup_stale_lock "$lock_dir"; then
+            log_debug "Successfully cleaned up stale lock, retrying immediately"
+            # Don't increment attempts counter for immediate retry after cleanup
+            continue
+        else
+            log_debug "Stale lock cleanup failed or lock is still valid"
+        fi
+        
+        # Exponential backoff with jitter
+        local base_delay=0.1
+        local delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
+        local jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
+        local wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
+        
+        # Cap wait time at 2 seconds for CLI operations
+        if [[ "${CLI_MODE:-false}" == "true" ]]; then
+            wait_time=$(echo "if ($wait_time > 1.0) 1.0 else $wait_time" | bc -l 2>/dev/null || echo "1")
+        fi
+        
+        log_debug "Lock attempt $((attempts + 1))/$max_attempts failed, waiting ${wait_time}s"
+        sleep "$wait_time" 2>/dev/null || sleep 1
+        
+        ((attempts++))
+    done
+    
+    # Final cleanup attempt before giving up
+    cleanup_stale_lock "$lock_dir"
+    
+    log_error "Failed to acquire atomic queue lock after $max_attempts attempts"
+    return 1
+}
+
+# Release atomic directory-based lock
+release_queue_lock_atomic() {
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    
+    if [[ -d "$lock_dir" ]]; then
+        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+        
+        if [[ "$lock_pid" == "$$" ]]; then
+            rm -rf "$lock_dir" 2>/dev/null && {
+                log_debug "Released atomic queue lock (pid: $$)"
+                return 0
+            } || {
+                log_warn "Failed to remove atomic lock directory"
+                return 1
+            }
+        else
+            log_warn "Attempted to release lock not owned by this process (lock pid: $lock_pid, current pid: $$)"
+            return 1
+        fi
+    else
+        log_debug "No atomic lock directory to release"
+        return 0
     fi
 }
 
-# Wrapper für sichere Queue-Operationen
+# ===============================================================================
+# FILE-LOCKING FÜR ATOMIC OPERATIONS - Updated to use Enhanced System
+# ===============================================================================
+
+# Acquire queue lock für sichere Operationen - always use atomic directory-based locking
+acquire_queue_lock() {
+    # Always use atomic directory-based locking for better cross-platform reliability
+    # This eliminates the need for flock and provides more robust locking
+    local result
+    acquire_queue_lock_atomic "$@"
+    result=$?
+    if [[ $result -ne 0 ]]; then
+        log_debug "acquire_queue_lock_atomic returned $result"
+    else
+        log_debug "acquire_queue_lock_atomic succeeded"
+    fi
+    return $result
+}
+
+# Release queue lock - always use atomic directory-based locking
+release_queue_lock() {
+    # Always use atomic directory-based locking for better cross-platform reliability
+    release_queue_lock_atomic "$@"
+}
+
+# Enhanced lock wrapper with monitoring and nested lock prevention
+with_queue_lock_enhanced() {
+    local operation="$1"
+    shift
+    local start_time=$(date +%s.%N 2>/dev/null || date +%s)
+    local result=0
+    
+    # Check if we already hold a lock (prevent nested locking)
+    if [[ "${QUEUE_LOCK_HELD:-false}" == "true" ]]; then
+        log_debug "Lock already held - executing $operation directly"
+        "$operation" "$@"
+        return $?
+    fi
+    
+    log_debug "Starting enhanced lock operation: $operation"
+    
+    export QUEUE_LOCK_HELD=true
+    
+    if acquire_queue_lock; then
+        # Execute operation with monitoring
+        local exec_start_time=$(date +%s.%N 2>/dev/null || date +%s)
+        "$operation" "$@"
+        result=$?
+        local exec_end_time=$(date +%s.%N 2>/dev/null || date +%s)
+        
+        # Log performance metrics if bc is available
+        if command -v bc >/dev/null 2>&1; then
+            local exec_duration=$(echo "$exec_end_time - $exec_start_time" | bc 2>/dev/null || echo "N/A")
+            log_debug "Operation $operation completed in ${exec_duration}s (exit code: $result)"
+        else
+            log_debug "Operation $operation completed (exit code: $result)"
+        fi
+        
+        # Always release lock
+        release_queue_lock
+        
+        if command -v bc >/dev/null 2>&1; then
+            local total_duration=$(echo "$(date +%s.%N 2>/dev/null || date +%s) - $start_time" | bc 2>/dev/null || echo "N/A")
+            log_debug "Total lock duration: ${total_duration}s"
+        fi
+        
+        export QUEUE_LOCK_HELD=false
+        return $result
+    else
+        log_error "Cannot execute operation without enhanced lock: $operation"
+        export QUEUE_LOCK_HELD=false
+        return 1
+    fi
+}
+
+# Legacy wrapper - now redirects to enhanced version for better compatibility
 with_queue_lock() {
+    with_queue_lock_enhanced "$@"
+}
+
+# ===============================================================================
+# SMART OPERATION ROUTING (Lock-Free Read Operations)
+# ===============================================================================
+
+# Check if an operation is read-only (doesn't modify state)
+is_read_only_operation() {
+    local op="$1"
+    case "$op" in
+        "list"|"status"|"enhanced-status"|"filter"|"find"|"export"|"config"|"stats"|"statistics"|"next"|"monitor")
+            return 0  # Read-only operations
+            ;;
+        "show_queue_status"|"show_enhanced_status"|"list_queue_tasks"|"get_queue_statistics"|"get_next_task"|"advanced_list_tasks"|"export_queue_data"|"monitor_queue_cmd"|"show_current_config")
+            return 0  # Internal read-only functions
+            ;;
+        *)
+            return 1  # State-changing operations
+            ;;
+    esac
+}
+
+# Direct JSON operations for read-only commands (no locking required)
+direct_json_operation() {
+    local operation="$1"
+    shift
+    
+    log_debug "Direct JSON operation: $operation"
+    
+    # Ensure directories exist
+    ensure_queue_directories || return 1
+    
+    # Initialize arrays if needed (but don't force full init)
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA  
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+        log_debug "Initialized arrays for direct JSON operation"
+    fi
+    
+    # Load state directly without locking
+    load_queue_state || {
+        log_error "Failed to load queue state for read operation"
+        return 1
+    }
+    
+    # Execute the read-only operation
+    "$operation" "$@"
+}
+
+# Direct JSON-based task listing (optimized for read operations)
+direct_json_list_tasks() {
+    local filter="${1:-all}"
+    local sort_order="${2:-priority}"
+    local queue_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+    
+    if [[ ! -f "$queue_file" ]]; then
+        echo "No tasks in queue"
+        return 0
+    fi
+    
+    # Use jq for efficient JSON filtering and sorting
+    case "$filter" in
+        "pending")
+            jq -r '.tasks[] | select(.status == "pending") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        "active")
+            jq -r '.tasks[] | select(.status == "active") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        "completed")
+            jq -r '.tasks[] | select(.status == "completed") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        "failed")
+            jq -r '.tasks[] | select(.status == "failed") | [.id, .type, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k3 -n
+            ;;
+        *)
+            jq -r '.tasks[] | [.id, .type, .status, .priority, .title // .description // "No description"] | @tsv' "$queue_file" | sort -k4 -n
+            ;;
+    esac
+}
+
+# Direct JSON status retrieval
+direct_json_get_status() {
+    local queue_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+    
+    if [[ ! -f "$queue_file" ]]; then
+        echo '{"status": "empty", "total_tasks": 0, "pending": 0, "active": 0, "completed": 0, "failed": 0}'
+        return 0
+    fi
+    
+    # Use jq for efficient status calculation
+    jq '{
+        status: (if .tasks | length > 0 then "active" else "empty" end),
+        total_tasks: (.tasks | length),
+        pending: (.tasks | map(select(.status == "pending")) | length),
+        active: (.tasks | map(select(.status == "active")) | length),  
+        completed: (.tasks | map(select(.status == "completed")) | length),
+        failed: (.tasks | map(select(.status == "failed")) | length),
+        last_updated: .metadata.last_updated
+    }' "$queue_file"
+}
+
+# Smart operation wrapper - routes operations based on read-only vs state-changing
+smart_operation_wrapper() {
+    local operation="$1"
+    shift
+    
+    if is_read_only_operation "$operation"; then
+        # Direct JSON access for read-only operations
+        log_debug "Using lock-free path for read-only operation: $operation"
+        direct_json_operation "$operation" "$@"
+    else
+        # Use robust locking for state-changing operations
+        log_debug "Using locked path for state-changing operation: $operation"
+        robust_lock_wrapper "$operation" "$@"
+    fi
+}
+
+# ===============================================================================
+# ROBUST LOCK ACQUISITION (Exponential Backoff & Operation-Specific Timeouts)
+# ===============================================================================
+
+# Get operation-specific timeout
+get_operation_timeout() {
+    local operation="$1"
+    case "$operation" in
+        "add_task_cmd"|"remove_task_cmd")         echo "10" ;;   # Quick operations  
+        "batch_add"|"batch_remove"|"batch_operation_cmd") echo "30" ;; # Batch operations need more time
+        "import_queue_data"|"clear_queue_cmd")    echo "60" ;;   # Heavy operations
+        "interactive"|"start_interactive_mode")   echo "5" ;;    # Interactive needs fast response
+        *)                                        echo "15" ;;   # Default timeout
+    esac
+}
+
+# Acquire lock with exponential backoff retry logic
+acquire_lock_with_backoff() {
+    local operation="$1"
+    local max_attempts=10
+    local base_delay=0.1
+    local max_delay=5.0
+    local attempt=1
+    local start_time=$(date +%s.%3N)
+    
+    # Get operation-specific timeout
+    local operation_timeout
+    operation_timeout=$(get_operation_timeout "$operation")
+    
+    # Override max_attempts based on timeout
+    max_attempts=$(( operation_timeout > 10 ? operation_timeout / 2 : 5 ))
+    
+    log_debug "Attempting to acquire lock for $operation (timeout: ${operation_timeout}s, max_attempts: $max_attempts)"
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        export LOCK_BACKOFF_MODE=true
+        if acquire_queue_lock; then
+            export LOCK_BACKOFF_MODE=false
+            local end_time=$(date +%s.%3N)
+            local wait_time=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "0")
+            log_debug "Lock acquired for $operation (attempt $attempt, wait: ${wait_time}s)"
+            return 0
+        fi
+        export LOCK_BACKOFF_MODE=false
+        
+        # Calculate exponential backoff with jitter
+        local delay
+        if command -v bc >/dev/null 2>&1; then
+            delay=$(echo "$base_delay * (2 ^ ($attempt - 1))" | bc -l 2>/dev/null)
+            if (( $(echo "$delay > $max_delay" | bc -l 2>/dev/null) )); then
+                delay=$max_delay
+            fi
+            
+            # Add random jitter (±25%)
+            local jitter_factor=$(echo "$RANDOM" | awk '{print $1/32767.0 * 0.5 + 0.75}')
+            delay=$(echo "$delay * $jitter_factor" | bc -l 2>/dev/null)
+        else
+            # Fallback without bc: simple doubling with cap
+            delay=$(( attempt < 5 ? attempt : 5 ))
+        fi
+        
+        log_debug "Lock acquisition failed for $operation (attempt $attempt/$max_attempts), retrying in ${delay}s"
+        
+        # Use sleep with decimal if supported, fallback to integer
+        if sleep "$delay" 2>/dev/null; then
+            : # decimal sleep worked
+        else
+            sleep "${delay%.*}" # fallback to integer part
+        fi
+        
+        ((attempt++))
+    done
+    
+    local end_time=$(date +%s.%3N) 
+    local total_wait=$(echo "$end_time - $start_time" | bc -l 2>/dev/null || echo "$operation_timeout")
+    log_error "Failed to acquire lock for $operation after $max_attempts attempts (${total_wait}s)"
+    export LOCK_BACKOFF_MODE=false
+    return 1
+}
+
+# Note: The old duplicate acquire_queue_lock_atomic function has been removed
+# The main atomic implementation is defined earlier at line 237
+
+# Enhanced robust lock wrapper
+robust_lock_wrapper() {
     local operation="$1"
     shift
     local result=0
+    local start_time=$(date +%s.%3N)
     
-    log_debug "Starting locked operation: $operation"
+    log_debug "Starting robust locked operation: $operation"
     
-    if acquire_queue_lock; then
+    if acquire_lock_with_backoff "$operation"; then
+        local acquire_time=$(date +%s.%3N)
+        local wait_time=$(echo "$acquire_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
         # Execute operation with lock held
         "$operation" "$@"
         result=$?
@@ -301,12 +761,280 @@ with_queue_lock() {
         # Always release lock
         release_queue_lock
         
-        log_debug "Completed locked operation: $operation (exit code: $result)"
+        local end_time=$(date +%s.%3N)
+        local hold_time=$(echo "$end_time - $acquire_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_debug "Completed robust locked operation: $operation (wait: ${wait_time}s, hold: ${hold_time}s, exit: $result)"
         return $result
     else
-        log_error "Cannot execute operation without lock: $operation"
+        local fail_time=$(date +%s.%3N)
+        local wait_time=$(echo "$fail_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_error "Cannot execute operation without lock: $operation (waited: ${wait_time}s)"
         return 1
     fi
+}
+
+# ===============================================================================
+# FINE-GRAINED LOCKING SYSTEM (Multiple Lock Types)
+# ===============================================================================
+
+# Define lock types for different operations
+declare -A LOCK_TYPES=(
+    ["read"]="queue/.read.lock.d"           # Read-only operations (may not be needed)
+    ["write"]="queue/.write.lock.d"         # Single task modifications  
+    ["batch"]="queue/.batch.lock.d"         # Batch operations
+    ["config"]="queue/.config.lock.d"       # Configuration changes
+    ["maintenance"]="queue/.maintenance.lock.d" # Cleanup/maintenance operations
+)
+
+# Get appropriate lock type for an operation
+get_operation_lock_type() {
+    local operation="$1"
+    case "$operation" in
+        "add_task_cmd"|"remove_task_cmd"|"update_status"|"update_priority"|"github_issue_cmd")   
+            echo "write" ;;
+        "batch_add"|"batch_remove"|"batch_operation_cmd"|"import_queue_data")                
+            echo "batch" ;;
+        "clear_queue_cmd"|"cleanup_cmd")                                  
+            echo "maintenance" ;;
+        "config_set"|"config_reset"|"show_current_config")                        
+            echo "config" ;;
+        *)                                                  
+            echo "write" ;;  # Default to write lock
+    esac
+}
+
+# Acquire typed lock for specific operation
+acquire_typed_lock() {
+    local operation="$1"
+    local lock_type
+    lock_type=$(get_operation_lock_type "$operation")
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
+    
+    log_debug "Acquiring $lock_type lock for operation: $operation"
+    
+    # Ensure lock directory parent exists
+    mkdir -p "$(dirname "$lock_dir")" 2>/dev/null || {
+        log_error "Failed to create lock directory parent: $(dirname "$lock_dir")"
+        return 1
+    }
+    
+    # Use similar logic to acquire_queue_lock_atomic but with typed locks
+    local attempts=0
+    local max_attempts=$([[ "${CLI_MODE:-false}" == "true" ]] && echo 5 || echo "$QUEUE_LOCK_TIMEOUT")
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            # Successfully acquired typed lock - write metadata
+            echo $$ > "$lock_dir/pid" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write PID to typed lock directory"
+                return 1
+            }
+            
+            date -Iseconds > "$lock_dir/timestamp" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write timestamp to typed lock directory"
+                return 1
+            }
+            
+            echo "$HOSTNAME" > "$lock_dir/hostname" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write hostname to typed lock directory"
+                return 1
+            }
+            
+            # Write additional metadata
+            echo "$USER" > "$lock_dir/user" 2>/dev/null || true
+            echo "$operation" > "$lock_dir/operation" 2>/dev/null || true
+            echo "$lock_type" > "$lock_dir/lock_type" 2>/dev/null || true
+            echo "${CLI_MODE:-false}" > "$lock_dir/cli_mode" 2>/dev/null || true
+            
+            log_debug "Acquired $lock_type lock (pid: $$, attempt: $attempts, operation: $operation)"
+            return 0
+        fi
+        
+        # Stale lock cleanup before retry
+        cleanup_stale_lock "$lock_dir"
+        
+        # Exponential backoff with jitter (same as atomic lock)
+        local base_delay=0.1
+        local delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
+        local jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
+        local wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
+        
+        # Cap wait time for CLI operations
+        if [[ "${CLI_MODE:-false}" == "true" ]]; then
+            wait_time=$(echo "if ($wait_time > 1.0) 1.0 else $wait_time" | bc -l 2>/dev/null || echo "1")
+        fi
+        
+        log_debug "$lock_type lock attempt $((attempts + 1))/$max_attempts failed, waiting ${wait_time}s"
+        sleep "$wait_time" 2>/dev/null || sleep 1
+        
+        ((attempts++))
+    done
+    
+    log_error "Failed to acquire $lock_type lock after $max_attempts attempts: $operation"
+    return 1
+}
+
+# Release typed lock
+release_typed_lock() {
+    local operation="$1"
+    local lock_type
+    lock_type=$(get_operation_lock_type "$operation")
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
+    
+    if [[ -d "$lock_dir" ]]; then
+        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+        
+        if [[ "$lock_pid" == "$$" ]]; then
+            rm -rf "$lock_dir" 2>/dev/null && {
+                log_debug "Released $lock_type lock (pid: $$, operation: $operation)"
+                return 0
+            } || {
+                log_warn "Failed to remove $lock_type lock directory"
+                return 1
+            }
+        else
+            log_warn "Attempted to release $lock_type lock not owned by this process (lock pid: $lock_pid, current pid: $$)"
+            return 1
+        fi
+    else
+        log_debug "No $lock_type lock directory to release"
+        return 0
+    fi
+}
+
+# Fine-grained lock wrapper for operations
+with_typed_lock() {
+    local operation="$1"
+    shift
+    local result=0
+    local start_time=$(date +%s.%3N 2>/dev/null || date +%s)
+    
+    log_debug "Starting typed locked operation: $operation"
+    
+    if acquire_typed_lock "$operation"; then
+        local acquire_time=$(date +%s.%3N 2>/dev/null || date +%s)
+        local wait_time=$(echo "$acquire_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        # Execute operation with typed lock held
+        "$operation" "$@"
+        result=$?
+        
+        # Always release typed lock
+        release_typed_lock "$operation"
+        
+        local end_time=$(date +%s.%3N 2>/dev/null || date +%s)
+        local hold_time=$(echo "$end_time - $acquire_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_debug "Completed typed locked operation: $operation (wait: ${wait_time}s, hold: ${hold_time}s, exit: $result)"
+        return $result
+    else
+        local fail_time=$(date +%s.%3N 2>/dev/null || date +%s)
+        local wait_time=$(echo "$fail_time - $start_time" | bc -l 2>/dev/null || echo "0")
+        
+        log_error "Cannot execute operation without typed lock: $operation (waited: ${wait_time}s)"
+        return 1
+    fi
+}
+
+# Check for lock conflicts (different lock types that might conflict)
+check_lock_conflicts() {
+    local requested_type="$1"
+    local conflicting_types=()
+    
+    case "$requested_type" in
+        "maintenance")
+            # Maintenance conflicts with everything
+            conflicting_types=("write" "batch" "config" "read")
+            ;;
+        "batch")
+            # Batch operations conflict with write and maintenance
+            conflicting_types=("write" "maintenance")
+            ;;
+        "write")
+            # Write operations conflict with batch and maintenance
+            conflicting_types=("batch" "maintenance")
+            ;;
+        "config")
+            # Config changes conflict with maintenance
+            conflicting_types=("maintenance")
+            ;;
+        *)
+            # Default: no conflicts (read operations)
+            conflicting_types=()
+            ;;
+    esac
+    
+    # Check if any conflicting locks exist
+    for conflict_type in "${conflicting_types[@]}"; do
+        local conflict_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$conflict_type]}"
+        if [[ -d "$conflict_dir" ]]; then
+            # Validate that the conflicting lock is still active
+            if validate_lock_integrity "$conflict_dir"; then
+                local conflict_pid=$(cat "$conflict_dir/pid" 2>/dev/null || echo "")
+                if [[ -n "$conflict_pid" ]] && kill -0 "$conflict_pid" 2>/dev/null; then
+                    log_debug "Lock conflict detected: $requested_type conflicts with active $conflict_type lock (PID: $conflict_pid)"
+                    return 1  # Conflict exists
+                fi
+            fi
+        fi
+    done
+    
+    return 0  # No conflicts
+}
+
+# Show all active typed locks
+show_typed_locks() {
+    local queue_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/queue"
+    local found_locks=false
+    
+    echo "=== Active Typed Locks ==="
+    
+    for lock_type in "${!LOCK_TYPES[@]}"; do
+        local lock_dir="$queue_dir/${LOCK_TYPES[$lock_type]#queue/}"
+        if [[ -d "$lock_dir" ]]; then
+            found_locks=true
+            echo "[$lock_type]"
+            get_lock_info "$lock_dir" | sed 's/^/  /'
+            echo
+        fi
+    done
+    
+    if [[ "$found_locks" == "false" ]]; then
+        echo "No active typed locks found"
+    fi
+}
+
+# Clean up all typed locks
+cleanup_all_typed_locks() {
+    local queue_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/queue"
+    local cleaned_count=0
+    local total_count=0
+    
+    log_info "Scanning for stale typed locks in: $queue_dir"
+    
+    for lock_type in "${!LOCK_TYPES[@]}"; do
+        local lock_dir="$queue_dir/${LOCK_TYPES[$lock_type]#queue/}"
+        if [[ -d "$lock_dir" ]]; then
+            ((total_count++))
+            if cleanup_stale_lock "$lock_dir"; then
+                ((cleaned_count++))
+                log_debug "Cleaned stale $lock_type lock"
+            fi
+        fi
+    done
+    
+    if [[ $total_count -gt 0 ]]; then
+        log_info "Stale typed lock cleanup: $cleaned_count/$total_count locks cleaned"
+    else
+        log_debug "No typed lock directories found for cleanup"
+    fi
+    
+    return 0
 }
 
 # ===============================================================================
@@ -640,14 +1368,18 @@ add_task_to_queue() {
     validate_task_data "$task_type" "$priority" || return 1
     log_debug "Passed validate_task_data"
     
-    # Ensure arrays are initialized before accessing them
+    # Ensure arrays are initialized - caller should have loaded queue state
+    log_debug "About to check if TASK_STATES is declared"
     if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        log_debug "TASK_STATES not declared, initializing arrays"
         declare -gA TASK_STATES
         declare -gA TASK_METADATA
         declare -gA TASK_RETRY_COUNTS
         declare -gA TASK_TIMESTAMPS
         declare -gA TASK_PRIORITIES
         log_debug "Initialized arrays in add_task_to_queue"
+    else
+        log_debug "TASK_STATES already declared"
     fi
     log_debug "Arrays are available"
     
@@ -691,7 +1423,11 @@ add_task_to_queue() {
         fi
     else
         # Normal environment - use array
-        current_size=${#TASK_STATES[@]}
+        if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} ]] 2>/dev/null; then
+            current_size=${#TASK_STATES[@]}
+        else
+            current_size=0
+        fi
     fi
     
     if [[ ${TASK_QUEUE_MAX_SIZE:-0} -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then
@@ -733,6 +1469,11 @@ add_task_to_queue() {
         
         ((i += 2))
     done
+    
+    # Save queue state to persist the new task
+    save_queue_state || {
+        log_warn "Failed to save queue state after adding task $task_id"
+    }
     
     log_info "Task added to queue: $task_id ($task_type, priority=$priority)"
     echo "$task_id"  # Return task ID for caller
@@ -938,9 +1679,12 @@ list_queue_tasks() {
     log_debug "Listing tasks (filter: $status_filter, sort: $sort_by)"
     
     local task_count=0
-    # Check if TASK_STATES has elements for listing
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
-        task_count=${#TASK_STATES[@]}
+    # Check if TASK_STATES has elements for listing (safe array access)
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        # Safe way to check array size for potentially uninitialized associative array
+        if [[ "${TASK_STATES[*]:-}" ]]; then
+            task_count=${#TASK_STATES[@]}
+        fi
     fi
     
     if [[ $task_count -eq 0 ]]; then
@@ -1463,7 +2207,16 @@ cleanup_old_backups() {
 init_task_queue() {
     local config_file="${1:-config/default.conf}"
     
+    # Get script directory for proper path resolution
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Use proper path resolution like hybrid-monitor.sh
+    if [[ ! -f "$config_file" ]]; then
+        config_file="$script_dir/../$config_file"
+    fi
+    
     log_info "Initializing task queue system"
+    log_debug "Using config file: $config_file"
     
     # Check dependencies first
     check_dependencies || {
@@ -1477,14 +2230,14 @@ init_task_queue() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove surrounding quotes and trim whitespace
+            value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"\(.*\)"$/\1/;s/^\047\(.*\)\047$/\1/')
             
             case "$key" in
                 TASK_QUEUE_ENABLED|TASK_QUEUE_DIR|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|TASK_QUEUE_MAX_SIZE|TASK_AUTO_CLEANUP_DAYS|TASK_BACKUP_RETENTION_DAYS|QUEUE_LOCK_TIMEOUT)
-                    # Only set from config if not already set in environment
-                    if [[ -z "${!key:-}" ]]; then
-                        eval "$key='$value'"
-                    fi
+                    # Always set from config - config file should take precedence over defaults
+                    eval "$key='$value'"
+                    log_debug "Config loaded: $key='$value'"
                     ;;
             esac
         done < <(grep -E '^[^#]*=' "$config_file" || true)
@@ -1493,7 +2246,7 @@ init_task_queue() {
     fi
     
     # Check if task queue is enabled
-    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
         log_warn "Task queue is disabled in configuration"
         return 1
     fi
@@ -1523,17 +2276,120 @@ init_task_queue() {
     
     log_info "Task queue system initialized successfully"
     local task_count=0
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
-        task_count=${#TASK_STATES[@]}
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        # Safe way to get array size for potentially uninitialized associative array
+        if [[ "${TASK_STATES[*]:-}" ]]; then
+            task_count=${#TASK_STATES[@]}
+        fi
     fi
     log_info "Queue state: $task_count tasks loaded"
     
     return 0
 }
 
+# Read-only initialization without locking for CLI operations
+init_task_queue_readonly() {
+    local config_file="${1:-config/default.conf}"
+    
+    log_debug "Initializing task queue system (readonly mode)"
+    
+    # Load configuration (but preserve environment variables)
+    if [[ -f "$config_file" ]]; then
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            
+            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            
+            case "$key" in
+                TASK_QUEUE_ENABLED|TASK_QUEUE_DIR|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|TASK_QUEUE_MAX_SIZE|TASK_AUTO_CLEANUP_DAYS|TASK_BACKUP_RETENTION_DAYS|QUEUE_LOCK_TIMEOUT)
+                    # Only set from config if not already set in environment
+                    if [[ -z "${!key:-}" ]]; then
+                        eval "$key='$value'"
+                    fi
+                    ;;
+            esac
+        done < <(grep -E '^[^#]*=' "$config_file" || true)
+        
+        log_debug "Task queue configured from: $config_file (readonly)"
+    fi
+    
+    # Check if task queue is enabled
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
+        log_debug "Task queue is disabled in configuration"
+        return 1
+    fi
+    
+    # Ensure directories exist
+    ensure_queue_directories || {
+        log_error "Failed to create queue directories"
+        return 1
+    }
+    
+    # Initialize arrays from JSON without acquiring locks
+    if [[ -f "$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json" ]]; then
+        load_queue_state_readonly
+        return $?
+    else
+        # Initialize empty arrays
+        declare -gA TASK_METADATA=()
+        declare -gA TASK_STATES=()
+        declare -ga TASK_QUEUE=()
+        declare -gA TASK_RETRY_COUNTS=()
+        declare -gA TASK_TIMESTAMPS=()
+        declare -gA TASK_PRIORITIES=()
+        log_debug "Initialized empty task arrays (readonly)"
+        return 0
+    fi
+}
+
+# Load queue state from JSON file without locking (read-only)
+load_queue_state_readonly() {
+    local queue_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+    
+    if [[ ! -f "$queue_file" ]]; then
+        log_debug "No existing queue file found: $queue_file (readonly)"
+        return 0
+    fi
+    
+    log_debug "Loading queue state from: $queue_file (readonly)"
+    
+    # Validate JSON first
+    if ! jq empty "$queue_file" 2>/dev/null; then
+        log_error "Queue file contains invalid JSON: $queue_file"
+        return 1
+    fi
+    
+    # Initialize empty arrays
+    declare -gA TASK_STATES=()
+    declare -gA TASK_METADATA=()
+    declare -ga TASK_QUEUE=()
+    declare -gA TASK_RETRY_COUNTS=()
+    declare -gA TASK_TIMESTAMPS=()
+    declare -gA TASK_PRIORITIES=()
+    
+    # Load tasks from JSON
+    while IFS=$'\t' read -r task_id status priority created metadata retry_count; do
+        [[ -z "$task_id" ]] && continue
+        
+        TASK_STATES["$task_id"]="$status"
+        TASK_PRIORITIES["$task_id"]="$priority"
+        TASK_TIMESTAMPS["$task_id"]="$created"
+        TASK_RETRY_COUNTS["$task_id"]="${retry_count:-0}"
+        TASK_METADATA["$task_id"]="$metadata"
+        TASK_QUEUE+=("$task_id")
+        
+    done < <(jq -r '.tasks[]? | [.id, .status, .priority, .created, (.metadata | tostring), (.retry_count // 0)] | @tsv' "$queue_file" 2>/dev/null)
+    
+    local task_count=${#TASK_STATES[@]}
+    log_debug "Loaded $task_count tasks from queue (readonly)"
+    
+    return 0
+}
+
 # Task-Queue-Status anzeigen
 show_queue_status() {
-    if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
         echo "Task Queue: DISABLED"
         return 0
     fi
@@ -1553,74 +2409,1869 @@ show_queue_status() {
 }
 
 # ===============================================================================
+# CLI OPERATION WRAPPER (für Array-Persistenz)
+# ===============================================================================
+
+# Enhanced CLI operation wrapper with deadlock prevention
+cli_operation_wrapper() {
+    local operation="$1"
+    shift
+    
+    # Check if we already hold a lock (prevent nested locking)
+    if [[ "${QUEUE_LOCK_HELD:-false}" == "true" ]]; then
+        log_debug "Lock already held - executing $operation directly"
+        "$operation" "$@"
+        return $?
+    fi
+    
+    export CLI_MODE=true
+    export QUEUE_LOCK_HELD=false
+    
+    # Initialize without locking (use read-only methods)
+    init_task_queue_readonly || {
+        log_error "Failed to initialize task queue for CLI operation"
+        export CLI_MODE=false
+        return 1
+    }
+    
+    log_debug "CLI Operation: $operation with args: $*"
+    
+    # Execute with smart operation routing (lock-free for reads, robust locking for writes)
+    local result
+    smart_operation_wrapper "$operation" "$@"
+    result=$?
+    
+    export CLI_MODE=false
+    export QUEUE_LOCK_HELD=false
+    return $result
+}
+
+# CLI Command Implementations (mit verbesserter Fehlerbehandlung)
+# Wrapper that loads queue state before adding task
+add_task_with_state_load() {
+    # Load queue state first
+    load_queue_state || {
+        log_debug "Failed to load queue state, initializing empty state"
+        declare -gA TASK_STATES
+        declare -gA TASK_METADATA
+        declare -gA TASK_RETRY_COUNTS
+        declare -gA TASK_TIMESTAMPS
+        declare -gA TASK_PRIORITIES
+    }
+    
+    # Now add the task
+    add_task_to_queue "$@"
+}
+
+add_task_cmd() {
+    if [[ $# -ge 2 ]]; then
+        local task_id
+        # Note: This function is called within a locked context by cli_operation_wrapper
+        # so we don't need with_queue_lock here
+        task_id=$(add_task_with_state_load "$1" "$2" "${3:-}" "${@:4}")
+        if [[ $? -eq 0 && -n "$task_id" ]]; then
+            echo "Task added: $task_id"
+            return 0
+        else
+            echo "Failed to add task" >&2
+            return 1
+        fi
+    else
+        echo "Usage: add <type> <priority> [task_id] [metadata...]" >&2
+        return 1
+    fi
+}
+
+remove_task_cmd() {
+    if [[ $# -ge 1 ]]; then
+        if with_queue_lock remove_task_from_queue "$1"; then
+            echo "Task removed: $1"
+            return 0
+        else
+            echo "Failed to remove task: $1" >&2
+            return 1
+        fi
+    else
+        echo "Usage: remove <task_id>" >&2
+        return 1
+    fi
+}
+
+clear_queue_cmd() {
+    if with_queue_lock clear_task_queue; then
+        echo "Queue cleared"
+        return 0
+    else
+        echo "Failed to clear queue" >&2
+        return 1
+    fi
+}
+
+github_issue_cmd() {
+    if [[ $# -ge 1 ]]; then
+        local task_id
+        task_id=$(with_queue_lock create_github_issue_task "$1" "${2:-5}" "${3:-}" "${4:-}")
+        if [[ $? -eq 0 && -n "$task_id" ]]; then
+            echo "GitHub issue task added: $task_id"
+            return 0
+        else
+            echo "Failed to add GitHub issue task" >&2
+            return 1
+        fi
+    else
+        echo "Usage: github-issue <number> [priority] [title] [labels]" >&2
+        return 1
+    fi
+}
+
+cleanup_cmd() {
+    with_queue_lock cleanup_old_tasks
+    with_queue_lock cleanup_old_backups
+    echo "Cleanup completed"
+    return 0
+}
+
+# Status-only operations (no state changes, load-only)
+status_cmd() {
+    show_queue_status
+}
+
+list_tasks_cmd() {
+    list_queue_tasks "${1:-all}" "${2:-priority}"
+}
+
+stats_cmd() {
+    get_queue_statistics
+}
+
+# ===============================================================================
+# ENHANCED STATUS DASHBOARD
+# ===============================================================================
+
+# Erweiterte Status-Anzeige mit Farben und detaillierteren Informationen
+show_enhanced_status() {
+    local use_colors="${1:-true}"
+    local output_format="${2:-text}" # text, json, compact
+    
+    if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
+        if [[ "$output_format" == "json" ]]; then
+            echo '{"status": "disabled", "message": "Task Queue is disabled"}'
+        else
+            echo "Task Queue: DISABLED"
+        fi
+        return 0
+    fi
+    
+    # Color definitions
+    local RED='' GREEN='' YELLOW='' BLUE='' CYAN='' RESET=''
+    if [[ "$use_colors" == "true" ]] && [[ -t 1 ]]; then
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        YELLOW='\033[0;33m'
+        BLUE='\033[0;34m'
+        CYAN='\033[0;36m'
+        RESET='\033[0m'
+    fi
+    
+    # Gather statistics
+    local total_tasks=0 pending_tasks=0 active_tasks=0 completed_tasks=0 failed_tasks=0
+    local task_id
+    
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        for task_id in "${!TASK_STATES[@]}"; do
+            case "${TASK_STATES[$task_id]}" in
+                "$TASK_STATE_PENDING") ((pending_tasks++)) ;;
+                "$TASK_STATE_IN_PROGRESS") ((active_tasks++)) ;;
+                "$TASK_STATE_COMPLETED") ((completed_tasks++)) ;;
+                "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") ((failed_tasks++)) ;;
+            esac
+            ((total_tasks++))
+        done
+    fi
+    
+    if [[ "$output_format" == "json" ]]; then
+        cat <<EOF
+{
+  "status": "enabled",
+  "queue_directory": "$PROJECT_ROOT/$TASK_QUEUE_DIR",
+  "configuration": {
+    "max_queue_size": $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "null" || echo $TASK_QUEUE_MAX_SIZE),
+    "default_timeout": $TASK_DEFAULT_TIMEOUT,
+    "max_retries": $TASK_MAX_RETRIES,
+    "auto_cleanup_days": $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo $TASK_AUTO_CLEANUP_DAYS || echo "null")
+  },
+  "statistics": {
+    "total_tasks": $total_tasks,
+    "pending_tasks": $pending_tasks,
+    "active_tasks": $active_tasks,
+    "completed_tasks": $completed_tasks,
+    "failed_tasks": $failed_tasks
+  },
+  "health_status": "$(get_queue_health_status)"
+}
+EOF
+        return 0
+    fi
+    
+    if [[ "$output_format" == "compact" ]]; then
+        printf "Queue: %d total (%s%d pending%s, %s%d active%s, %s%d completed%s, %s%d failed%s)\n" \
+            $total_tasks \
+            "$YELLOW" $pending_tasks "$RESET" \
+            "$BLUE" $active_tasks "$RESET" \
+            "$GREEN" $completed_tasks "$RESET" \
+            "$RED" $failed_tasks "$RESET"
+        return 0
+    fi
+    
+    # Default detailed text output
+    echo -e "${CYAN}=== Enhanced Task Queue Status ===${RESET}"
+    echo "Queue Directory: $PROJECT_ROOT/$TASK_QUEUE_DIR"
+    echo "Max Queue Size: $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "unlimited" || echo $TASK_QUEUE_MAX_SIZE)"
+    echo "Default Timeout: ${TASK_DEFAULT_TIMEOUT}s"
+    echo "Max Retries: $TASK_MAX_RETRIES"
+    echo "Auto Cleanup: $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo "${TASK_AUTO_CLEANUP_DAYS} days" || echo "disabled")"
+    echo ""
+    
+    echo -e "${CYAN}=== Task Statistics ===${RESET}"
+    printf "Total Tasks:     %d\n" $total_tasks
+    printf "${YELLOW}Pending:         %d${RESET}\n" $pending_tasks
+    printf "${BLUE}Active:          %d${RESET}\n" $active_tasks
+    printf "${GREEN}Completed:       %d${RESET}\n" $completed_tasks
+    printf "${RED}Failed/Timeout:  %d${RESET}\n" $failed_tasks
+    echo ""
+    
+    # Health status
+    local health_status
+    health_status=$(get_queue_health_status)
+    case "$health_status" in
+        "healthy")
+            echo -e "Health Status: ${GREEN}HEALTHY${RESET}"
+            ;;
+        "warning")
+            echo -e "Health Status: ${YELLOW}WARNING${RESET}"
+            ;;
+        "critical")
+            echo -e "Health Status: ${RED}CRITICAL${RESET}"
+            ;;
+        *)
+            echo -e "Health Status: ${YELLOW}UNKNOWN${RESET}"
+            ;;
+    esac
+    echo ""
+    
+    # Recent activity (last 5 tasks)
+    if [[ $total_tasks -gt 0 ]]; then
+        echo -e "${CYAN}=== Recent Tasks (Last 5) ===${RESET}"
+        list_queue_tasks "all" "created" "5"
+    fi
+}
+
+# Bestimme Queue Health Status
+get_queue_health_status() {
+    local total_tasks=0 failed_tasks=0 active_tasks=0
+    local task_id
+    
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        for task_id in "${!TASK_STATES[@]}"; do
+            case "${TASK_STATES[$task_id]}" in
+                "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") ((failed_tasks++)) ;;
+                "$TASK_STATE_IN_PROGRESS") ((active_tasks++)) ;;
+            esac
+            ((total_tasks++))
+        done
+    fi
+    
+    # Health logic
+    if [[ $total_tasks -eq 0 ]]; then
+        echo "healthy"
+    elif [[ $failed_tasks -gt 0 ]] && [[ $((failed_tasks * 100 / total_tasks)) -gt 20 ]]; then
+        echo "critical"
+    elif [[ $active_tasks -gt 5 ]] || [[ $failed_tasks -gt 0 ]]; then
+        echo "warning"
+    else
+        echo "healthy"
+    fi
+}
+
+# ===============================================================================
+# INTERACTIVE MODE
+# ===============================================================================
+
+# Interactive Mode mit Real-time Queue Management
+start_interactive_mode() {
+    echo "=== Task Queue Interactive Mode ==="
+    echo "Type 'help' for commands, 'quit' to exit"
+    echo ""
+    
+    # Set up readline if available
+    if command -v read >/dev/null 2>&1; then
+        local readline_available=true
+    else
+        local readline_available=false
+    fi
+    
+    while true; do
+        # Load current state for fresh status
+        load_queue_state >/dev/null 2>&1 || true
+        
+        # Show current status in prompt
+        local pending_count=0 active_count=0 total_count=0
+        if declare -p TASK_STATES >/dev/null 2>&1; then
+            local task_id
+            for task_id in "${!TASK_STATES[@]}"; do
+                case "${TASK_STATES[$task_id]}" in
+                    "$TASK_STATE_PENDING") ((pending_count++)) ;;
+                    "$TASK_STATE_IN_PROGRESS") ((active_count++)) ;;
+                esac
+                ((total_count++))
+            done
+        fi
+        
+        # Color-coded prompt
+        if [[ -t 1 ]]; then
+            printf "\n\033[0;36m[%d total, \033[0;33m%d pending\033[0;36m, \033[0;34m%d active\033[0;36m]\033[0m > " \
+                "$total_count" "$pending_count" "$active_count"
+        else
+            printf "\n[%d total, %d pending, %d active] > " "$total_count" "$pending_count" "$active_count"
+        fi
+        
+        # Read command
+        local command args
+        if [[ "$readline_available" == "true" ]]; then
+            read -r -e command args
+        else
+            read -r command args
+        fi
+        
+        # Skip empty commands
+        [[ -z "$command" ]] && continue
+        
+        # Process command
+        case "$command" in
+            "help"|"h"|"?")
+                show_interactive_help
+                ;;
+            "status"|"s")
+                show_enhanced_status "true" "compact"
+                ;;
+            "list"|"l")
+                list_queue_tasks ${args:-all} priority
+                ;;
+            "add"|"a")
+                if [[ -n "$args" ]]; then
+                    # Parse args for add command
+                    local add_args=($args)
+                    if [[ ${#add_args[@]} -ge 2 ]]; then
+                        cli_operation_wrapper add_task_cmd "${add_args[@]}"
+                    else
+                        echo "Usage: add <type> <priority> [task_id] [metadata...]"
+                    fi
+                else
+                    echo "Usage: add <type> <priority> [task_id] [metadata...]"
+                fi
+                ;;
+            "remove"|"rm"|"r")
+                if [[ -n "$args" ]]; then
+                    cli_operation_wrapper remove_task_cmd $args
+                else
+                    echo "Usage: remove <task_id>"
+                fi
+                ;;
+            "clear")
+                echo "Are you sure you want to clear all tasks? (y/N)"
+                read -r confirmation
+                if [[ "$confirmation" =~ ^[Yy]$ ]]; then
+                    cli_operation_wrapper clear_queue_cmd
+                else
+                    echo "Clear cancelled"
+                fi
+                ;;
+            "github"|"gh"|"g")
+                if [[ -n "$args" ]]; then
+                    local gh_args=($args)
+                    cli_operation_wrapper github_issue_cmd "${gh_args[@]}"
+                else
+                    echo "Usage: github <issue_number> [priority] [title] [labels]"
+                fi
+                ;;
+            "stats"|"statistics")
+                get_queue_statistics
+                ;;
+            "refresh"|"reload")
+                echo "Reloading queue state..."
+                load_queue_state && echo "Queue reloaded successfully" || echo "Failed to reload queue"
+                ;;
+            "cleanup")
+                echo "Running cleanup..."
+                cli_operation_wrapper cleanup_cmd
+                ;;
+            "quit"|"q"|"exit")
+                echo "Exiting interactive mode..."
+                break
+                ;;
+            "next"|"n")
+                get_next_task
+                ;;
+            "config"|"cfg")
+                show_current_config
+                ;;
+            *)
+                echo "Unknown command: '$command'. Type 'help' for available commands."
+                ;;
+        esac
+    done
+}
+
+# Hilfe für Interactive Mode
+show_interactive_help() {
+    cat <<EOF
+=== Interactive Mode Commands ===
+
+Queue Management:
+  list, l [status] [sort]     List tasks (status: all|pending|active|completed|failed)
+  add, a <type> <priority>    Add new task to queue
+  remove, rm, r <task_id>     Remove task from queue
+  clear                       Clear all tasks (with confirmation)
+  
+GitHub Integration:
+  github, gh, g <number>      Add GitHub issue task
+  
+Queue Operations:
+  status, s                   Show compact queue status
+  stats, statistics           Show detailed queue statistics
+  next, n                     Get next task for processing
+  cleanup                     Clean up old tasks and backups
+  
+System:
+  config, cfg                 Show current configuration
+  refresh, reload             Reload queue state from disk
+  help, h, ?                  Show this help
+  quit, q, exit               Exit interactive mode
+
+Examples:
+  add custom 1 "" description "Fix login bug" command "fix-login.sh"
+  github 123 2
+  remove task-1234567890-0001
+  list pending priority
+
+Tips:
+- Tab completion supported where available
+- Command history with arrow keys
+- Status shown in prompt: [total, pending, active]
+EOF
+}
+
+# ===============================================================================
+# BATCH OPERATIONS
+# ===============================================================================
+
+# Batch-Operation für mehrere Tasks
+batch_operation_cmd() {
+    local operation="${1:-add}"
+    local source_type="${2:-stdin}"
+    local source_path="${3:-}"
+    
+    case "$operation" in
+        "add")
+            batch_add_tasks "$source_type" "$source_path" "${@:4}"
+            ;;
+        "remove")
+            batch_remove_tasks "$source_type" "$source_path"
+            ;;
+        *)
+            echo "Usage: batch <add|remove> <stdin|file> [path] [additional_args...]" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Batch Task Addition
+batch_add_tasks() {
+    local source_type="$1"
+    local source_path="$2"
+    local task_type="${3:-custom}"
+    local default_priority="${4:-5}"
+    
+    local input_source
+    local temp_file=""
+    local line_count=0
+    local success_count=0
+    local error_count=0
+    
+    # Determine input source
+    case "$source_type" in
+        "stdin")
+            if [[ -t 0 ]]; then
+                echo "Reading from stdin (press Ctrl+D when done):"
+            fi
+            input_source="/dev/stdin"
+            ;;
+        "file")
+            if [[ -z "$source_path" ]] || [[ ! -f "$source_path" ]]; then
+                echo "Error: File path required and must exist for file source" >&2
+                return 1
+            fi
+            input_source="$source_path"
+            ;;
+        *)
+            echo "Error: Invalid source type. Use 'stdin' or 'file'" >&2
+            return 1
+            ;;
+    esac
+    
+    echo "Starting batch task addition..."
+    echo "Task Type: $task_type, Default Priority: $default_priority"
+    echo ""
+    
+    # Process each line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        ((line_count++))
+        
+        # Parse line - support different formats
+        local parsed_task_type="$task_type"
+        local parsed_priority="$default_priority"
+        local parsed_description=""
+        local task_id=""
+        
+        if [[ "$line" =~ ^[0-9]+$ ]]; then
+            # GitHub issue number only
+            parsed_task_type="$TASK_TYPE_GITHUB_ISSUE"
+            parsed_description="Issue #$line"
+            task_id=$(with_queue_lock create_github_issue_task "$line" "$parsed_priority" "" "")
+        elif [[ "$line" =~ ^[0-9]+,(.+)$ ]]; then
+            # GitHub issue with description: "123,Fix login bug"
+            local issue_num="${line%%,*}"
+            parsed_description="${line#*,}"
+            parsed_task_type="$TASK_TYPE_GITHUB_ISSUE"
+            task_id=$(with_queue_lock create_github_issue_task "$issue_num" "$parsed_priority" "$parsed_description" "")
+        elif [[ "$line" =~ ^([^,]+),([0-9]+),(.+)$ ]]; then
+            # Full format: "type,priority,description"
+            parsed_task_type="${BASH_REMATCH[1]}"
+            parsed_priority="${BASH_REMATCH[2]}"
+            parsed_description="${BASH_REMATCH[3]}"
+            task_id=$(with_queue_lock add_task_to_queue "$parsed_task_type" "$parsed_priority" "" "description" "$parsed_description")
+        else
+            # Simple description only
+            parsed_description="$line"
+            task_id=$(with_queue_lock add_task_to_queue "$parsed_task_type" "$parsed_priority" "" "description" "$parsed_description")
+        fi
+        
+        if [[ $? -eq 0 && -n "$task_id" ]]; then
+            ((success_count++))
+            echo "✓ Added task $success_count/$line_count: $task_id ($parsed_description)"
+        else
+            ((error_count++))
+            echo "✗ Failed to add task $line_count: $line" >&2
+        fi
+        
+        # Progress indicator for large batches
+        if [[ $((line_count % 10)) -eq 0 ]]; then
+            echo "   Processed $line_count lines..."
+        fi
+    done < "$input_source"
+    
+    # Save state after batch operation
+    if [[ $success_count -gt 0 ]]; then
+        with_queue_lock save_queue_state
+    fi
+    
+    # Summary
+    echo ""
+    echo "=== Batch Operation Complete ==="
+    echo "Lines processed: $line_count"
+    echo "Tasks added successfully: $success_count"
+    echo "Errors: $error_count"
+    
+    if [[ $error_count -gt 0 ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Batch Task Removal
+batch_remove_tasks() {
+    local source_type="$1"
+    local source_path="$2"
+    
+    local input_source
+    local line_count=0
+    local success_count=0
+    local error_count=0
+    
+    # Determine input source
+    case "$source_type" in
+        "stdin")
+            if [[ -t 0 ]]; then
+                echo "Reading task IDs from stdin (press Ctrl+D when done):"
+            fi
+            input_source="/dev/stdin"
+            ;;
+        "file")
+            if [[ -z "$source_path" ]] || [[ ! -f "$source_path" ]]; then
+                echo "Error: File path required and must exist for file source" >&2
+                return 1
+            fi
+            input_source="$source_path"
+            ;;
+        *)
+            echo "Error: Invalid source type. Use 'stdin' or 'file'" >&2
+            return 1
+            ;;
+    esac
+    
+    echo "Starting batch task removal..."
+    echo ""
+    
+    # Process each line
+    while IFS= read -r task_id || [[ -n "$task_id" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$task_id" || "$task_id" =~ ^[[:space:]]*# ]] && continue
+        
+        # Clean whitespace
+        task_id=$(echo "$task_id" | tr -d ' \t\r\n')
+        
+        ((line_count++))
+        
+        if with_queue_lock remove_task_from_queue "$task_id"; then
+            ((success_count++))
+            echo "✓ Removed task $success_count/$line_count: $task_id"
+        else
+            ((error_count++))
+            echo "✗ Failed to remove task $line_count: $task_id" >&2
+        fi
+    done < "$input_source"
+    
+    # Save state after batch operation
+    if [[ $success_count -gt 0 ]]; then
+        with_queue_lock save_queue_state
+    fi
+    
+    # Summary
+    echo ""
+    echo "=== Batch Operation Complete ==="
+    echo "Task IDs processed: $line_count"
+    echo "Tasks removed successfully: $success_count"
+    echo "Errors: $error_count"
+    
+    if [[ $error_count -gt 0 ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
+# ADVANCED FILTERING AND QUERY SYSTEM
+# ===============================================================================
+
+# Advanced list command with filtering capabilities
+advanced_list_tasks() {
+    local filter_status=""
+    local filter_priority=""
+    local filter_type=""
+    local filter_date_after=""
+    local filter_date_before=""
+    local filter_text=""
+    local sort_by="priority"
+    local output_format="text"
+    local limit=""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --status=*) filter_status="${1#*=}" ;;
+            --priority=*) filter_priority="${1#*=}" ;;
+            --type=*) filter_type="${1#*=}" ;;
+            --created-after=*) filter_date_after="${1#*=}" ;;
+            --created-before=*) filter_date_before="${1#*=}" ;;
+            --search=*) filter_text="${1#*=}" ;;
+            --sort=*) sort_by="${1#*=}" ;;
+            --format=*) output_format="${1#*=}" ;;
+            --limit=*) limit="${1#*=}" ;;
+            --json) output_format="json" ;;
+            --help)
+                show_filter_help
+                return 0
+                ;;
+            *) echo "Unknown filter option: $1" >&2; return 1 ;;
+        esac
+        shift
+    done
+    
+    # Collect all task IDs that match filters
+    local matching_tasks=()
+    local task_id
+    
+    if ! declare -p TASK_STATES >/dev/null 2>&1; then
+        if [[ "$output_format" == "json" ]]; then
+            echo '{"tasks": [], "count": 0}'
+        else
+            echo "No tasks found"
+        fi
+        return 0
+    fi
+    
+    for task_id in "${!TASK_STATES[@]}"; do
+        # Apply filters
+        if ! task_matches_filters "$task_id" "$filter_status" "$filter_priority" "$filter_type" "$filter_date_after" "$filter_date_before" "$filter_text"; then
+            continue
+        fi
+        
+        matching_tasks+=("$task_id")
+    done
+    
+    # Sort tasks
+    case "$sort_by" in
+        "priority") sort_tasks_by_priority matching_tasks ;;
+        "created") sort_tasks_by_date matching_tasks ;;
+        "status") sort_tasks_by_status matching_tasks ;;
+        *) log_warn "Unknown sort option: $sort_by, using priority" ;;
+    esac
+    
+    # Apply limit
+    if [[ -n "$limit" && "$limit" -gt 0 ]]; then
+        local temp_array=()
+        local i
+        for ((i=0; i<limit && i<${#matching_tasks[@]}; i++)); do
+            temp_array+=("${matching_tasks[$i]}")
+        done
+        matching_tasks=("${temp_array[@]}")
+    fi
+    
+    # Output results
+    if [[ "$output_format" == "json" ]]; then
+        output_filtered_tasks_json matching_tasks
+    else
+        output_filtered_tasks_text matching_tasks
+    fi
+}
+
+# Check if task matches all specified filters
+task_matches_filters() {
+    local task_id="$1"
+    local filter_status="$2"
+    local filter_priority="$3"
+    local filter_type="$4"
+    local filter_date_after="$5"
+    local filter_date_before="$6"
+    local filter_text="$7"
+    
+    # Status filter
+    if [[ -n "$filter_status" ]]; then
+        local current_status="${TASK_STATES[$task_id]:-}"
+        if [[ "$filter_status" == *","* ]]; then
+            # Multiple statuses
+            local status_list="${filter_status//,/|}"
+            if ! [[ "$current_status" =~ ^($status_list)$ ]]; then
+                return 1
+            fi
+        else
+            # Single status
+            if [[ "$current_status" != "$filter_status" ]]; then
+                return 1
+            fi
+        fi
+    fi
+    
+    # Priority filter
+    if [[ -n "$filter_priority" ]]; then
+        local current_priority="${TASK_PRIORITIES[$task_id]:-5}"
+        if [[ "$filter_priority" == *"-"* ]]; then
+            # Range: "1-3"
+            local min_priority="${filter_priority%-*}"
+            local max_priority="${filter_priority#*-}"
+            if [[ "$current_priority" -lt "$min_priority" ]] || [[ "$current_priority" -gt "$max_priority" ]]; then
+                return 1
+            fi
+        else
+            # Exact match
+            if [[ "$current_priority" != "$filter_priority" ]]; then
+                return 1
+            fi
+        fi
+    fi
+    
+    # Type filter
+    if [[ -n "$filter_type" ]]; then
+        local current_metadata="${TASK_METADATA[$task_id]:-}"
+        if ! echo "$current_metadata" | grep -q "\"type\":\"$filter_type\""; then
+            return 1
+        fi
+    fi
+    
+    # Date filters (basic implementation - could be enhanced)
+    if [[ -n "$filter_date_after" ]]; then
+        local task_timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        local filter_timestamp
+        filter_timestamp=$(date -d "$filter_date_after" +%s 2>/dev/null) || filter_timestamp=0
+        if [[ "$task_timestamp" -le "$filter_timestamp" ]]; then
+            return 1
+        fi
+    fi
+    
+    if [[ -n "$filter_date_before" ]]; then
+        local task_timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        local filter_timestamp
+        filter_timestamp=$(date -d "$filter_date_before" +%s 2>/dev/null) || filter_timestamp=999999999999
+        if [[ "$task_timestamp" -ge "$filter_timestamp" ]]; then
+            return 1
+        fi
+    fi
+    
+    # Text search filter
+    if [[ -n "$filter_text" ]]; then
+        local current_metadata="${TASK_METADATA[$task_id]:-}"
+        if ! echo "$current_metadata" | grep -qi "$filter_text"; then
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Sort tasks by priority
+sort_tasks_by_priority() {
+    local -n task_array=$1
+    local temp_file="/tmp/task_sort_$$"
+    
+    # Create sortable list
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        printf "%02d %s\n" "$priority" "$task_id" >> "$temp_file"
+    done
+    
+    # Sort and extract task IDs
+    task_array=()
+    while read -r priority task_id; do
+        task_array+=("$task_id")
+    done < <(sort -n "$temp_file")
+    
+    rm -f "$temp_file"
+}
+
+# Sort tasks by creation date
+sort_tasks_by_date() {
+    local -n task_array=$1
+    local temp_file="/tmp/task_sort_$$"
+    
+    # Create sortable list
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        printf "%s %s\n" "$timestamp" "$task_id" >> "$temp_file"
+    done
+    
+    # Sort and extract task IDs (newest first)
+    task_array=()
+    while read -r timestamp task_id; do
+        task_array+=("$task_id")
+    done < <(sort -rn "$temp_file")
+    
+    rm -f "$temp_file"
+}
+
+# Sort tasks by status
+sort_tasks_by_status() {
+    local -n task_array=$1
+    local temp_file="/tmp/task_sort_$$"
+    
+    # Create sortable list with status priority
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        local status="${TASK_STATES[$task_id]:-pending}"
+        local sort_priority
+        case "$status" in
+            "$TASK_STATE_IN_PROGRESS") sort_priority="1" ;;
+            "$TASK_STATE_PENDING") sort_priority="2" ;;
+            "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") sort_priority="3" ;;
+            "$TASK_STATE_COMPLETED") sort_priority="4" ;;
+            *) sort_priority="5" ;;
+        esac
+        printf "%s %s\n" "$sort_priority" "$task_id" >> "$temp_file"
+    done
+    
+    # Sort and extract task IDs
+    task_array=()
+    while read -r sort_priority task_id; do
+        task_array+=("$task_id")
+    done < <(sort -n "$temp_file")
+    
+    rm -f "$temp_file"
+}
+
+# Output filtered tasks in JSON format
+output_filtered_tasks_json() {
+    local -n task_array=$1
+    local task_count=${#task_array[@]}
+    
+    echo "{"
+    echo "  \"count\": $task_count,"
+    echo "  \"tasks\": ["
+    
+    local i
+    for ((i=0; i<${#task_array[@]}; i++)); do
+        local task_id="${task_array[$i]}"
+        local status="${TASK_STATES[$task_id]:-unknown}"
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        local metadata="${TASK_METADATA[$task_id]:-{}}"
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        
+        echo "    {"
+        echo "      \"id\": \"$task_id\","
+        echo "      \"status\": \"$status\","
+        echo "      \"priority\": $priority,"
+        echo "      \"timestamp\": $timestamp,"
+        echo "      \"metadata\": $metadata"
+        if [[ $i -lt $((${#task_array[@]} - 1)) ]]; then
+            echo "    },"
+        else
+            echo "    }"
+        fi
+    done
+    
+    echo "  ]"
+    echo "}"
+}
+
+# Output filtered tasks in text format
+output_filtered_tasks_text() {
+    local -n task_array=$1
+    local task_count=${#task_array[@]}
+    
+    if [[ $task_count -eq 0 ]]; then
+        echo "No tasks match the specified filters"
+        return 0
+    fi
+    
+    echo "=== Filtered Tasks ($task_count found) ==="
+    echo ""
+    
+    local task_id
+    for task_id in "${task_array[@]}"; do
+        display_task_details "$task_id"
+        echo ""
+    done
+}
+
+# Display detailed task information
+display_task_details() {
+    local task_id="$1"
+    local status="${TASK_STATES[$task_id]:-unknown}"
+    local priority="${TASK_PRIORITIES[$task_id]:-5}"
+    local metadata="${TASK_METADATA[$task_id]:-{}}"
+    local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+    
+    # Color coding
+    local status_color=""
+    local reset_color=""
+    if [[ -t 1 ]]; then
+        case "$status" in
+            "$TASK_STATE_PENDING") status_color='\033[0;33m' ;;
+            "$TASK_STATE_IN_PROGRESS") status_color='\033[0;34m' ;;
+            "$TASK_STATE_COMPLETED") status_color='\033[0;32m' ;;
+            "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") status_color='\033[0;31m' ;;
+        esac
+        reset_color='\033[0m'
+    fi
+    
+    # Format timestamp
+    local formatted_date=""
+    if [[ "$timestamp" != "0" ]] && command -v date >/dev/null 2>&1; then
+        formatted_date=$(date -d "@$timestamp" "+%Y-%m-%d %H:%M" 2>/dev/null) || formatted_date="$timestamp"
+    else
+        formatted_date="$timestamp"
+    fi
+    
+    # Extract description from metadata
+    local description=""
+    if echo "$metadata" | jq -e '.description' >/dev/null 2>&1; then
+        description=$(echo "$metadata" | jq -r '.description' 2>/dev/null) || description=""
+    fi
+    
+    printf "ID: %s\n" "$task_id"
+    printf "Status: ${status_color}%s${reset_color}\n" "$status"
+    printf "Priority: %s\n" "$priority"
+    printf "Created: %s\n" "$formatted_date"
+    if [[ -n "$description" ]]; then
+        printf "Description: %s\n" "$description"
+    fi
+}
+
+# Show filter help
+show_filter_help() {
+    cat <<EOF
+=== Advanced Task Filtering ===
+
+Usage: filter [OPTIONS]
+
+Filter Options:
+  --status=STATUS          Filter by status (pending,in_progress,completed,failed,timeout)
+                           Multiple: --status=pending,in_progress
+  --priority=PRIORITY      Filter by priority (1-10) or range (1-3)
+  --type=TYPE             Filter by task type (github_issue,custom,github_pr)
+  --created-after=DATE    Filter tasks created after date (YYYY-MM-DD)
+  --created-before=DATE   Filter tasks created before date (YYYY-MM-DD)
+  --search=TEXT           Search in task descriptions and metadata
+
+Sort Options:
+  --sort=FIELD            Sort by: priority, created, status
+
+Output Options:
+  --format=FORMAT         Output format: text, json
+  --json                  JSON output (shorthand)
+  --limit=N               Limit results to N tasks
+
+Examples:
+  filter --status=pending --priority=1-3
+  filter --type=github_issue --created-after=2025-08-01
+  filter --search="bug fix" --sort=created --limit=5
+  filter --status=pending,in_progress --json
+EOF
+}
+
+# ===============================================================================
+# EXPORT/IMPORT SYSTEM
+# ===============================================================================
+
+# Export queue data to file or stdout
+export_queue_data() {
+    local export_format="${1:-json}"
+    local output_file="${2:-}"
+    local filter_args=("${@:3}")
+    
+    case "$export_format" in
+        "json")
+            export_queue_json "$output_file" "${filter_args[@]}"
+            ;;
+        "csv")
+            export_queue_csv "$output_file" "${filter_args[@]}"
+            ;;
+        *)
+            echo "Error: Unsupported export format: $export_format" >&2
+            echo "Supported formats: json, csv" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Export queue as JSON
+export_queue_json() {
+    local output_file="${1:-}"
+    local filter_args=("${@:2}")
+    
+    # Generate export data
+    local export_data
+    export_data=$(generate_export_json "${filter_args[@]}")
+    
+    # Output to file or stdout
+    if [[ -n "$output_file" ]]; then
+        echo "$export_data" > "$output_file" || {
+            echo "Error: Failed to write to $output_file" >&2
+            return 1
+        }
+        echo "Queue exported to: $output_file"
+    else
+        echo "$export_data"
+    fi
+}
+
+# Export queue as CSV
+export_queue_csv() {
+    local output_file="${1:-}"
+    local filter_args=("${@:2}")
+    
+    # Generate CSV header
+    local csv_data="ID,Status,Priority,Type,Created,Description"
+    
+    # Get filtered tasks if filters are specified
+    local task_list=()
+    if [[ ${#filter_args[@]} -gt 0 ]]; then
+        # Apply filters (reuse filtering system)
+        # This is a simplified version - in a full implementation,
+        # we'd integrate with the filtering system properly
+        local task_id
+        for task_id in "${!TASK_STATES[@]}"; do
+            task_list+=("$task_id")
+        done
+    else
+        # All tasks
+        local task_id
+        for task_id in "${!TASK_STATES[@]}"; do
+            task_list+=("$task_id")
+        done
+    fi
+    
+    # Generate CSV rows
+    local task_id
+    for task_id in "${task_list[@]}"; do
+        local status="${TASK_STATES[$task_id]:-unknown}"
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        local metadata="${TASK_METADATA[$task_id]:-{}}"
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        
+        # Extract type and description from metadata
+        local task_type=""
+        local description=""
+        if echo "$metadata" | jq -e '.' >/dev/null 2>&1; then
+            task_type=$(echo "$metadata" | jq -r '.type // "custom"' 2>/dev/null) || task_type="custom"
+            description=$(echo "$metadata" | jq -r '.description // ""' 2>/dev/null) || description=""
+        fi
+        
+        # Format timestamp
+        local formatted_date=""
+        if [[ "$timestamp" != "0" ]] && command -v date >/dev/null 2>&1; then
+            formatted_date=$(date -d "@$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null) || formatted_date="$timestamp"
+        else
+            formatted_date="$timestamp"
+        fi
+        
+        # Escape CSV fields
+        description="${description//\"/\"\"}"
+        if [[ "$description" == *,* ]] || [[ "$description" == *\"* ]]; then
+            description="\"$description\""
+        fi
+        
+        csv_data+=$'\n'"$task_id,$status,$priority,$task_type,$formatted_date,$description"
+    done
+    
+    # Output to file or stdout
+    if [[ -n "$output_file" ]]; then
+        echo "$csv_data" > "$output_file" || {
+            echo "Error: Failed to write to $output_file" >&2
+            return 1
+        }
+        echo "Queue exported to CSV: $output_file"
+    else
+        echo "$csv_data"
+    fi
+}
+
+# Generate comprehensive JSON export
+generate_export_json() {
+    local filter_args=("$@")
+    
+    # Get export metadata
+    local export_timestamp=$(date -Iseconds)
+    local total_tasks=0
+    local task_count_by_status='{}'
+    
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        total_tasks=${#TASK_STATES[@]}
+        
+        # Count tasks by status
+        local pending=0 active=0 completed=0 failed=0
+        local task_id
+        for task_id in "${!TASK_STATES[@]}"; do
+            case "${TASK_STATES[$task_id]}" in
+                "$TASK_STATE_PENDING") ((pending++)) ;;
+                "$TASK_STATE_IN_PROGRESS") ((active++)) ;;
+                "$TASK_STATE_COMPLETED") ((completed++)) ;;
+                "$TASK_STATE_FAILED"|"$TASK_STATE_TIMEOUT") ((failed++)) ;;
+            esac
+        done
+        
+        task_count_by_status=$(cat <<EOF
+{
+  "pending": $pending,
+  "in_progress": $active,
+  "completed": $completed,
+  "failed": $failed
+}
+EOF
+        )
+    fi
+    
+    # Generate export JSON
+    cat <<EOF
+{
+  "export_metadata": {
+    "version": "1.0",
+    "timestamp": "$export_timestamp",
+    "total_tasks": $total_tasks,
+    "task_counts": $task_count_by_status,
+    "source_system": "claude-auto-resume-task-queue"
+  },
+  "configuration": {
+    "TASK_QUEUE_ENABLED": "$TASK_QUEUE_ENABLED",
+    "TASK_DEFAULT_TIMEOUT": $TASK_DEFAULT_TIMEOUT,
+    "TASK_MAX_RETRIES": $TASK_MAX_RETRIES,
+    "TASK_QUEUE_MAX_SIZE": $TASK_QUEUE_MAX_SIZE
+  },
+  "tasks": [
+$(generate_tasks_json_array)
+  ]
+}
+EOF
+}
+
+# Generate JSON array for all tasks
+generate_tasks_json_array() {
+    local task_list=()
+    local task_id
+    
+    # Collect all task IDs
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        for task_id in "${!TASK_STATES[@]}"; do
+            task_list+=("$task_id")
+        done
+    fi
+    
+    # Generate JSON for each task
+    local i
+    for ((i=0; i<${#task_list[@]}; i++)); do
+        task_id="${task_list[$i]}"
+        local status="${TASK_STATES[$task_id]:-unknown}"
+        local priority="${TASK_PRIORITIES[$task_id]:-5}"
+        local metadata="${TASK_METADATA[$task_id]:-{}}"
+        local timestamp="${TASK_TIMESTAMPS[$task_id]:-0}"
+        local retry_count="${TASK_RETRY_COUNTS[$task_id]:-0}"
+        
+        echo "    {"
+        echo "      \"id\": \"$task_id\","
+        echo "      \"status\": \"$status\","
+        echo "      \"priority\": $priority,"
+        echo "      \"timestamp\": $timestamp,"
+        echo "      \"retry_count\": $retry_count,"
+        echo "      \"metadata\": $metadata"
+        if [[ $i -lt $((${#task_list[@]} - 1)) ]]; then
+            echo "    },"
+        else
+            echo "    }"
+        fi
+    done
+}
+
+# Import queue data from file
+import_queue_data() {
+    local import_file="$1"
+    local import_mode="${2:-merge}" # merge, replace, validate
+    
+    if [[ ! -f "$import_file" ]]; then
+        echo "Error: Import file not found: $import_file" >&2
+        return 1
+    fi
+    
+    # Validate JSON first
+    if ! jq empty "$import_file" 2>/dev/null; then
+        echo "Error: Import file contains invalid JSON: $import_file" >&2
+        return 1
+    fi
+    
+    case "$import_mode" in
+        "validate")
+            validate_import_file "$import_file"
+            ;;
+        "replace")
+            import_with_replace "$import_file"
+            ;;
+        "merge")
+            import_with_merge "$import_file"
+            ;;
+        *)
+            echo "Error: Invalid import mode: $import_mode" >&2
+            echo "Supported modes: validate, merge, replace" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Validate import file structure
+validate_import_file() {
+    local import_file="$1"
+    
+    echo "Validating import file: $import_file"
+    
+    # Check required structure
+    local required_fields=("export_metadata" "tasks")
+    local field
+    for field in "${required_fields[@]}"; do
+        if ! jq -e ".$field" "$import_file" >/dev/null 2>&1; then
+            echo "✗ Missing required field: $field"
+            return 1
+        fi
+    done
+    
+    # Validate tasks array
+    local task_count
+    task_count=$(jq -r '.tasks | length' "$import_file" 2>/dev/null) || task_count=0
+    echo "✓ Found $task_count tasks in import file"
+    
+    # Check task structure
+    if [[ $task_count -gt 0 ]]; then
+        local first_task_valid
+        first_task_valid=$(jq -e '.tasks[0] | has("id") and has("status") and has("priority")' "$import_file" 2>/dev/null)
+        if [[ "$first_task_valid" == "true" ]]; then
+            echo "✓ Task structure appears valid"
+        else
+            echo "✗ Invalid task structure detected"
+            return 1
+        fi
+    fi
+    
+    # Check export metadata
+    local export_version
+    export_version=$(jq -r '.export_metadata.version' "$import_file" 2>/dev/null)
+    echo "✓ Export version: $export_version"
+    
+    local export_timestamp
+    export_timestamp=$(jq -r '.export_metadata.timestamp' "$import_file" 2>/dev/null)
+    echo "✓ Export timestamp: $export_timestamp"
+    
+    echo "Import file validation completed successfully"
+    return 0
+}
+
+# Import with merge mode (add new, update existing)
+import_with_merge() {
+    local import_file="$1"
+    
+    echo "Importing queue data (merge mode) from: $import_file"
+    
+    # Validate first
+    if ! validate_import_file "$import_file"; then
+        echo "Import aborted due to validation errors"
+        return 1
+    fi
+    
+    # Create backup before import
+    local backup_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/backups/pre-import-$(date +%Y%m%d-%H%M%S).json"
+    if ! with_queue_lock save_queue_state; then
+        echo "Warning: Could not create backup before import"
+    else
+        cp "$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json" "$backup_file" 2>/dev/null || true
+        echo "Backup created: $backup_file"
+    fi
+    
+    # Import tasks
+    local imported_count=0
+    local updated_count=0
+    local error_count=0
+    
+    # Process each task from import file
+    while read -r task_json; do
+        local task_id priority status metadata timestamp retry_count
+        
+        task_id=$(echo "$task_json" | jq -r '.id' 2>/dev/null) || continue
+        priority=$(echo "$task_json" | jq -r '.priority // 5' 2>/dev/null) || priority=5
+        status=$(echo "$task_json" | jq -r '.status' 2>/dev/null) || status="pending"
+        metadata=$(echo "$task_json" | jq -c '.metadata // {}' 2>/dev/null) || metadata="{}"
+        timestamp=$(echo "$task_json" | jq -r '.timestamp // 0' 2>/dev/null) || timestamp=0
+        retry_count=$(echo "$task_json" | jq -r '.retry_count // 0' 2>/dev/null) || retry_count=0
+        
+        # Check if task exists
+        if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+            # Update existing task
+            TASK_STATES[$task_id]="$status"
+            TASK_PRIORITIES[$task_id]="$priority"
+            TASK_METADATA[$task_id]="$metadata"
+            TASK_TIMESTAMPS[$task_id]="$timestamp"
+            TASK_RETRY_COUNTS[$task_id]="$retry_count"
+            ((updated_count++))
+            echo "Updated task: $task_id"
+        else
+            # Add new task
+            TASK_STATES[$task_id]="$status"
+            TASK_PRIORITIES[$task_id]="$priority"
+            TASK_METADATA[$task_id]="$metadata"
+            TASK_TIMESTAMPS[$task_id]="$timestamp"
+            TASK_RETRY_COUNTS[$task_id]="$retry_count"
+            ((imported_count++))
+            echo "Imported task: $task_id"
+        fi
+    done < <(jq -c '.tasks[]' "$import_file" 2>/dev/null)
+    
+    # Save updated state
+    if with_queue_lock save_queue_state; then
+        echo ""
+        echo "=== Import Summary ==="
+        echo "New tasks imported: $imported_count"
+        echo "Existing tasks updated: $updated_count"
+        echo "Errors: $error_count"
+        echo "Import completed successfully"
+    else
+        echo "Error: Failed to save queue state after import"
+        return 1
+    fi
+}
+
+# Import with replace mode (clear existing, import new)
+import_with_replace() {
+    local import_file="$1"
+    
+    echo "Importing queue data (replace mode) from: $import_file"
+    echo "WARNING: This will replace ALL existing tasks!"
+    
+    # Validate first
+    if ! validate_import_file "$import_file"; then
+        echo "Import aborted due to validation errors"
+        return 1
+    fi
+    
+    # Create backup before replace
+    local backup_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/backups/pre-replace-$(date +%Y%m%d-%H%M%S).json"
+    if with_queue_lock save_queue_state; then
+        cp "$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json" "$backup_file" 2>/dev/null || true
+        echo "Backup created: $backup_file"
+    fi
+    
+    # Clear existing tasks
+    if with_queue_lock clear_task_queue; then
+        echo "Existing queue cleared"
+    else
+        echo "Error: Failed to clear existing queue"
+        return 1
+    fi
+    
+    # Import new tasks (reuse merge logic)
+    import_with_merge "$import_file"
+}
+
+# ===============================================================================
+# REAL-TIME MONITORING MODE
+# ===============================================================================
+
+# Real-time monitoring mode mit auto-refresh
+start_monitor_mode() {
+    local refresh_interval="${1:-5}"  # seconds
+    local monitor_format="${2:-compact}"
+    local show_help="${3:-true}"
+    
+    # Validate refresh interval
+    if ! [[ "$refresh_interval" =~ ^[0-9]+$ ]] || [[ "$refresh_interval" -lt 1 ]]; then
+        echo "Error: Invalid refresh interval. Must be a positive integer." >&2
+        return 1
+    fi
+    
+    if [[ "$show_help" == "true" ]]; then
+        echo "=== Task Queue Real-time Monitor ==="
+        echo "Refresh interval: ${refresh_interval}s"
+        echo "Press 'q' and Enter to quit, 'r' and Enter to refresh now"
+        echo ""
+    fi
+    
+    # Set up signal handling for clean exit
+    trap 'echo "Monitor stopped"; exit 0' INT TERM
+    
+    local last_update=$(date +%s)
+    local cycle_count=0
+    
+    while true; do
+        # Check for user input (non-blocking)
+        local user_input=""
+        if read -t 0.1 -r user_input 2>/dev/null; then
+            case "$user_input" in
+                "q"|"quit"|"exit") 
+                    echo "Monitor stopped"
+                    break 
+                    ;;
+                "r"|"refresh")
+                    # Force immediate refresh
+                    ;;
+                "h"|"help")
+                    show_monitor_help
+                    continue
+                    ;;
+            esac
+        fi
+        
+        # Clear screen for full display mode
+        if [[ "$monitor_format" != "compact" ]]; then
+            clear
+        fi
+        
+        # Load fresh state
+        load_queue_state >/dev/null 2>&1
+        
+        # Show timestamp
+        local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+        if [[ "$monitor_format" == "compact" ]]; then
+            printf "\r[%s] " "$current_time"
+            show_enhanced_status "true" "compact"
+        else
+            echo "=== Task Queue Monitor - $current_time ==="
+            echo "Update #$((++cycle_count)) (every ${refresh_interval}s)"
+            echo ""
+            show_enhanced_status "true" "text"
+            
+            # Show recent activity if available
+            if [[ $(get_task_count) -gt 0 ]]; then
+                echo ""
+                echo "=== Recent Tasks (Last 3) ==="
+                list_queue_tasks "all" "created" "3" 2>/dev/null || echo "No recent tasks available"
+            fi
+            
+            echo ""
+            echo "Commands: q=quit, r=refresh, h=help"
+        fi
+        
+        # Wait for next refresh
+        local elapsed=$(($(date +%s) - last_update))
+        if [[ $elapsed -lt $refresh_interval ]]; then
+            sleep $((refresh_interval - elapsed))
+        fi
+        last_update=$(date +%s)
+    done
+    
+    # Clean up
+    trap - INT TERM
+}
+
+# Get total task count helper
+get_task_count() {
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        echo "${#TASK_STATES[@]}"
+    else
+        echo "0"
+    fi
+}
+
+# Show monitor help
+show_monitor_help() {
+    cat <<EOF
+
+=== Monitor Mode Help ===
+
+Commands (type and press Enter):
+  q, quit, exit    Stop monitoring and exit
+  r, refresh       Force immediate refresh
+  h, help          Show this help
+
+Monitor shows:
+- Real-time queue statistics with color coding
+- Health status (healthy/warning/critical)
+- Recent task activity
+- Last update timestamp
+
+The display updates automatically every ${refresh_interval:-5} seconds.
+EOF
+}
+
+# Wrapper command for monitor mode
+monitor_queue_cmd() {
+    local refresh_interval="${1:-5}"
+    local format="${2:-compact}"
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --interval=*) refresh_interval="${1#*=}" ;;
+            --format=*) format="${1#*=}" ;;
+            --compact) format="compact" ;;
+            --full) format="full" ;;
+            --help) 
+                echo "Usage: monitor [--interval=N] [--format=compact|full]"
+                echo "  --interval=N    Refresh interval in seconds (default: 5)"
+                echo "  --format=FORMAT Output format: compact (single line) or full (detailed)"
+                return 0
+                ;;
+            *) 
+                # Assume it's the refresh interval if it's a number
+                if [[ "$1" =~ ^[0-9]+$ ]]; then
+                    refresh_interval="$1"
+                else
+                    echo "Unknown monitor option: $1" >&2
+                    return 1
+                fi
+                ;;
+        esac
+        shift
+    done
+    
+    start_monitor_mode "$refresh_interval" "$format" "true"
+}
+
+# ===============================================================================
+# CONFIGURATION MANAGEMENT CLI
+# ===============================================================================
+
+# Zeige aktuelle Konfiguration
+show_current_config() {
+    echo "=== Current Task Queue Configuration ==="
+    cat <<EOF
+Core Settings:
+  TASK_QUEUE_ENABLED         = $TASK_QUEUE_ENABLED
+  TASK_QUEUE_DIR             = $TASK_QUEUE_DIR
+  TASK_QUEUE_MAX_SIZE        = $TASK_QUEUE_MAX_SIZE $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "(unlimited)")
+  
+Task Settings:
+  TASK_DEFAULT_TIMEOUT       = $TASK_DEFAULT_TIMEOUT seconds
+  TASK_MAX_RETRIES           = $TASK_MAX_RETRIES
+  TASK_RETRY_DELAY           = $TASK_RETRY_DELAY seconds
+  TASK_COMPLETION_PATTERN    = $TASK_COMPLETION_PATTERN
+  
+Cleanup Settings:
+  TASK_AUTO_CLEANUP_DAYS     = $TASK_AUTO_CLEANUP_DAYS $([ $TASK_AUTO_CLEANUP_DAYS -eq 0 ] && echo "(disabled)" || echo "days")
+  TASK_BACKUP_RETENTION_DAYS = $TASK_BACKUP_RETENTION_DAYS days
+  
+System Settings:
+  QUEUE_LOCK_TIMEOUT         = $QUEUE_LOCK_TIMEOUT seconds
+  
+Paths:
+  PROJECT_ROOT               = $PROJECT_ROOT
+  SCRIPT_DIR                 = $SCRIPT_DIR
+  Queue Directory            = $PROJECT_ROOT/$TASK_QUEUE_DIR
+EOF
+}
+
+# ===============================================================================
+# LOCK MANAGEMENT CLI COMMANDS
+# ===============================================================================
+
+# Show current lock status
+show_lock_status_cmd() {
+    echo "=== Task Queue Lock Status ==="
+    
+    # Show main queue lock
+    local main_lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    if [[ -d "$main_lock_dir" ]]; then
+        echo "Main Queue Lock:"
+        get_lock_info "$main_lock_dir" | sed 's/^/  /'
+    else
+        echo "Main Queue Lock: Not held"
+    fi
+    echo
+    
+    # Show typed locks
+    show_typed_locks
+    
+    # Show any legacy file locks
+    local legacy_lock_file="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock"
+    if [[ -f "$legacy_lock_file" ]]; then
+        echo "Legacy file lock detected: $legacy_lock_file"
+    fi
+}
+
+# Clean up stale locks
+cleanup_locks_cmd() {
+    echo "Cleaning up stale locks..."
+    
+    # Clean up main queue locks
+    cleanup_all_stale_locks
+    
+    # Clean up typed locks 
+    cleanup_all_typed_locks
+    
+    echo "Lock cleanup completed"
+}
+
+# Check lock system health
+lock_health_check_cmd() {
+    local health_score=100
+    local issues=()
+    
+    # Check for stale main locks
+    local main_lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    if [[ -d "$main_lock_dir" ]]; then
+        if ! validate_lock_integrity "$main_lock_dir"; then
+            ((health_score -= 20))
+            issues+=("Invalid main lock detected")
+        fi
+    fi
+    
+    # Check for stale typed locks
+    for lock_type in "${!LOCK_TYPES[@]}"; do
+        local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
+        if [[ -d "$lock_dir" ]]; then
+            if ! validate_lock_integrity "$lock_dir"; then
+                ((health_score -= 10))
+                issues+=("Invalid $lock_type lock detected")
+            fi
+        fi
+    done
+    
+    # Check system load impact
+    if command -v uptime >/dev/null 2>&1; then
+        local load_avg=$(uptime | awk '{print $(NF-2)}' | sed 's/,//')
+        if (( $(echo "$load_avg > 2.0" | bc -l 2>/dev/null || echo "0") )); then
+            ((health_score -= 15))
+            issues+=("High system load may affect lock performance: $load_avg")
+        fi
+    fi
+    
+    echo "Lock system health: $health_score/100"
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo "Issues detected:"
+        for issue in "${issues[@]}"; do
+            echo "  - $issue"
+        done
+        echo
+        echo "Recommendations:"
+        if [[ $health_score -lt 60 ]]; then
+            echo "  - Run 'lock cleanup' to remove stale locks"
+            echo "  - Consider restarting if issues persist"
+        fi
+        echo "  - Monitor system load: $(uptime)"
+    else
+        echo "No issues detected"
+    fi
+}
+
+# ===============================================================================
 # MAIN ENTRY POINT (für Testing und CLI)
 # ===============================================================================
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    echo "=== Task Queue Core Module ==="
+    # Load configuration first
+    init_task_queue_readonly >/dev/null 2>&1 || true
     
-    # Initialize
-    init_task_queue || {
-        echo "Failed to initialize task queue"
-        exit 1
-    }
-    
-    # Handle command line arguments
+    # Handle command line arguments with improved wrapper
     case "${1:-status}" in
         "status")
-            show_queue_status
+            # Read-only operation - skip heavy locking
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
+                echo "Task Queue: DISABLED"
+            else
+                load_queue_state >/dev/null 2>&1 && show_queue_status || echo "Task Queue: ENABLED (no tasks loaded)"
+            fi
+            ;;
+        "enhanced-status"|"estatus")
+            # Enhanced status with color support and optional JSON output
+            colors="true"
+            format="text"
+            shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --no-color|--no-colors) colors="false" ;;
+                    --json) format="json" ;;
+                    --compact) format="compact" ;;
+                    *) break ;;
+                esac
+                shift
+            done
+            # Read-only operation - skip heavy locking
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
+                if [[ "$format" == "json" ]]; then
+                    echo '{"status": "disabled", "message": "Task Queue is disabled"}'
+                else
+                    echo "Task Queue: DISABLED"
+                fi
+            else
+                load_queue_state >/dev/null 2>&1 && show_enhanced_status "$colors" "$format" || {
+                    if [[ "$format" == "json" ]]; then
+                        echo '{"status": "enabled", "message": "Queue enabled but no data loaded", "total_tasks": 0}'
+                    else
+                        echo "Task Queue: ENABLED (no tasks loaded)"
+                    fi
+                }
+            fi
             ;;
         "list")
-            list_queue_tasks "${2:-all}" "${3:-priority}"
+            # Read-only operation with minimal locking
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
+                echo "Task Queue: DISABLED"
+            else
+                # Direct JSON read for list command to avoid locking issues
+                QUEUE_FILE="$PROJECT_ROOT/$TASK_QUEUE_DIR/task-queue.json"
+                if [[ -f "$QUEUE_FILE" ]] && jq empty "$QUEUE_FILE" 2>/dev/null; then
+                    TASK_COUNT=$(jq -r '.total_tasks // 0' "$QUEUE_FILE" 2>/dev/null)
+                    if [[ "$TASK_COUNT" == "0" ]]; then
+                        echo "No tasks in queue"
+                    else
+                        echo "=== Task Queue (Direct Read) ==="
+                        echo "Total tasks: $TASK_COUNT"
+                        # Show task summary
+                        jq -r '.tasks[]? | "[\(.id)] \(.metadata.type // "unknown") (priority: \(.priority)) - \(.status)"' "$QUEUE_FILE" 2>/dev/null || echo "Tasks exist but format parsing failed"
+                    fi
+                else
+                    echo "No tasks to display (queue file not found or invalid)"
+                fi
+            fi
             ;;
         "add")
-            if [[ $# -ge 3 ]]; then
-                task_id=$(with_queue_lock add_task_to_queue "$2" "$3" "${4:-}" "${@:5}")
-                if [[ $? -eq 0 ]]; then
-                    echo "Task added: $task_id"
-                    with_queue_lock save_queue_state
-                fi
-            else
-                echo "Usage: $0 add <type> <priority> [task_id] [metadata...]"
-                exit 1
-            fi
+            shift
+            cli_operation_wrapper add_task_cmd "$@"
             ;;
         "remove")
-            if [[ $# -ge 2 ]]; then
-                if with_queue_lock remove_task_from_queue "$2"; then
-                    echo "Task removed: $2"
-                    with_queue_lock save_queue_state
-                fi
-            else
-                echo "Usage: $0 remove <task_id>"
-                exit 1
-            fi
+            shift
+            cli_operation_wrapper remove_task_cmd "$@"
             ;;
         "clear")
-            if with_queue_lock clear_task_queue; then
-                echo "Queue cleared"
-                with_queue_lock save_queue_state
-            fi
+            cli_operation_wrapper clear_queue_cmd
             ;;
         "stats")
-            get_queue_statistics
+            # Read-only operation
+            if [[ "${TASK_QUEUE_ENABLED:-}" != "true" ]]; then
+                echo "Task Queue: DISABLED"
+            else
+                load_queue_state >/dev/null 2>&1 && get_queue_statistics || echo "No statistics available"
+            fi
             ;;
         "cleanup")
-            with_queue_lock cleanup_old_tasks
-            with_queue_lock cleanup_old_backups
-            with_queue_lock save_queue_state
+            cli_operation_wrapper cleanup_cmd
             ;;
         "github-issue")
-            if [[ $# -ge 2 ]]; then
-                task_id=$(with_queue_lock create_github_issue_task "$2" "${3:-5}" "${4:-}" "${5:-}")
-                if [[ $? -eq 0 ]]; then
-                    echo "GitHub issue task added: $task_id"
-                    with_queue_lock save_queue_state
-                fi
+            shift
+            cli_operation_wrapper github_issue_cmd "$@"
+            ;;
+        "interactive"|"i")
+            # Interactive mode
+            init_task_queue && start_interactive_mode
+            ;;
+        "config")
+            if [[ $# -eq 1 ]]; then
+                init_task_queue && show_current_config
             else
-                echo "Usage: $0 github-issue <number> [priority] [title] [labels]"
+                echo "Configuration management not yet implemented"
                 exit 1
             fi
+            ;;
+        "next")
+            init_task_queue && get_next_task
+            ;;
+        "batch")
+            shift
+            cli_operation_wrapper batch_operation_cmd "$@"
+            ;;
+        "filter"|"find")
+            shift
+            init_task_queue && advanced_list_tasks "$@"
+            ;;
+        "export")
+            shift
+            init_task_queue && export_queue_data "$@"
+            ;;
+        "import")
+            shift
+            cli_operation_wrapper import_queue_data "$@"
+            ;;
+        "monitor")
+            shift
+            init_task_queue && monitor_queue_cmd "$@"
+            ;;
+        "lock")
+            # Lock management commands
+            case "${2:-status}" in
+                "status")
+                    show_lock_status_cmd
+                    ;;
+                "cleanup")
+                    cleanup_locks_cmd
+                    ;;
+                "health")
+                    lock_health_check_cmd
+                    ;;
+                "typed")
+                    show_typed_locks
+                    ;;
+                "cleanup-typed")
+                    cleanup_all_typed_locks
+                    ;;
+                *)
+                    echo "Usage: $0 lock [status|cleanup|health|typed|cleanup-typed]"
+                    echo "  status       - Show current lock status"
+                    echo "  cleanup      - Clean up stale locks"
+                    echo "  health       - Check lock system health"
+                    echo "  typed        - Show typed locks"
+                    echo "  cleanup-typed - Clean up all typed locks"
+                    exit 1
+                    ;;
+            esac
             ;;
         "test")
             echo "Running basic tests..."
@@ -1670,23 +4321,74 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             cat <<EOF
 Usage: $0 <command> [arguments]
 
-Commands:
-  status                              Show queue status and statistics
-  list [status] [sort]                List tasks (status: all|pending|active|completed|failed|timeout, sort: priority|created)
-  add <type> <priority> [id] [meta]   Add task to queue
+Core Commands:
+  status                              Show basic queue status
+  enhanced-status, estatus            Show enhanced status with colors (--json, --compact, --no-color)
+  list [status] [sort]                List tasks (status: all|pending|active|completed|failed|timeout)
+  add <type> <priority> [id] [meta]   Add single task to queue
   remove <task_id>                    Remove task from queue
   clear                               Clear entire queue
-  stats                               Show queue statistics
+  
+Queue Management:
+  interactive, i                      Start interactive mode for real-time management
+  monitor [interval]                  Real-time monitoring with auto-refresh (default: 5s)
+  next                                Get next task for processing
+  stats                               Show detailed queue statistics
   cleanup                             Clean up old tasks and backups
+  config                              Show current configuration
+  
+Batch Operations:
+  batch add <stdin|file> [path] [type] [priority]
+                                      Add multiple tasks from stdin or file
+  batch remove <stdin|file> [path]   Remove multiple tasks by ID
+
+Advanced Features:
+  filter, find [OPTIONS]             Advanced task filtering and search
+  export <format> [file] [filters]   Export queue data (json, csv)
+  import <file> [mode]               Import queue data (validate, merge, replace)
+  
+GitHub Integration:
   github-issue <number> [priority]    Add GitHub issue task
+  
+Development:
   test                                Run basic functionality tests
 
 Examples:
+  # Basic usage
   $0 status
+  $0 enhanced-status --json
   $0 list pending priority
   $0 add custom 1 "" description "Fix bug" command "/dev fix-bug"
+  
+  # Interactive mode
+  $0 interactive
+  
+  # Real-time monitoring
+  $0 monitor 10          # Monitor with 10s refresh interval
+  $0 monitor --format=full --interval=3
+  
+  # Batch operations
+  echo -e "41\n42\n43" | $0 batch add stdin github_issue 2
+  $0 batch add file tasks.txt custom 3
+  
+  # Advanced filtering
+  $0 filter --status=pending --priority=1-3 --sort=created
+  $0 find --type=github_issue --search="bug fix" --json
+  
+  # Export/Import
+  $0 export json queue_backup.json
+  $0 export csv queue_report.csv
+  $0 import queue_backup.json merge
+  
+  # GitHub integration
   $0 github-issue 123 1
-  $0 remove task-1234567890-0001
+  
+Enhanced Features:
+  - Color-coded status displays
+  - Interactive mode with real-time updates
+  - Batch operations for bulk task management
+  - JSON output support for scripting
+  - Comprehensive help system
 EOF
             ;;
     esac

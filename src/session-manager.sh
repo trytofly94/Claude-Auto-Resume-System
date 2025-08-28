@@ -29,13 +29,16 @@ declare -A SESSION_RECOVERY_COUNTS
 declare -A SESSION_LAST_SEEN
 
 # Session-Status-Konstanten
-readonly SESSION_STATE_UNKNOWN="unknown"
-readonly SESSION_STATE_STARTING="starting"
-readonly SESSION_STATE_RUNNING="running"
-readonly SESSION_STATE_USAGE_LIMITED="usage_limited"
-readonly SESSION_STATE_ERROR="error"
-readonly SESSION_STATE_STOPPED="stopped"
-readonly SESSION_STATE_RECOVERING="recovering"
+# Protect against re-sourcing - only declare readonly if not already set
+if [[ -z "${SESSION_STATE_UNKNOWN:-}" ]]; then
+    readonly SESSION_STATE_UNKNOWN="unknown"
+    readonly SESSION_STATE_STARTING="starting"
+    readonly SESSION_STATE_RUNNING="running"
+    readonly SESSION_STATE_USAGE_LIMITED="usage_limited"
+    readonly SESSION_STATE_ERROR="error"
+    readonly SESSION_STATE_STOPPED="stopped"
+    readonly SESSION_STATE_RECOVERING="recovering"
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN UND DEPENDENCIES
@@ -145,7 +148,24 @@ get_session_info() {
 list_sessions() {
     echo "=== Active Sessions ==="
     
-    if [[ ${#SESSIONS[@]} -eq 0 ]]; then
+    # Ensure SESSIONS array is initialized globally
+    if ! declare -p SESSIONS >/dev/null 2>&1; then
+        declare -gA SESSIONS
+        declare -gA SESSION_STATES  
+        declare -gA SESSION_RESTART_COUNTS
+        declare -gA SESSION_RECOVERY_COUNTS
+        declare -gA SESSION_LAST_SEEN
+    fi
+    
+    # Use safer array length check to avoid nounset errors
+    local session_count=0
+    set +u  # Temporarily disable nounset for array access
+    if declare -p SESSIONS >/dev/null 2>&1; then
+        session_count=${#SESSIONS[@]}
+    fi
+    set -u  # Re-enable nounset
+    
+    if [[ $session_count -eq 0 ]]; then
         echo "No sessions registered"
         return 0
     fi

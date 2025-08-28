@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "created": "2025-08-24T22:59:41+02:00",
+  "last_updated": "2025-08-24T22:59:41+02:00",
+  "total_tasks": 0,
+  "pending_tasks": 0,
+  "active_tasks": 0,
+  "completed_tasks": 0,
+  "failed_tasks": 0,
+  "timeout_tasks": 0,
+  "tasks": [
+
+  ]
+}
