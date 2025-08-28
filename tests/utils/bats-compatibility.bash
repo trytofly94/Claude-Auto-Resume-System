@@ -123,10 +123,13 @@ bats_safe_array_operation() {
                 local value="$2"
                 # Ensure state directory exists
                 mkdir -p "$BATS_STATE_DIR"
-                # Remove existing entry and add new one
-                grep -v "^$key=" "$state_file" 2>/dev/null > "${state_file}.tmp" || true
-                echo "$key=$value" >> "${state_file}.tmp"
-                mv "${state_file}.tmp" "$state_file"
+                # Remove existing entry and add new one atomically
+                local temp_file="${state_file}.tmp.$$"
+                if [[ -f "$state_file" ]]; then
+                    grep -v "^$key=" "$state_file" 2>/dev/null > "$temp_file" || true
+                fi
+                echo "$key=$value" >> "$temp_file"
+                mv "$temp_file" "$state_file"
                 ;;
             "exists")
                 local key="$1"
@@ -134,6 +137,26 @@ bats_safe_array_operation() {
                 ;;
             "clear")
                 rm -f "$state_file" 2>/dev/null || true
+                ;;
+            "sync_from_array")
+                # Sync array contents to file for BATS persistence
+                local -n array_ref="$array_name"
+                mkdir -p "$BATS_STATE_DIR"
+                rm -f "$state_file"
+                for key in "${!array_ref[@]}"; do
+                    echo "$key=${array_ref[$key]}" >> "$state_file"
+                done
+                ;;
+            "sync_to_array")
+                # Load file contents into array for BATS context
+                if [[ -f "$state_file" ]]; then
+                    local -n array_ref="$array_name"
+                    while IFS='=' read -r key value; do
+                        if [[ -n "$key" ]]; then
+                            array_ref["$key"]="$value"
+                        fi
+                    done < "$state_file"
+                fi
                 ;;
             *)
                 echo "[BATS-COMPAT] [ERROR] Unknown array operation: $operation" >&2
@@ -162,6 +185,10 @@ bats_safe_array_operation() {
                 unset "$array_name"
                 declare -gA "$array_name"
                 ;;
+            "sync_from_array"|"sync_to_array")
+                # No-op in regular bash context
+                return 0
+                ;;
         esac
     fi
 }
@@ -176,6 +203,42 @@ optimize_bats_state_tracking() {
         mkdir -p "$BATS_STATE_DIR"
         
         echo "[BATS-COMPAT] [DEBUG] BATS state tracking optimized for test: ${BATS_TEST_NAME:-unknown}" >&2
+    fi
+}
+
+# Load BATS state from files into arrays
+load_bats_state() {
+    if [[ "$BATS_SUBPROCESS_MODE" == "true" && -n "$BATS_STATE_DIR" ]]; then
+        # Load all array states from files
+        local array_names=("TASK_STATES" "TASK_PRIORITIES" "TASK_METADATA" "TASK_RETRY_COUNTS" "TASK_TIMESTAMPS")
+        
+        for array_name in "${array_names[@]}"; do
+            # Ensure array is declared first
+            if ! declare -p "$array_name" >/dev/null 2>&1; then
+                declare -gA "$array_name"
+            fi
+            
+            # Sync from file to array
+            bats_safe_array_operation "sync_to_array" "$array_name"
+        done
+        
+        echo "[BATS-COMPAT] [DEBUG] Loaded BATS state for ${#array_names[@]} arrays" >&2
+    fi
+}
+
+# Save current array state to BATS files
+save_bats_state() {
+    if [[ "$BATS_SUBPROCESS_MODE" == "true" && -n "$BATS_STATE_DIR" ]]; then
+        # Save all array states to files
+        local array_names=("TASK_STATES" "TASK_PRIORITIES" "TASK_METADATA" "TASK_RETRY_COUNTS" "TASK_TIMESTAMPS")
+        
+        for array_name in "${array_names[@]}"; do
+            if declare -p "$array_name" >/dev/null 2>&1; then
+                bats_safe_array_operation "sync_from_array" "$array_name"
+            fi
+        done
+        
+        echo "[BATS-COMPAT] [DEBUG] Saved BATS state for ${#array_names[@]} arrays" >&2
     fi
 }
 
@@ -432,6 +495,8 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     export -f skip_if_incompatible  
     export -f bats_safe_array_operation
     export -f optimize_bats_state_tracking
+    export -f load_bats_state
+    export -f save_bats_state
     export -f bats_safe_timeout
     export -f implement_timeout_warnings
     export -f provide_timeout_progress

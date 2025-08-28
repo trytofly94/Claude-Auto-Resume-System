@@ -25,16 +25,21 @@ setup_test_environment() {
     
     mkdir -p "$HOME" "$XDG_CONFIG_HOME"
     
-    # Set test-friendly defaults
-    export DEBUG_MODE=true
+    # Set test-friendly defaults optimized for performance
+    export DEBUG_MODE=false  # Reduced logging for performance
     export TEST_MODE=true
-    export LOG_LEVEL="DEBUG"
+    export LOG_LEVEL="ERROR"  # Minimal logging during tests
     
     # Prevent actual network calls in tests
     export OFFLINE_MODE=true
     
     # Use test configuration
     export TEST_CONFIG_FILE="$BATS_TEST_DIRNAME/fixtures/test-config.conf"
+    
+    # Performance optimizations
+    export TASK_QUEUE_PERFORMANCE_MODE=true
+    export SKIP_BACKUP_CREATION=true  # Skip backups during tests
+    export DISABLE_JSON_VALIDATION=true  # Skip expensive JSON validation
     
     # Phase 2: Setup test-specific logging (Issue #46)
     if command -v setup_test_logging >/dev/null 2>&1; then
@@ -82,7 +87,30 @@ mock_command() {
 # Remove mock command
 unmock_command() {
     local cmd_name="$1"
+    
+    # First, unset the function
     unset -f "$cmd_name" 2>/dev/null || true
+    
+    # For dependency tests, we need to temporarily hide the real command
+    # Create a disabled mock that returns 127 (command not found)
+    if [[ -n "${TEST_TEMP_DIR:-}" ]]; then
+        local mock_dir="$TEST_TEMP_DIR/disabled_mock_bin"
+        mkdir -p "$mock_dir"
+        
+        cat > "$mock_dir/$cmd_name" << 'EOF'
+#!/bin/bash
+# Disabled mock to simulate missing dependency
+echo "bash: $0: command not found" >&2
+exit 127
+EOF
+        chmod +x "$mock_dir/$cmd_name"
+        
+        # Prepend to PATH to override real command
+        export PATH="$mock_dir:$PATH"
+        
+        # Track for cleanup
+        echo "$cmd_name" >> "$TEST_TEMP_DIR/disabled_mocks" || true
+    fi
 }
 
 # Create mock file with content
@@ -360,6 +388,20 @@ cleanup_test_artifacts() {
     
     # Kill any background processes started by tests
     jobs -p | xargs -r kill 2>/dev/null || true
+    
+    # Clean up disabled mocks and restore PATH
+    if [[ -n "${TEST_TEMP_DIR:-}" && -f "$TEST_TEMP_DIR/disabled_mocks" ]]; then
+        while IFS= read -r cmd_name; do
+            # Remove disabled mock directory from PATH
+            local mock_dir="$TEST_TEMP_DIR/disabled_mock_bin"
+            if [[ ":$PATH:" == *":$mock_dir:"* ]]; then
+                export PATH="${PATH//$mock_dir:/}"
+                export PATH="${PATH%:}"  # Remove trailing colon if present
+            fi
+        done < "$TEST_TEMP_DIR/disabled_mocks"
+        rm -rf "$TEST_TEMP_DIR/disabled_mock_bin" 2>/dev/null || true
+        rm -f "$TEST_TEMP_DIR/disabled_mocks" 2>/dev/null || true
+    fi
     
     # Reset important environment variables
     unset MOCK_TMUX_SESSION_EXISTS

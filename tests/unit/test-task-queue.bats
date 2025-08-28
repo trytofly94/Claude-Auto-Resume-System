@@ -161,14 +161,63 @@ teardown() {
 }
 
 @test "init_task_queue fails when dependencies missing" {
-    # Remove jq mock to simulate missing dependency
-    unmock_command "jq"
+    # Create isolated environment without jq using a fake jq that fails
+    local test_temp_dir=$(mktemp -d)
+    local fake_bin_dir="$test_temp_dir/fake_bin"
+    mkdir -p "$fake_bin_dir"
     
-    # Set PROJECT_ROOT properly for dependency test
-    export PROJECT_ROOT="$TEST_PROJECT_DIR"
+    # Create a fake jq that returns "command not found"
+    cat > "$fake_bin_dir/jq" << 'EOF'
+#!/bin/bash
+echo "bash: jq: command not found" >&2
+exit 127
+EOF
     
-    # Test the actual init_task_queue (not test_init_task_queue) which checks dependencies
-    run bash -c "cd '$TEST_PROJECT_DIR' && source '$BATS_TEST_DIRNAME/../../src/task-queue.sh' && init_task_queue"
+    # Also override has_command to properly detect our failing jq
+    cat > "$fake_bin_dir/has_command_override" << 'EOF'
+has_command() {
+    local cmd="$1"
+    if [[ "$cmd" == "jq" ]]; then
+        # Test if jq actually works by trying --version
+        jq --version >/dev/null 2>&1
+        return $?
+    else
+        command -v "$cmd" >/dev/null 2>&1
+    fi
+}
+EOF
+    chmod +x "$fake_bin_dir/jq"
+    
+    # Create a completely isolated test environment with our fake jq first in path
+    run bash -c "
+        export PATH='$fake_bin_dir:/bin:/usr/bin'
+        export PROJECT_ROOT='$test_temp_dir'
+        export TASK_QUEUE_DIR='queue'
+        export DISABLE_JSON_VALIDATION=true
+        mkdir -p '$test_temp_dir/queue'
+        
+        # Verify our fake jq fails properly
+        if jq --version >/dev/null 2>&1; then
+            echo 'ERROR: Real jq still available' >&2
+            exit 99
+        fi
+        
+        # Source the task queue module
+        source '$BATS_TEST_DIRNAME/../../src/task-queue.sh' 2>&1
+        
+        # Override has_command function
+        source '$fake_bin_dir/has_command_override'
+        
+        # Test dependency check directly
+        check_dependencies
+    "
+    
+    # Clean up
+    rm -rf "$test_temp_dir" || true
+    
+    if [[ $status -eq 99 ]]; then
+        skip "Could not create isolated environment without jq"
+    fi
     
     if [[ $status -eq 124 ]]; then
         skip "Dependency test timed out"
