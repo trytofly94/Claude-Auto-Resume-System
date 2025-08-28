@@ -1374,9 +1374,9 @@ github_integration_main() {
             echo "  Initialized: $(github_integration_initialized && echo 'Yes' || echo 'No')"
             echo "  Authentication: $(check_github_auth >/dev/null 2>&1 && echo 'OK' || echo 'FAILED')"
             echo "  User: $(get_authenticated_user 2>/dev/null || echo 'Unknown')"
-            echo "  Cache entries: $(([[ -v GITHUB_API_CACHE ]] && echo ${#GITHUB_API_CACHE[@]}) || echo 0)"
-            echo "  Rate limit cache: $(([[ -v GITHUB_RATE_LIMITS ]] && echo ${#GITHUB_RATE_LIMITS[@]}) || echo 0)"
-            echo "  Comment templates: $(([[ -v COMMENT_TEMPLATES ]] && echo ${#COMMENT_TEMPLATES[@]}) || echo 0)"
+            echo "  Cache entries: $( ([[ -v GITHUB_API_CACHE ]] && echo ${#GITHUB_API_CACHE[@]}) || echo 0)"
+            echo "  Rate limit cache: $( ([[ -v GITHUB_RATE_LIMITS ]] && echo ${#GITHUB_RATE_LIMITS[@]}) || echo 0)"
+            echo "  Comment templates: $( ([[ -v COMMENT_TEMPLATES ]] && echo ${#COMMENT_TEMPLATES[@]}) || echo 0)"
             ;;
         
         *)
