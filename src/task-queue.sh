@@ -2195,7 +2195,16 @@ cleanup_old_backups() {
 init_task_queue() {
     local config_file="${1:-config/default.conf}"
     
+    # Get script directory for proper path resolution
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Use proper path resolution like hybrid-monitor.sh
+    if [[ ! -f "$config_file" ]]; then
+        config_file="$script_dir/../$config_file"
+    fi
+    
     log_info "Initializing task queue system"
+    log_debug "Using config file: $config_file"
     
     # Check dependencies first
     check_dependencies || {
@@ -2209,14 +2218,14 @@ init_task_queue() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove surrounding quotes and trim whitespace
+            value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"\(.*\)"$/\1/;s/^\047\(.*\)\047$/\1/')
             
             case "$key" in
                 TASK_QUEUE_ENABLED|TASK_QUEUE_DIR|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|TASK_QUEUE_MAX_SIZE|TASK_AUTO_CLEANUP_DAYS|TASK_BACKUP_RETENTION_DAYS|QUEUE_LOCK_TIMEOUT)
-                    # Only set from config if not already set in environment
-                    if [[ -z "${!key:-}" ]]; then
-                        eval "$key='$value'"
-                    fi
+                    # Always set from config - config file should take precedence over defaults
+                    eval "$key='$value'"
+                    log_debug "Config loaded: $key='$value'"
                     ;;
             esac
         done < <(grep -E '^[^#]*=' "$config_file" || true)
