@@ -1,0 +1,155 @@
+name: Release Management
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "Generating changelog for ${{ steps.version.outputs.version }}"
+          
+          # Get commits since last tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "## Changes since $PREVIOUS_TAG" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%an)" >> CHANGELOG.md
+          else
+            echo "## Initial Release" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            echo "- Complete Claude Auto-Resume Task Queue System implementation" >> CHANGELOG.md
+            echo "- Task Execution Engine with GitHub integration" >> CHANGELOG.md  
+            echo "- Comprehensive CI/CD pipeline" >> CHANGELOG.md
+          fi
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat CHANGELOG.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: Claude Auto-Resume ${{ steps.version.outputs.version }}
+          body: |
+            # Claude Auto-Resume ${{ steps.version.outputs.version }}
+            
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ## Installation
+            
+            ```bash
+            git clone https://github.com/trytofly94/Claude-Auto-Resume-System.git
+            cd Claude-Auto-Resume-System
+            git checkout ${{ steps.version.outputs.version }}
+            ./scripts/setup.sh
+            ```
+            
+            ## Features in this Release
+            
+            - 🚀 **Task Execution Engine**: Complete task processing with GitHub integration
+            - 🔄 **Queue Management**: Priority-based task queue with persistence  
+            - 🐙 **GitHub Integration**: Automatic issue/PR processing and commenting
+            - 🧪 **Comprehensive Testing**: Multi-OS CI/CD with quality checks
+            - 📊 **Monitoring**: Advanced session monitoring and error recovery
+            
+            ## System Requirements
+            
+            - **Bash**: 4.4+ (5.0+ recommended)
+            - **OS**: macOS 10.14+ or Ubuntu 18.04+
+            - **Dependencies**: `jq`, `curl`, GitHub CLI (optional)
+            
+            ## Quick Start
+            
+            ```bash
+            # Basic monitoring
+            ./src/hybrid-monitor.sh --continuous
+            
+            # Task queue mode
+            ./src/hybrid-monitor.sh --queue-mode --continuous
+            
+            # Add GitHub issue to queue  
+            ./src/hybrid-monitor.sh --add-issue 123
+            ```
+          draft: false
+          prerelease: false
+
+  package-release:
+    name: Package Release Assets
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create release package
+        run: |
+          mkdir -p claude-auto-resume-${{ github.event.release.tag_name }}
+          
+          # Copy main files
+          cp -r src/ claude-auto-resume-${{ github.event.release.tag_name }}/
+          cp -r scripts/ claude-auto-resume-${{ github.event.release.tag_name }}/
+          cp -r config/ claude-auto-resume-${{ github.event.release.tag_name }}/
+          cp README.md LICENSE claude-auto-resume-${{ github.event.release.tag_name }}/
+          
+          # Create installation script
+          cat > claude-auto-resume-${{ github.event.release.tag_name }}/install.sh << 'EOF'
+          #!/bin/bash
+          echo "Installing Claude Auto-Resume System..."
+          chmod +x src/*.sh scripts/*.sh
+          echo "✅ Installation complete!"
+          echo "Run: ./src/hybrid-monitor.sh --help"
+          EOF
+          
+          chmod +x claude-auto-resume-${{ github.event.release.tag_name }}/install.sh
+          
+          # Create archive
+          tar -czf claude-auto-resume-${{ github.event.release.tag_name }}.tar.gz claude-auto-resume-${{ github.event.release.tag_name }}/
+          zip -r claude-auto-resume-${{ github.event.release.tag_name }}.zip claude-auto-resume-${{ github.event.release.tag_name }}/
+
+      - name: Upload Release Assets
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./claude-auto-resume-${{ github.event.release.tag_name }}.tar.gz
+          asset_name: claude-auto-resume-${{ github.event.release.tag_name }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Zip Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./claude-auto-resume-${{ github.event.release.tag_name }}.zip
+          asset_name: claude-auto-resume-${{ github.event.release.tag_name }}.zip
+          asset_content_type: application/zip

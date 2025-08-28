@@ -1,25 +1,14 @@
 {
   "version": "1.0",
-  "created": "2025-08-28T04:32:36+02:00",
-  "last_updated": "2025-08-28T04:32:36+02:00",
-  "total_tasks": 8,
-  "pending_tasks": 8,
+  "created": "2025-08-28T04:32:28+02:00",
+  "last_updated": "2025-08-28T04:32:28+02:00",
+  "total_tasks": 7,
+  "pending_tasks": 7,
   "active_tasks": 0,
   "completed_tasks": 0,
   "failed_tasks": 0,
   "timeout_tasks": 0,
   "tasks": [
-    {
-      "id": "task-1756348355-5675",
-      "type": "custom",
-      "priority": 1,
-      "status": "pending",
-      "created_at": "2025-08-28T04:32:35+02:00",
-      "updated_at": "2025-08-28T04:32:35+02:00",
-      "timeout": 3600,
-      "retry_count": 0,
-      "max_retries": 3
-    },
     {
       "id": "task-1756348268-1716",
       "type": "custom",

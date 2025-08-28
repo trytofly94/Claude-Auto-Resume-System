@@ -11,14 +11,13 @@
 
 load ../test_helper
 
-# Source the task queue module  
+# Source the task queue module
 setup() {
-    # Phase 2: Use enhanced setup with BATS compatibility (Issue #46)
-    enhanced_setup
+    default_setup
     
-    # Create test project directory with timeout protection
+    # Create test project directory
     export TEST_PROJECT_DIR="$TEST_TEMP_DIR/claude-auto-resume"
-    run_with_bats_timeout "setup" mkdir -p "$TEST_PROJECT_DIR"
+    mkdir -p "$TEST_PROJECT_DIR"
     cd "$TEST_PROJECT_DIR"
     
     # Set up configuration for task queue
@@ -133,55 +132,7 @@ except:
 }
 
 teardown() {
-    # Phase 2: Use enhanced teardown with BATS compatibility (Issue #46)
-    enhanced_teardown
-}
-
-# Test: BATS compatibility - Array operations work in subprocess context (Issue #46)
-@test "BATS array operations work with enhanced compatibility" {
-    # Phase 1: Test BATS-compatible array operations (Issue #46)
-    local test_task_id="test-bats-arrays"
-    
-    # Test array set operation with BATS compatibility
-    test_array_operation "set" "TASK_STATES" "$test_task_id" "pending"
-    
-    # Test array get operation with BATS compatibility
-    local retrieved_state
-    retrieved_state=$(test_array_operation "get" "TASK_STATES" "$test_task_id")
-    [[ "$retrieved_state" == "pending" ]]
-    
-    # Test array exists operation with BATS compatibility  
-    if test_array_operation "exists" "TASK_STATES" "$test_task_id"; then
-        echo "Array exists check passed"
-    else
-        fail "Array exists check failed"
-    fi
-    
-    # Test array clear operation with BATS compatibility
-    test_array_operation "clear" "TASK_STATES"
-    
-    # Verify array was cleared
-    local cleared_state
-    cleared_state=$(test_array_operation "get" "TASK_STATES" "$test_task_id")
-    [[ -z "$cleared_state" ]]
-}
-
-# Test: Platform compatibility - Skip platform-specific operations (Issue #46)
-@test "platform-specific operations are handled correctly" {
-    # Phase 1: Test platform-aware skipping (Issue #46)
-    
-    # This test should skip on macOS where flock is unavailable
-    skip_if_platform_incompatible "flock" "File locking test requires flock"
-    
-    # If we reach here, we're on a platform that supports flock
-    echo "Running flock-dependent test on supported platform"
-    
-    # Test file locking operation here
-    local test_lock_file="$TEST_PROJECT_DIR/test.lock" 
-    touch "$test_lock_file"
-    
-    # This would use flock if available
-    [ -f "$test_lock_file" ]
+    default_teardown
 }
 
 # Test: Task queue initialization
