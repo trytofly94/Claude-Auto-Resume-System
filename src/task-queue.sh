@@ -1542,6 +1542,14 @@ remove_task_from_queue() {
         fi
     fi
     
+    # In BATS test environment - update BATS compatibility tracking  
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        if command -v save_bats_state >/dev/null 2>&1; then
+            save_bats_state
+            log_debug "Updated BATS state after task removal: $task_id"
+        fi
+    fi
+    
     log_info "Task removed from queue: $task_id"
     return 0
 }
