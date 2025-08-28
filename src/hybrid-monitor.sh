@@ -11,9 +11,11 @@ set -euo pipefail
 # BASH VERSION VALIDATION (ADDRESSES GITHUB ISSUE #6)
 # ===============================================================================
 
-# Script-Informationen
-readonly SCRIPT_NAME="hybrid-monitor"
-readonly VERSION="1.0.0-alpha"
+# Script-Informationen - protect against re-sourcing
+if [[ -z "${SCRIPT_NAME:-}" ]]; then
+    readonly SCRIPT_NAME="hybrid-monitor"
+    readonly VERSION="1.0.0-alpha"
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source bash version check utility - use absolute path resolution

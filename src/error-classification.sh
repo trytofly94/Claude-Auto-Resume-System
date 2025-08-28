@@ -18,19 +18,21 @@ ERROR_MAX_RETRIES="${ERROR_MAX_RETRIES:-3}"
 ERROR_RETRY_DELAY="${ERROR_RETRY_DELAY:-300}"                # 5 minutes
 ERROR_ESCALATION_THRESHOLD="${ERROR_ESCALATION_THRESHOLD:-5}"
 
-# Error severity levels
-readonly ERROR_SEVERITY_CRITICAL=3
-readonly ERROR_SEVERITY_WARNING=2
-readonly ERROR_SEVERITY_INFO=1
-readonly ERROR_SEVERITY_UNKNOWN=0
+# Error severity levels - protect against re-sourcing
+if [[ -z "${ERROR_SEVERITY_CRITICAL:-}" ]]; then
+    readonly ERROR_SEVERITY_CRITICAL=3
+    readonly ERROR_SEVERITY_WARNING=2
+    readonly ERROR_SEVERITY_INFO=1
+    readonly ERROR_SEVERITY_UNKNOWN=0
 
-# Recovery strategy types
-readonly RECOVERY_STRATEGY_EMERGENCY="emergency_shutdown"
-readonly RECOVERY_STRATEGY_AUTO="automatic_recovery"
-readonly RECOVERY_STRATEGY_MANUAL="manual_recovery"
-readonly RECOVERY_STRATEGY_RETRY="simple_retry"
-readonly RECOVERY_STRATEGY_SAFE="safe_recovery"
-readonly RECOVERY_STRATEGY_TIMEOUT="timeout_recovery"
+    # Recovery strategy types
+    readonly RECOVERY_STRATEGY_EMERGENCY="emergency_shutdown"
+    readonly RECOVERY_STRATEGY_AUTO="automatic_recovery"
+    readonly RECOVERY_STRATEGY_MANUAL="manual_recovery"
+    readonly RECOVERY_STRATEGY_RETRY="simple_retry"
+    readonly RECOVERY_STRATEGY_SAFE="safe_recovery"
+    readonly RECOVERY_STRATEGY_TIMEOUT="timeout_recovery"
+fi
 
 # Error tracking
 declare -A ERROR_HISTORY
