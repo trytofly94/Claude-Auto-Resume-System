@@ -1423,7 +1423,11 @@ add_task_to_queue() {
         fi
     else
         # Normal environment - use array
-        current_size=${#TASK_STATES[@]}
+        if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} ]] 2>/dev/null; then
+            current_size=${#TASK_STATES[@]}
+        else
+            current_size=0
+        fi
     fi
     
     if [[ ${TASK_QUEUE_MAX_SIZE:-0} -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then

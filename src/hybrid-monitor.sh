@@ -367,7 +367,7 @@ handle_task_queue_operations() {
         log_info "Adding custom task to queue: $ADD_CUSTOM"
         # Generate unique task ID
         local task_id="custom-$(date +%s)"
-        if "${TASK_QUEUE_SCRIPT}" add custom "$task_id" "$ADD_CUSTOM"; then
+        if "${TASK_QUEUE_SCRIPT}" add custom 3 "$task_id" "description" "$ADD_CUSTOM"; then
             log_info "Successfully added custom task to queue: $task_id"
             operation_handled=true
         else
