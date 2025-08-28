@@ -94,6 +94,21 @@ tail -f logs/hybrid-monitor.log            # Live-Logs
 tmux list-sessions | grep claude           # Aktive Sessions
 ```
 
+### Task Queue Backup Management
+```bash
+# View current backup files
+ls -la queue/backups/                      # List all backup files
+find queue/backups/ -name "*.json" | wc -l # Count backup files
+
+# Manual backup cleanup (if needed)
+source src/task-queue.sh && cleanup_old_backups  # Clean backups older than retention period
+cleanup_old_backups 7                      # Clean backups older than 7 days
+
+# Backup file structure
+# backup-YYYYMMDD-HHMMSS.json              # Standard automatic backups
+# backup-before-clear-YYYYMMDD-HHMMSS.json # Pre-clear operation backups
+```
+
 ## 5. Konfiguration
 
 ### Standard-Konfiguration (config/default.conf)
@@ -117,6 +132,10 @@ MAX_LOG_SIZE="100M"
 # Terminal-Integration
 PREFERRED_TERMINAL="auto"
 NEW_TERMINAL_DEFAULT=true
+
+# Task Queue Backup Management
+TASK_BACKUP_RETENTION_DAYS=30              # Backup retention period (days)
+TASK_AUTO_CLEANUP_DAYS=7                   # Auto-cleanup for completed tasks (days)
 ```
 
 ## 6. Entwicklungs-Workflow

@@ -413,6 +413,278 @@ cleanup_logs() {
 }
 
 # ===============================================================================
+# PHASE 2: ENHANCED ERROR REPORTING (Issue #47)
+# ===============================================================================
+
+# Advanced structured error logging with context
+log_error_with_context() {
+    local message="$1"
+    local error_code="${2:-1}"
+    local component="${3:-unknown}"
+    local operation="${4:-unknown}"
+    local additional_context="${5:-}"
+    
+    # Capture system state for diagnostics
+    local timestamp=$(date -Iseconds)
+    local pid=$$
+    local ppid=$PPID
+    local working_dir=$PWD
+    local hostname=$(hostname 2>/dev/null || echo "unknown")
+    local user=$(whoami 2>/dev/null || echo "$USER")
+    
+    # Create structured error context
+    local error_context=""
+    if [[ "$JSON_LOGGING" == "true" ]]; then
+        error_context=$(cat <<EOF
+{
+  "level": "ERROR",
+  "timestamp": "$timestamp",
+  "message": "$message",
+  "error_code": $error_code,
+  "component": "$component",
+  "operation": "$operation",
+  "context": {
+    "pid": $pid,
+    "ppid": $ppid,
+    "hostname": "$hostname",
+    "user": "$user",
+    "working_dir": "$working_dir",
+    "additional": "$additional_context"
+  }
+}
+EOF
+        )
+    else
+        error_context="[$timestamp] [ERROR] [$component:$operation] [PID:$pid] $message"
+        if [[ -n "$additional_context" ]]; then
+            error_context="$error_context (context: $additional_context)"
+        fi
+    fi
+    
+    # Log to both standard error log and structured format
+    log_error "$message"
+    
+    # Also write structured context if available
+    if ensure_log_directory; then
+        echo "$error_context" >> "${LOG_FILE%.log}_errors.log" 2>/dev/null || true
+    fi
+}
+
+# Log lock-specific errors with detailed diagnostics
+log_lock_error() {
+    local lock_operation="$1"
+    local lock_file="$2"
+    local error_message="$3"
+    local lock_details="${4:-}"
+    
+    # Gather lock-specific diagnostics
+    local lock_diagnostics=""
+    
+    if [[ -n "$lock_file" ]] && [[ -e "$lock_file" || -d "$lock_file" ]]; then
+        local lock_permissions=$(ls -ld "$lock_file" 2>/dev/null | awk '{print $1}' || echo "unknown")
+        local lock_owner=$(ls -ld "$lock_file" 2>/dev/null | awk '{print $3":"$4}' || echo "unknown")
+        local lock_size=$(du -sh "$lock_file" 2>/dev/null | cut -f1 || echo "unknown")
+        
+        lock_diagnostics="permissions=$lock_permissions,owner=$lock_owner,size=$lock_size"
+    fi
+    
+    # Combine with any provided lock details
+    if [[ -n "$lock_details" ]]; then
+        lock_diagnostics="${lock_diagnostics:+$lock_diagnostics,}$lock_details"
+    fi
+    
+    log_error_with_context \
+        "$error_message" \
+        1 \
+        "locking" \
+        "$lock_operation" \
+        "lock_file=$lock_file,$lock_diagnostics"
+}
+
+# Log performance warnings for slow operations
+log_performance_warning() {
+    local operation="$1"
+    local duration="$2"
+    local threshold="${3:-5.0}"
+    local context="${4:-}"
+    
+    # Check if duration exceeds threshold
+    local exceeds_threshold=false
+    if command -v bc >/dev/null 2>&1; then
+        exceeds_threshold=$(echo "$duration > $threshold" | bc -l 2>/dev/null || echo 0)
+    else
+        # Simple integer comparison fallback
+        if [[ ${duration%.*} -gt ${threshold%.*} ]]; then
+            exceeds_threshold=1
+        fi
+    fi
+    
+    if [[ "$exceeds_threshold" == "1" ]]; then
+        local warning_message="Slow operation detected: $operation took ${duration}s (threshold: ${threshold}s)"
+        
+        log_warn "$warning_message"
+        log_error_with_context \
+            "$warning_message" \
+            0 \
+            "performance" \
+            "$operation" \
+            "duration=${duration}s,threshold=${threshold}s,$context"
+    fi
+}
+
+# Generate system diagnostic report for troubleshooting
+generate_system_diagnostics() {
+    local report_file="${1:-/tmp/system_diagnostics_$(date +%s).log}"
+    
+    {
+        echo "=== SYSTEM DIAGNOSTICS REPORT ==="
+        echo "Generated: $(date -Iseconds)"
+        echo "Hostname: $(hostname 2>/dev/null || echo 'unknown')"
+        echo "User: $(whoami 2>/dev/null || echo "$USER")"
+        echo "PID: $$"
+        echo "Working Directory: $PWD"
+        echo ""
+        
+        echo "=== SYSTEM INFORMATION ==="
+        echo "OS Type: $OSTYPE"
+        echo "Uname: $(uname -a 2>/dev/null || echo 'N/A')"
+        
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            echo "Memory: $(free -h 2>/dev/null || echo 'N/A')"
+            echo "Disk Space: $(df -h . 2>/dev/null || echo 'N/A')"
+        elif [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "Memory: $(vm_stat 2>/dev/null | head -10 || echo 'N/A')"
+            echo "Disk Space: $(df -h . 2>/dev/null || echo 'N/A')"
+        fi
+        
+        echo "Load Average: $(uptime 2>/dev/null || echo 'N/A')"
+        echo "Process Count: $(ps aux 2>/dev/null | wc -l || echo 'N/A')"
+        echo ""
+        
+        echo "=== PROJECT INFORMATION ==="
+        echo "Project Root: ${PROJECT_ROOT:-unknown}"
+        echo "Task Queue Dir: ${TASK_QUEUE_DIR:-unknown}"
+        echo "Script Directory: ${SCRIPT_DIR:-unknown}"
+        echo ""
+        
+        if [[ -n "${PROJECT_ROOT:-}" ]] && [[ -d "$PROJECT_ROOT" ]]; then
+            echo "Project Directory Contents:"
+            ls -la "$PROJECT_ROOT" 2>/dev/null | head -20 || echo 'N/A'
+            echo ""
+            
+            if [[ -n "${TASK_QUEUE_DIR:-}" ]] && [[ -d "$PROJECT_ROOT/$TASK_QUEUE_DIR" ]]; then
+                echo "Queue Directory Contents:"
+                ls -la "$PROJECT_ROOT/$TASK_QUEUE_DIR" 2>/dev/null || echo 'N/A'
+                echo ""
+                
+                echo "Active Locks:"
+                find "$PROJECT_ROOT/$TASK_QUEUE_DIR" -name "*.lock*" -o -name ".*.lock*" 2>/dev/null | head -10 || echo 'N/A'
+                echo ""
+            fi
+        fi
+        
+        echo "=== ENVIRONMENT VARIABLES ==="
+        env | grep -E "(LOG_|TASK_|QUEUE_|CLI_|DEBUG)" | sort || echo 'N/A'
+        echo ""
+        
+        echo "=== RECENT LOG ENTRIES ==="
+        if [[ -f "${LOG_FILE:-}" ]]; then
+            tail -20 "$LOG_FILE" 2>/dev/null || echo 'Log file not accessible'
+        else
+            echo "No log file available: ${LOG_FILE:-unset}"
+        fi
+        
+        echo ""
+        echo "=== END DIAGNOSTICS ==="
+    } > "$report_file"
+    
+    echo "$report_file"
+}
+
+# Log system diagnostic summary
+log_system_status() {
+    local component="${1:-system}"
+    
+    local load_avg="N/A"
+    local memory_info="N/A"
+    local disk_space="N/A"
+    
+    # Gather lightweight system info
+    if uptime >/dev/null 2>&1; then
+        load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+    fi
+    
+    if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v free >/dev/null; then
+        memory_info=$(free | awk 'NR==2{printf "%.1f%%", $3*100/$2}')
+    elif [[ "$OSTYPE" == "darwin"* ]] && command -v vm_stat >/dev/null; then
+        # Simplified memory calculation for macOS
+        memory_info=$(vm_stat | grep "Pages active" | awk '{print $3}' | tr -d '.' || echo "N/A")
+    fi
+    
+    if command -v df >/dev/null; then
+        disk_space=$(df -h . 2>/dev/null | awk 'NR==2{print $5}' || echo "N/A")
+    fi
+    
+    log_debug "System status [$component]: load=$load_avg, memory=$memory_info, disk=$disk_space"
+}
+
+# Enhanced error recovery logging
+log_recovery_attempt() {
+    local component="$1"
+    local issue="$2"
+    local recovery_action="$3"
+    local success="${4:-false}"
+    
+    local status_icon="❌"
+    local log_level="warn"
+    
+    if [[ "$success" == "true" ]]; then
+        status_icon="✅"
+        log_level="info"
+    fi
+    
+    local message="$status_icon Recovery attempt [$component]: $issue -> $recovery_action"
+    
+    case "$log_level" in
+        "info") log_info "$message" ;;
+        "warn") log_warn "$message" ;;
+        "error") log_error "$message" ;;
+    esac
+    
+    # Also log with structured context for analysis
+    log_error_with_context \
+        "Recovery attempt: $recovery_action" \
+        $([[ "$success" == "true" ]] && echo 0 || echo 1) \
+        "$component" \
+        "recovery" \
+        "issue=$issue,success=$success"
+}
+
+# Batch log multiple related errors
+log_error_batch() {
+    local batch_name="$1"
+    shift
+    local errors=("$@")
+    
+    log_error "Error batch: $batch_name (${#errors[@]} errors)"
+    
+    local i=1
+    for error in "${errors[@]}"; do
+        log_error "  $i. $error"
+        ((i++))
+    done
+    
+    # Create summary for structured logging
+    local error_summary=$(IFS='; '; echo "${errors[*]}")
+    log_error_with_context \
+        "Batch errors encountered" \
+        1 \
+        "batch" \
+        "$batch_name" \
+        "count=${#errors[@]},summary=$error_summary"
+}
+
+# ===============================================================================
 # MAIN ENTRY POINT (für Testing)
 # ===============================================================================
 
