@@ -11,9 +11,11 @@ set -euo pipefail
 # BASH VERSION VALIDATION (ADDRESSES GITHUB ISSUE #6)
 # ===============================================================================
 
-# Script-Informationen
-readonly SCRIPT_NAME="hybrid-monitor"
-readonly VERSION="1.0.0-alpha"
+# Script-Informationen - protect against re-sourcing
+if [[ -z "${SCRIPT_NAME:-}" ]]; then
+    readonly SCRIPT_NAME="hybrid-monitor"
+    readonly VERSION="1.0.0-alpha"
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source bash version check utility - use absolute path resolution
@@ -229,7 +231,12 @@ load_configuration() {
             
             # Setze bekannte Konfigurationsvariablen
             case "$key" in
-                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|LOG_ROTATION|MAX_LOG_SIZE|LOG_FILE|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR)
+                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|LOG_ROTATION|MAX_LOG_SIZE|LOG_FILE|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR|QUEUE_SESSION_CLEAR_BETWEEN_TASKS)
+                    eval "$key='$value'"
+                    log_debug "Config: $key=$value"
+                    ;;
+                # GitHub Integration Configuration Parameters  
+                GITHUB_INTEGRATION_ENABLED|GITHUB_AUTO_COMMENT|GITHUB_STATUS_UPDATES|GITHUB_COMPLETION_NOTIFICATIONS|GITHUB_API_TIMEOUT|GITHUB_RETRY_ATTEMPTS)
                     eval "$key='$value'"
                     log_debug "Config: $key=$value"
                     ;;
@@ -360,7 +367,7 @@ handle_task_queue_operations() {
         log_info "Adding custom task to queue: $ADD_CUSTOM"
         # Generate unique task ID
         local task_id="custom-$(date +%s)"
-        if "${TASK_QUEUE_SCRIPT}" add custom "$task_id" "$ADD_CUSTOM"; then
+        if "${TASK_QUEUE_SCRIPT}" add custom 3 "$task_id" "description" "$ADD_CUSTOM"; then
             log_info "Successfully added custom task to queue: $task_id"
             operation_handled=true
         else

@@ -29,13 +29,16 @@ declare -A SESSION_RECOVERY_COUNTS
 declare -A SESSION_LAST_SEEN
 
 # Session-Status-Konstanten
-readonly SESSION_STATE_UNKNOWN="unknown"
-readonly SESSION_STATE_STARTING="starting"
-readonly SESSION_STATE_RUNNING="running"
-readonly SESSION_STATE_USAGE_LIMITED="usage_limited"
-readonly SESSION_STATE_ERROR="error"
-readonly SESSION_STATE_STOPPED="stopped"
-readonly SESSION_STATE_RECOVERING="recovering"
+# Protect against re-sourcing - only declare readonly if not already set
+if [[ -z "${SESSION_STATE_UNKNOWN:-}" ]]; then
+    readonly SESSION_STATE_UNKNOWN="unknown"
+    readonly SESSION_STATE_STARTING="starting"
+    readonly SESSION_STATE_RUNNING="running"
+    readonly SESSION_STATE_USAGE_LIMITED="usage_limited"
+    readonly SESSION_STATE_ERROR="error"
+    readonly SESSION_STATE_STOPPED="stopped"
+    readonly SESSION_STATE_RECOVERING="recovering"
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN UND DEPENDENCIES

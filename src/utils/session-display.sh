@@ -11,31 +11,33 @@ set -euo pipefail
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
 
-# Display formatting
-readonly SESSION_DISPLAY_WIDTH=80
-readonly SESSION_ID_LABEL_WIDTH=15
-readonly SESSION_STATUS_WIDTH=12
-readonly SESSION_TIME_WIDTH=10
+# Display formatting - protect against re-sourcing
+if [[ -z "${SESSION_DISPLAY_WIDTH:-}" ]]; then
+    readonly SESSION_DISPLAY_WIDTH=80
+    readonly SESSION_ID_LABEL_WIDTH=15
+    readonly SESSION_STATUS_WIDTH=12
+    readonly SESSION_TIME_WIDTH=10
 
-# ANSI Color codes for enhanced display
-if [[ -t 1 ]]; then  # Only use colors if output is to terminal
-    readonly COLOR_RESET='\033[0m'
-    readonly COLOR_BOLD='\033[1m'
-    readonly COLOR_DIM='\033[2m'
-    readonly COLOR_GREEN='\033[32m'
-    readonly COLOR_YELLOW='\033[33m'
-    readonly COLOR_RED='\033[31m'
-    readonly COLOR_BLUE='\033[34m'
-    readonly COLOR_CYAN='\033[36m'
-else
-    readonly COLOR_RESET=''
-    readonly COLOR_BOLD=''
-    readonly COLOR_DIM=''
-    readonly COLOR_GREEN=''
-    readonly COLOR_YELLOW=''
-    readonly COLOR_RED=''
-    readonly COLOR_BLUE=''
-    readonly COLOR_CYAN=''
+    # ANSI Color codes for enhanced display
+    if [[ -t 1 ]]; then  # Only use colors if output is to terminal
+        readonly COLOR_RESET='\033[0m'
+        readonly COLOR_BOLD='\033[1m'
+        readonly COLOR_DIM='\033[2m'
+        readonly COLOR_GREEN='\033[32m'
+        readonly COLOR_YELLOW='\033[33m'
+        readonly COLOR_RED='\033[31m'
+        readonly COLOR_BLUE='\033[34m'
+        readonly COLOR_CYAN='\033[36m'
+    else
+        readonly COLOR_RESET=''
+        readonly COLOR_BOLD=''
+        readonly COLOR_DIM=''
+        readonly COLOR_GREEN=''
+        readonly COLOR_YELLOW=''
+        readonly COLOR_RED=''
+        readonly COLOR_BLUE=''
+        readonly COLOR_CYAN=''
+    fi
 fi
 
 # ===============================================================================

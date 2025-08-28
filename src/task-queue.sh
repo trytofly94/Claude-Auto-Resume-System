@@ -54,16 +54,21 @@ if ! declare -p TASK_PRIORITIES >/dev/null 2>&1; then
 fi
 
 # Task-Status-Konstanten
-readonly TASK_STATE_PENDING="pending"
-readonly TASK_STATE_IN_PROGRESS="in_progress"
-readonly TASK_STATE_COMPLETED="completed"
-readonly TASK_STATE_FAILED="failed"
-readonly TASK_STATE_TIMEOUT="timeout"
+# Protect against re-sourcing - only declare readonly if not already set
+if [[ -z "${TASK_STATE_PENDING:-}" ]]; then
+    readonly TASK_STATE_PENDING="pending"
+    readonly TASK_STATE_IN_PROGRESS="in_progress"
+    readonly TASK_STATE_COMPLETED="completed"
+    readonly TASK_STATE_FAILED="failed"
+    readonly TASK_STATE_TIMEOUT="timeout"
+fi
 
 # Task-Typ-Konstanten
-readonly TASK_TYPE_GITHUB_ISSUE="github_issue"
-readonly TASK_TYPE_GITHUB_PR="github_pr"
-readonly TASK_TYPE_CUSTOM="custom"
+if [[ -z "${TASK_TYPE_GITHUB_ISSUE:-}" ]]; then
+    readonly TASK_TYPE_GITHUB_ISSUE="github_issue"
+    readonly TASK_TYPE_GITHUB_PR="github_pr"
+    readonly TASK_TYPE_CUSTOM="custom"
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN UND DEPENDENCIES
@@ -1418,7 +1423,11 @@ add_task_to_queue() {
         fi
     else
         # Normal environment - use array
-        current_size=${#TASK_STATES[@]}
+        if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} ]] 2>/dev/null; then
+            current_size=${#TASK_STATES[@]}
+        else
+            current_size=0
+        fi
     fi
     
     if [[ ${TASK_QUEUE_MAX_SIZE:-0} -gt 0 ]] && [[ $current_size -ge $TASK_QUEUE_MAX_SIZE ]]; then
@@ -1670,9 +1679,12 @@ list_queue_tasks() {
     log_debug "Listing tasks (filter: $status_filter, sort: $sort_by)"
     
     local task_count=0
-    # Check if TASK_STATES has elements for listing
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
-        task_count=${#TASK_STATES[@]}
+    # Check if TASK_STATES has elements for listing (safe array access)
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        # Safe way to check array size for potentially uninitialized associative array
+        if [[ "${TASK_STATES[*]:-}" ]]; then
+            task_count=${#TASK_STATES[@]}
+        fi
     fi
     
     if [[ $task_count -eq 0 ]]; then
@@ -2195,7 +2207,16 @@ cleanup_old_backups() {
 init_task_queue() {
     local config_file="${1:-config/default.conf}"
     
+    # Get script directory for proper path resolution
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Use proper path resolution like hybrid-monitor.sh
+    if [[ ! -f "$config_file" ]]; then
+        config_file="$script_dir/../$config_file"
+    fi
+    
     log_info "Initializing task queue system"
+    log_debug "Using config file: $config_file"
     
     # Check dependencies first
     check_dependencies || {
@@ -2209,14 +2230,14 @@ init_task_queue() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove surrounding quotes and trim whitespace
+            value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"\(.*\)"$/\1/;s/^\047\(.*\)\047$/\1/')
             
             case "$key" in
                 TASK_QUEUE_ENABLED|TASK_QUEUE_DIR|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|TASK_QUEUE_MAX_SIZE|TASK_AUTO_CLEANUP_DAYS|TASK_BACKUP_RETENTION_DAYS|QUEUE_LOCK_TIMEOUT)
-                    # Only set from config if not already set in environment
-                    if [[ -z "${!key:-}" ]]; then
-                        eval "$key='$value'"
-                    fi
+                    # Always set from config - config file should take precedence over defaults
+                    eval "$key='$value'"
+                    log_debug "Config loaded: $key='$value'"
                     ;;
             esac
         done < <(grep -E '^[^#]*=' "$config_file" || true)
@@ -2255,8 +2276,11 @@ init_task_queue() {
     
     log_info "Task queue system initialized successfully"
     local task_count=0
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
-        task_count=${#TASK_STATES[@]}
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        # Safe way to get array size for potentially uninitialized associative array
+        if [[ "${TASK_STATES[*]:-}" ]]; then
+            task_count=${#TASK_STATES[@]}
+        fi
     fi
     log_info "Queue state: $task_count tasks loaded"
     

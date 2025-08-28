@@ -16,20 +16,23 @@ set -euo pipefail
 # ===============================================================================
 
 # GitHub API Configuration
-readonly GITHUB_API_BASE_URL="https://api.github.com"
-readonly GITHUB_API_VERSION="2022-11-28"
+# Protect against re-sourcing - only declare readonly if not already set
+if [[ -z "${GITHUB_API_BASE_URL:-}" ]]; then
+    readonly GITHUB_API_BASE_URL="https://api.github.com"
+    readonly GITHUB_API_VERSION="2022-11-28"
 
-# Rate Limiting Configuration  
-readonly GITHUB_RATE_LIMIT_THRESHOLD="${GITHUB_RATE_LIMIT_THRESHOLD:-100}"
-readonly GITHUB_RATE_LIMIT_RESET_BUFFER="${GITHUB_RATE_LIMIT_RESET_BUFFER:-60}"
+    # Rate Limiting Configuration  
+    readonly GITHUB_RATE_LIMIT_THRESHOLD="${GITHUB_RATE_LIMIT_THRESHOLD:-100}"
+    readonly GITHUB_RATE_LIMIT_RESET_BUFFER="${GITHUB_RATE_LIMIT_RESET_BUFFER:-60}"
 
-# Caching Configuration
-readonly GITHUB_CACHE_DEFAULT_TTL="${GITHUB_CACHE_DEFAULT_TTL:-300}"
-readonly GITHUB_CACHE_LONG_TTL="${GITHUB_CACHE_LONG_TTL:-3600}"
+    # Caching Configuration
+    readonly GITHUB_CACHE_DEFAULT_TTL="${GITHUB_CACHE_DEFAULT_TTL:-300}"
+    readonly GITHUB_CACHE_LONG_TTL="${GITHUB_CACHE_LONG_TTL:-3600}"
 
-# Comment Configuration
-readonly GITHUB_COMMENT_MAX_LENGTH="${GITHUB_COMMENT_MAX_LENGTH:-65536}"
-readonly GITHUB_COMMENT_TRUNCATE_SUFFIX="${GITHUB_COMMENT_TRUNCATE_SUFFIX:-... (truncated)}"
+    # Comment Configuration
+    readonly GITHUB_COMMENT_MAX_LENGTH="${GITHUB_COMMENT_MAX_LENGTH:-65536}"
+    readonly GITHUB_COMMENT_TRUNCATE_SUFFIX="${GITHUB_COMMENT_TRUNCATE_SUFFIX:-... (truncated)}"
+fi
 
 # GitHub Integration Status
 GITHUB_INTEGRATION_ENABLED="${GITHUB_INTEGRATION_ENABLED:-true}"
@@ -72,15 +75,17 @@ if ! declare -p GITHUB_REPOSITORY_INFO >/dev/null 2>&1; then
 fi
 
 # GitHub Item Type Constants
-readonly GITHUB_ITEM_TYPE_ISSUE="issue"
-readonly GITHUB_ITEM_TYPE_PR="pull_request"
-readonly GITHUB_ITEM_TYPE_UNKNOWN="unknown"
+if [[ -z "${GITHUB_ITEM_TYPE_ISSUE:-}" ]]; then
+    readonly GITHUB_ITEM_TYPE_ISSUE="issue"
+    readonly GITHUB_ITEM_TYPE_PR="pull_request"
+    readonly GITHUB_ITEM_TYPE_UNKNOWN="unknown"
 
-# Comment Template Constants
-readonly GITHUB_COMMENT_TEMPLATE_TASK_START="task_start"
-readonly GITHUB_COMMENT_TEMPLATE_PROGRESS="progress"
-readonly GITHUB_COMMENT_TEMPLATE_COMPLETION="completion"
-readonly GITHUB_COMMENT_TEMPLATE_ERROR="error"
+    # Comment Template Constants
+    readonly GITHUB_COMMENT_TEMPLATE_TASK_START="task_start"
+    readonly GITHUB_COMMENT_TEMPLATE_PROGRESS="progress"
+    readonly GITHUB_COMMENT_TEMPLATE_COMPLETION="completion"
+    readonly GITHUB_COMMENT_TEMPLATE_ERROR="error"
+fi
 
 # Module initialization flag
 GITHUB_INTEGRATION_INITIALIZED=false
@@ -1369,9 +1374,9 @@ github_integration_main() {
             echo "  Initialized: $(github_integration_initialized && echo 'Yes' || echo 'No')"
             echo "  Authentication: $(check_github_auth >/dev/null 2>&1 && echo 'OK' || echo 'FAILED')"
             echo "  User: $(get_authenticated_user 2>/dev/null || echo 'Unknown')"
-            echo "  Cache entries: $(([[ -v GITHUB_API_CACHE ]] && echo ${#GITHUB_API_CACHE[@]}) || echo 0)"
-            echo "  Rate limit cache: $(([[ -v GITHUB_RATE_LIMITS ]] && echo ${#GITHUB_RATE_LIMITS[@]}) || echo 0)"
-            echo "  Comment templates: $(([[ -v COMMENT_TEMPLATES ]] && echo ${#COMMENT_TEMPLATES[@]}) || echo 0)"
+            echo "  Cache entries: $( ([[ -v GITHUB_API_CACHE ]] && echo ${#GITHUB_API_CACHE[@]}) || echo 0)"
+            echo "  Rate limit cache: $( ([[ -v GITHUB_RATE_LIMITS ]] && echo ${#GITHUB_RATE_LIMITS[@]}) || echo 0)"
+            echo "  Comment templates: $( ([[ -v COMMENT_TEMPLATES ]] && echo ${#COMMENT_TEMPLATES[@]}) || echo 0)"
             ;;
         
         *)
