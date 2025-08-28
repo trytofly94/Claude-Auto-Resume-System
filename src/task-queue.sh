@@ -54,16 +54,21 @@ if ! declare -p TASK_PRIORITIES >/dev/null 2>&1; then
 fi
 
 # Task-Status-Konstanten
-readonly TASK_STATE_PENDING="pending"
-readonly TASK_STATE_IN_PROGRESS="in_progress"
-readonly TASK_STATE_COMPLETED="completed"
-readonly TASK_STATE_FAILED="failed"
-readonly TASK_STATE_TIMEOUT="timeout"
+# Protect against re-sourcing - only declare readonly if not already set
+if [[ -z "${TASK_STATE_PENDING:-}" ]]; then
+    readonly TASK_STATE_PENDING="pending"
+    readonly TASK_STATE_IN_PROGRESS="in_progress"
+    readonly TASK_STATE_COMPLETED="completed"
+    readonly TASK_STATE_FAILED="failed"
+    readonly TASK_STATE_TIMEOUT="timeout"
+fi
 
 # Task-Typ-Konstanten
-readonly TASK_TYPE_GITHUB_ISSUE="github_issue"
-readonly TASK_TYPE_GITHUB_PR="github_pr"
-readonly TASK_TYPE_CUSTOM="custom"
+if [[ -z "${TASK_TYPE_GITHUB_ISSUE:-}" ]]; then
+    readonly TASK_TYPE_GITHUB_ISSUE="github_issue"
+    readonly TASK_TYPE_GITHUB_PR="github_pr"
+    readonly TASK_TYPE_CUSTOM="custom"
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN UND DEPENDENCIES
@@ -1670,9 +1675,12 @@ list_queue_tasks() {
     log_debug "Listing tasks (filter: $status_filter, sort: $sort_by)"
     
     local task_count=0
-    # Check if TASK_STATES has elements for listing
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
-        task_count=${#TASK_STATES[@]}
+    # Check if TASK_STATES has elements for listing (safe array access)
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        # Safe way to check array size for potentially uninitialized associative array
+        if [[ "${TASK_STATES[*]:-}" ]]; then
+            task_count=${#TASK_STATES[@]}
+        fi
     fi
     
     if [[ $task_count -eq 0 ]]; then
@@ -2264,8 +2272,11 @@ init_task_queue() {
     
     log_info "Task queue system initialized successfully"
     local task_count=0
-    if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} -gt 0 ]] 2>/dev/null; then
-        task_count=${#TASK_STATES[@]}
+    if declare -p TASK_STATES >/dev/null 2>&1; then
+        # Safe way to get array size for potentially uninitialized associative array
+        if [[ "${TASK_STATES[*]:-}" ]]; then
+            task_count=${#TASK_STATES[@]}
+        fi
     fi
     log_info "Queue state: $task_count tasks loaded"
     
