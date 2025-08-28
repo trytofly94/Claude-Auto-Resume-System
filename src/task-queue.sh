@@ -405,11 +405,16 @@ get_lock_info() {
         return 1
     fi
     
-    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "unknown")
-    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "unknown")
-    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "unknown")
-    local lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
-    local lock_user=$(cat "$user_file" 2>/dev/null || echo "unknown")
+    local lock_pid
+    local lock_timestamp
+    local lock_hostname
+    local lock_operation
+    local lock_user
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "unknown")
+    lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "unknown")
+    lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "unknown")
+    lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
+    lock_user=$(cat "$user_file" 2>/dev/null || echo "unknown")
     
     local age="unknown"
     if [[ "$lock_timestamp" != "unknown" ]]; then
