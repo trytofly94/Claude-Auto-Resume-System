@@ -140,8 +140,10 @@ ensure_queue_directories() {
 # Generiere eindeutige Task-ID
 generate_task_id() {
     local prefix="${1:-task}"
-    local timestamp=$(date +%s)
-    local random=$(( RANDOM % 9999 ))
+    local timestamp
+    local random
+    timestamp=$(date +%s)
+    random=$(( RANDOM % 9999 ))
     
     printf "%s-%s-%04d" "$prefix" "$timestamp" "$random"
 }
@@ -224,7 +226,8 @@ cleanup_stale_lock() {
         return 0
     fi
     
-    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
     
     # Empty PID = invalid lock, clean it up  
     if [[ -z "$lock_pid" ]]; then
@@ -256,9 +259,12 @@ cleanup_stale_lock_aggressive() {
     local hostname_file="$lock_dir/hostname"
     
     # Pass 1: Standard validation
-    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
-    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "")
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    local lock_timestamp
+    lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
+    local lock_hostname
+    lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "")
     local should_cleanup=false
     local cleanup_reason=""
     
@@ -271,9 +277,12 @@ cleanup_stale_lock_aggressive() {
     
     # Criteria 2: Age-based cleanup (locks older than 10 minutes)
     if [[ -n "$lock_timestamp" ]]; then
-        local current_time=$(date +%s)
-        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
-        local age=$((current_time - lock_time))
+        local current_time
+        current_time=$(date +%s)
+        local lock_time
+        lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        local age
+        age=$((current_time - lock_time))
         
         if [[ $age -gt 600 ]]; then  # 10 minutes
             log_info "Stale lock detected: Lock age ${age}s exceeds timeout"
@@ -404,8 +413,10 @@ get_lock_info() {
     
     local age="unknown"
     if [[ "$lock_timestamp" != "unknown" ]]; then
-        local current_time=$(date +%s)
-        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        local current_time
+        current_time=$(date +%s)
+        local lock_time
+        lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
         if [[ $lock_time -gt 0 ]]; then
             age=$((current_time - lock_time))
         fi
@@ -675,10 +686,13 @@ get_lock_info() {
     
     # Calculate lock age if we have a timestamp
     if [[ "$lock_timestamp" != "unknown" ]]; then
-        local current_time=$(date +%s)
-        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        local current_time
+        current_time=$(date +%s)
+        local lock_time
+        lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
         if [[ $lock_time -gt 0 ]]; then
-            local age=$((current_time - lock_time))
+            local age
+        age=$((current_time - lock_time))
             echo "Lock Age: ${age} seconds"
             if [[ $age -gt 600 ]]; then
                 echo "Age Status: ⚠️  Old lock (>10 minutes)"
