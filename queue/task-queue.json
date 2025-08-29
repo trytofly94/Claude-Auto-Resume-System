@@ -1,14 +1,121 @@
 {
   "version": "1.0",
-  "created": "2025-08-28T18:21:51+02:00",
-  "last_updated": "2025-08-28T18:21:51+02:00",
-  "total_tasks": 0,
-  "pending_tasks": 0,
+  "created": "2025-08-28T17:54:04+02:00",
+  "last_updated": "2025-08-28T17:54:04+02:00",
+  "total_tasks": 9,
+  "pending_tasks": 9,
   "active_tasks": 0,
   "completed_tasks": 0,
   "failed_tasks": 0,
   "timeout_tasks": 0,
   "tasks": [
-
+    {
+      "id": "task-1756395699-3031",
+      "type": "custom",
+      "priority": 1,
+      "status": "pending",
+      "created_at": "2025-08-28T17:41:39+02:00",
+      "updated_at": "2025-08-28T17:41:39+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3,
+      "description": "Fresh test task",
+      "command": "echo fresh"
+    },
+    {
+      "id": "--description",
+      "type": "custom",
+      "priority": 3,
+      "status": "pending",
+      "created_at": "2025-08-28T17:46:14+02:00",
+      "updated_at": "2025-08-28T17:46:14+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3
+    },
+    {
+      "id": "task-1756367892-3807",
+      "type": "custom",
+      "priority": 5,
+      "status": "pending",
+      "created_at": "2025-08-28T09:58:13+02:00",
+      "updated_at": "2025-08-28T09:58:13+02:00",
+      "timeout": 30,
+      "retry_count": 0,
+      "max_retries": 3
+    },
+    {
+      "id": "task-1756395650-0029",
+      "type": "custom",
+      "priority": 2,
+      "status": "pending",
+      "created_at": "2025-08-28T17:40:50+02:00",
+      "updated_at": "2025-08-28T17:40:50+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3,
+      "description": "Test task 2",
+      "command": "echo test2"
+    },
+    {
+      "id": "custom-1756396438",
+      "type": "custom",
+      "priority": 3,
+      "status": "pending",
+      "created_at": "2025-08-28T17:54:04+02:00",
+      "updated_at": "2025-08-28T17:54:04+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3,
+      "description": "Integration test task"
+    },
+    {
+      "id": "task-1756395641-0805",
+      "type": "custom",
+      "priority": 1,
+      "status": "pending",
+      "created_at": "2025-08-28T17:40:41+02:00",
+      "updated_at": "2025-08-28T17:40:41+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3,
+      "description": "Test task 1",
+      "command": "echo test1"
+    },
+    {
+      "id": "--title",
+      "type": "custom",
+      "priority": 1,
+      "status": "pending",
+      "created_at": "2025-08-28T17:45:27+02:00",
+      "updated_at": "2025-08-28T17:45:27+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3
+    },
+    {
+      "id": "task-1756395806-8227",
+      "type": "custom",
+      "priority": 1,
+      "status": "pending",
+      "created_at": "2025-08-28T17:43:27+02:00",
+      "updated_at": "2025-08-28T17:43:27+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3,
+      "description": "Auto-cleanup test",
+      "command": "echo test"
+    },
+    {
+      "id": "concurrent-test-1",
+      "type": "custom",
+      "priority": 1,
+      "status": "pending",
+      "created_at": "2025-08-28T17:52:21+02:00",
+      "updated_at": "2025-08-28T17:52:21+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3
+    }
   ]
 }

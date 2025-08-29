@@ -140,8 +140,10 @@ ensure_queue_directories() {
 # Generiere eindeutige Task-ID
 generate_task_id() {
     local prefix="${1:-task}"
-    local timestamp=$(date +%s)
-    local random=$(( RANDOM % 9999 ))
+    local timestamp
+    local random
+    timestamp=$(date +%s)
+    random=$(( RANDOM % 9999 ))
     
     printf "%s-%s-%04d" "$prefix" "$timestamp" "$random"
 }
@@ -224,7 +226,8 @@ cleanup_stale_lock() {
         return 0
     fi
     
-    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
     
     # Empty PID = invalid lock, clean it up  
     if [[ -z "$lock_pid" ]]; then
@@ -240,6 +243,84 @@ cleanup_stale_lock() {
         return 0
     else
         log_debug "Lock process $lock_pid is alive - not cleaning up"
+        return 1
+    fi
+}
+
+# Enhanced aggressive stale lock cleanup with multi-criteria validation
+cleanup_stale_lock_aggressive() {
+    local lock_dir="$1"
+    local force_cleanup="${2:-false}"
+    
+    [[ -d "$lock_dir" ]] || return 0
+    
+    local pid_file="$lock_dir/pid"
+    local timestamp_file="$lock_dir/timestamp"
+    local hostname_file="$lock_dir/hostname"
+    
+    # Pass 1: Standard validation
+    local lock_pid
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    local lock_timestamp
+    lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "")
+    local lock_hostname
+    lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "")
+    local should_cleanup=false
+    local cleanup_reason=""
+    
+    # Criteria 1: Dead process check
+    if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_info "Stale lock detected: Process $lock_pid is dead"
+        should_cleanup=true
+        cleanup_reason="dead_process"
+    fi
+    
+    # Criteria 2: Age-based cleanup (locks older than 10 minutes)
+    if [[ -n "$lock_timestamp" ]]; then
+        local current_time
+        current_time=$(date +%s)
+        local lock_time
+        lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        local age
+        age=$((current_time - lock_time))
+        
+        if [[ $age -gt 600 ]]; then  # 10 minutes
+            log_info "Stale lock detected: Lock age ${age}s exceeds timeout"
+            should_cleanup=true
+            cleanup_reason="age_timeout"
+        fi
+    fi
+    
+    # Criteria 3: Different hostname (network filesystem safety)
+    if [[ -n "$lock_hostname" && "$lock_hostname" != "$HOSTNAME" ]]; then
+        log_debug "Cross-host lock detected: $lock_hostname vs $HOSTNAME"
+        # Only cleanup if process is confirmed dead or very old
+        if [[ "$should_cleanup" == "true" ]]; then
+            cleanup_reason="${cleanup_reason}_cross_host"
+        fi
+    fi
+    
+    # Criteria 4: Force cleanup (emergency override)
+    if [[ "$force_cleanup" == "true" ]]; then
+        log_warn "Force cleanup requested for lock in $lock_dir"
+        should_cleanup=true
+        cleanup_reason="force_cleanup"
+    fi
+    
+    # Execute cleanup with verification
+    if [[ "$should_cleanup" == "true" ]]; then
+        log_info "Removing stale lock: $lock_dir (reason: $cleanup_reason)"
+        
+        # Attempt removal with verification
+        if rm -rf "$lock_dir" 2>/dev/null; then
+            log_info "Successfully removed stale lock: $lock_dir"
+            return 0
+        else
+            log_error "Failed to remove stale lock directory: $lock_dir"
+            return 1
+        fi
+    else
+        log_debug "Lock appears valid - not cleaning up: $lock_dir"
         return 1
     fi
 }
@@ -324,16 +405,23 @@ get_lock_info() {
         return 1
     fi
     
-    local lock_pid=$(cat "$pid_file" 2>/dev/null || echo "unknown")
-    local lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "unknown")
-    local lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "unknown")
-    local lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
-    local lock_user=$(cat "$user_file" 2>/dev/null || echo "unknown")
+    local lock_pid
+    local lock_timestamp
+    local lock_hostname
+    local lock_operation
+    local lock_user
+    lock_pid=$(cat "$pid_file" 2>/dev/null || echo "unknown")
+    lock_timestamp=$(cat "$timestamp_file" 2>/dev/null || echo "unknown")
+    lock_hostname=$(cat "$hostname_file" 2>/dev/null || echo "unknown")
+    lock_operation=$(cat "$operation_file" 2>/dev/null || echo "unknown")
+    lock_user=$(cat "$user_file" 2>/dev/null || echo "unknown")
     
     local age="unknown"
     if [[ "$lock_timestamp" != "unknown" ]]; then
-        local current_time=$(date +%s)
-        local lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        local current_time
+        current_time=$(date +%s)
+        local lock_time
+        lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
         if [[ $lock_time -gt 0 ]]; then
             age=$((current_time - lock_time))
         fi
@@ -460,21 +548,300 @@ release_queue_lock_atomic() {
     fi
 }
 
+# Enhanced lock acquisition with aggressive recovery
+acquire_queue_lock_with_aggressive_recovery() {
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    local operation="${1:-unknown}"
+    local max_attempts=15  # Increased from 10
+    local attempts=0
+    
+    log_debug "Starting aggressive lock acquisition for: $operation"
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        # Phase 1: Standard acquisition attempt
+        if mkdir "$lock_dir" 2>/dev/null; then
+            # Success - write metadata
+            echo $$ > "$lock_dir/pid" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write PID to lock directory"
+                ((attempts++))
+                continue
+            }
+            
+            date -Iseconds > "$lock_dir/timestamp" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write timestamp to lock directory" 
+                ((attempts++))
+                continue
+            }
+            
+            echo "$HOSTNAME" > "$lock_dir/hostname" 2>/dev/null || {
+                rm -rf "$lock_dir" 2>/dev/null
+                log_error "Failed to write hostname to lock directory"
+                ((attempts++))
+                continue
+            }
+            
+            echo "$USER" > "$lock_dir/user" 2>/dev/null || true
+            echo "$operation" > "$lock_dir/operation" 2>/dev/null || true
+            echo "${CLI_MODE:-false}" > "$lock_dir/cli_mode" 2>/dev/null || true
+            
+            log_info "Acquired queue lock (pid: $$, attempt: $attempts, operation: $operation)"
+            return 0
+        fi
+        
+        # Phase 2: Standard stale lock cleanup
+        if cleanup_stale_lock_aggressive "$lock_dir" false; then
+            log_debug "Standard cleanup successful, retrying immediately"
+            continue  # Retry immediately after successful cleanup
+        fi
+        
+        # Phase 3: Escalated cleanup after multiple failures
+        if [[ $attempts -ge 5 ]]; then
+            log_warn "Multiple lock acquisition failures, attempting aggressive cleanup"
+            if cleanup_stale_lock_aggressive "$lock_dir" false; then
+                log_info "Aggressive cleanup successful, retrying"
+                continue
+            fi
+        fi
+        
+        # Phase 4: Emergency force cleanup (last resort)
+        if [[ $attempts -ge 12 ]]; then
+            log_error "Emergency force cleanup - persistent lock blocking operations"
+            if cleanup_stale_lock_aggressive "$lock_dir" true; then
+                log_warn "Force cleanup successful - lock was likely stale"
+                continue
+            else
+                log_error "Force cleanup failed - lock directory may have permission issues"
+            fi
+        fi
+        
+        # Exponential backoff with jitter
+        local wait_time=$(echo "scale=2; 0.1 * (1.5 ^ $attempts) + ($RANDOM % 1000) / 10000" | bc -l 2>/dev/null || echo "1")
+        wait_time=$(echo "if ($wait_time > 5.0) 5.0 else $wait_time" | bc -l 2>/dev/null || echo "2")
+        
+        log_debug "Lock attempt $((attempts + 1))/$max_attempts failed, waiting ${wait_time}s"
+        sleep "$wait_time" 2>/dev/null || sleep 1
+        
+        ((attempts++))
+    done
+    
+    # Final attempt with full diagnostic information
+    log_error "Failed to acquire queue lock after $max_attempts aggressive attempts"
+    show_lock_diagnostic_info "$lock_dir"
+    return 1
+}
+
+# Show detailed lock diagnostic information
+show_lock_diagnostic_info() {
+    local lock_dir="$1"
+    
+    echo "=== LOCK DIAGNOSTIC INFORMATION ==="
+    echo "Lock directory: $lock_dir"
+    echo "Directory exists: $([[ -d "$lock_dir" ]] && echo "YES" || echo "NO")"
+    
+    if [[ -d "$lock_dir" ]]; then
+        echo "Lock details:"
+        get_lock_info "$lock_dir" | sed 's/^/  /'
+        echo
+        echo "Directory contents:"
+        ls -la "$lock_dir" 2>/dev/null | sed 's/^/  /' || echo "  (Cannot list contents)"
+        echo
+        echo "Directory permissions:"
+        ls -ld "$lock_dir" 2>/dev/null | sed 's/^/  /' || echo "  (Cannot check permissions)"
+    fi
+    
+    echo "System information:"
+    echo "  Current user: $USER"
+    echo "  Current PID: $$"
+    echo "  Hostname: $HOSTNAME"
+    echo "  System load: $(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')"
+    echo "  Available disk space:"
+    df -h "$PROJECT_ROOT" 2>/dev/null | tail -n 1 | sed 's/^/    /' || echo "    (Cannot check disk space)"
+    echo "================================="
+}
+
+# Get lock information in a readable format
+get_lock_info() {
+    local lock_dir="$1"
+    
+    if [[ ! -d "$lock_dir" ]]; then
+        echo "No lock directory found"
+        return 1
+    fi
+    
+    local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
+    local lock_timestamp=$(cat "$lock_dir/timestamp" 2>/dev/null || echo "unknown")
+    local lock_hostname=$(cat "$lock_dir/hostname" 2>/dev/null || echo "unknown")
+    local lock_user=$(cat "$lock_dir/user" 2>/dev/null || echo "unknown")
+    local lock_operation=$(cat "$lock_dir/operation" 2>/dev/null || echo "unknown")
+    
+    echo "PID: $lock_pid"
+    if [[ "$lock_pid" != "unknown" ]]; then
+        if kill -0 "$lock_pid" 2>/dev/null; then
+            echo "Process Status: ✅ Running"
+        else
+            echo "Process Status: ❌ Dead (STALE LOCK)"
+        fi
+    fi
+    echo "Timestamp: $lock_timestamp"
+    echo "Hostname: $lock_hostname"
+    echo "User: $lock_user"
+    echo "Operation: $lock_operation"
+    
+    # Calculate lock age if we have a timestamp
+    if [[ "$lock_timestamp" != "unknown" ]]; then
+        local current_time
+        current_time=$(date +%s)
+        local lock_time
+        lock_time=$(date -d "$lock_timestamp" +%s 2>/dev/null || echo 0)
+        if [[ $lock_time -gt 0 ]]; then
+            local age
+        age=$((current_time - lock_time))
+            echo "Lock Age: ${age} seconds"
+            if [[ $age -gt 600 ]]; then
+                echo "Age Status: ⚠️  Old lock (>10 minutes)"
+            else
+                echo "Age Status: ✅ Fresh lock"
+            fi
+        fi
+    fi
+}
+
+# Emergency unlock command for manual intervention
+force_unlock_queue_cmd() {
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    
+    echo "🚨 EMERGENCY QUEUE UNLOCK"
+    echo "Current lock status:"
+    
+    if [[ -d "$lock_dir" ]]; then
+        get_lock_info "$lock_dir"
+        echo
+        echo "⚠️  WARNING: Force unlock will remove the lock regardless of validity"
+        echo "   Only proceed if you're certain no other processes are using the queue"
+        echo
+        
+        if [[ "${CLI_MODE:-false}" != "true" ]]; then
+            read -p "Proceed with force unlock? (yes/NO): " confirm
+            if [[ "$confirm" != "yes" ]]; then
+                echo "Force unlock cancelled"
+                return 1
+            fi
+        fi
+        
+        if cleanup_stale_lock_aggressive "$lock_dir" true; then
+            echo "✅ Queue unlocked successfully"
+            echo "📋 Testing queue functionality..."
+            
+            # Test queue operations
+            if ./src/task-queue.sh status >/dev/null 2>&1; then
+                echo "✅ Queue is now functional"
+                return 0
+            else
+                echo "⚠️  Queue unlock succeeded but functionality test failed"
+                return 1
+            fi
+        else
+            echo "❌ Force unlock failed - check directory permissions"
+            return 1
+        fi
+    else
+        echo "No active locks found"
+        return 0
+    fi
+}
+
+# Handle lock acquisition failure with user-friendly error reporting
+handle_lock_acquisition_failure() {
+    local operation="$1"
+    local attempts="$2"
+    local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
+    
+    echo "❌ QUEUE LOCK ACQUISITION FAILED"
+    echo "   Operation: $operation"
+    echo "   Attempts: $attempts"
+    echo
+    
+    # Analyze failure reason
+    if [[ -d "$lock_dir" ]]; then
+        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
+        local lock_timestamp=$(cat "$lock_dir/timestamp" 2>/dev/null || echo "unknown")
+        
+        echo "🔒 ACTIVE LOCK DETECTED"
+        echo "   Process ID: $lock_pid"
+        echo "   Created: $lock_timestamp"
+        
+        if [[ "$lock_pid" != "unknown" ]]; then
+            if kill -0 "$lock_pid" 2>/dev/null; then
+                echo "   Status: ✅ Process is running"
+                echo
+                echo "📋 RECOMMENDED ACTIONS:"
+                echo "   1. Wait for the running operation to complete"
+                echo "   2. Check if process $lock_pid is stuck: ps -p $lock_pid -o pid,etime,comm"
+                echo "   3. If stuck, terminate process: kill $lock_pid"
+                echo "   4. If terminated, retry your operation immediately"
+            else
+                echo "   Status: ❌ Process is dead (STALE LOCK DETECTED)"
+                echo
+                echo "🚨 STALE LOCK RECOVERY:"
+                echo "   The lock is held by a dead process. This should be cleaned up automatically."
+                echo
+                echo "📋 RECOMMENDED ACTIONS:"
+                echo "   1. Retry your operation (stale locks are cleaned up automatically)"  
+                echo "   2. If problem persists, run: ./src/task-queue.sh lock cleanup"
+                echo "   3. For emergency unlock: ./src/task-queue.sh lock force-unlock"
+            fi
+        else
+            echo "   Status: ❓ Invalid lock (no PID)"
+            echo
+            echo "📋 RECOMMENDED ACTIONS:"
+            echo "   1. Run: ./src/task-queue.sh lock cleanup"
+            echo "   2. Retry your operation"
+        fi
+    else
+        echo "🚨 UNKNOWN LOCK FAILURE"
+        echo "   No active lock detected, but acquisition failed"
+        echo
+        echo "📋 POSSIBLE CAUSES:"
+        echo "   1. Permission issues with queue directory"
+        echo "   2. Disk space exhaustion" 
+        echo "   3. File system errors"
+        echo "   4. High system load causing timeouts"
+        echo
+        echo "📋 RECOMMENDED ACTIONS:"
+        echo "   1. Check disk space: df -h $PROJECT_ROOT"
+        echo "   2. Check permissions: ls -ld $PROJECT_ROOT/$TASK_QUEUE_DIR"
+        echo "   3. Check system load: uptime"
+        echo "   4. Retry operation with higher timeout"
+    fi
+    
+    echo
+    echo "🔧 SUPPORT COMMANDS:"
+    echo "   ./src/task-queue.sh lock status      - Show lock status"
+    echo "   ./src/task-queue.sh lock health      - System health check"
+    echo "   ./src/task-queue.sh lock cleanup     - Clean stale locks"
+    echo "   ./src/task-queue.sh lock force-unlock - Emergency unlock"
+}
+
 # ===============================================================================
 # FILE-LOCKING FÜR ATOMIC OPERATIONS - Updated to use Enhanced System
 # ===============================================================================
 
 # Acquire queue lock für sichere Operationen - always use atomic directory-based locking
 acquire_queue_lock() {
-    # Always use atomic directory-based locking for better cross-platform reliability
-    # This eliminates the need for flock and provides more robust locking
+    # Use enhanced aggressive recovery for better stale lock handling
     local result
-    acquire_queue_lock_atomic "$@"
+    acquire_queue_lock_with_aggressive_recovery "$@"
     result=$?
     if [[ $result -ne 0 ]]; then
-        log_debug "acquire_queue_lock_atomic returned $result"
+        log_debug "acquire_queue_lock_with_aggressive_recovery returned $result"
+        # Provide user-friendly error reporting for CLI mode
+        if [[ "${CLI_MODE:-false}" == "true" ]]; then
+            handle_lock_acquisition_failure "${1:-unknown}" "15"
+        fi
     else
-        log_debug "acquire_queue_lock_atomic succeeded"
+        log_debug "acquire_queue_lock_with_aggressive_recovery succeeded"
     fi
     return $result
 }
@@ -4268,10 +4635,19 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                     show_lock_status_cmd
                     ;;
                 "cleanup")
-                    cleanup_locks_cmd
+                    echo "Cleaning up stale locks with enhanced detection..."
+                    cleanup_all_stale_locks
+                    cleanup_all_typed_locks
+                    echo "✅ Stale lock cleanup completed"
                     ;;
                 "health")
                     lock_health_check_cmd
+                    ;;
+                "force-unlock"|"unlock")
+                    force_unlock_queue_cmd
+                    ;;
+                "diagnostic"|"diag")
+                    show_lock_diagnostic_info "$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
                     ;;
                 "typed")
                     show_typed_locks
@@ -4280,10 +4656,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                     cleanup_all_typed_locks
                     ;;
                 *)
-                    echo "Usage: $0 lock [status|cleanup|health|typed|cleanup-typed]"
-                    echo "  status       - Show current lock status"
-                    echo "  cleanup      - Clean up stale locks"
+                    echo "Usage: $0 lock [status|cleanup|health|force-unlock|diagnostic|typed|cleanup-typed]"
+                    echo "  status       - Show current lock status with detailed information"
+                    echo "  cleanup      - Clean up stale locks (enhanced detection)"  
                     echo "  health       - Check lock system health"
+                    echo "  force-unlock - Emergency unlock (removes any locks)"
+                    echo "  diagnostic   - Show detailed diagnostic information"
                     echo "  typed        - Show typed locks"
                     echo "  cleanup-typed - Clean up all typed locks"
                     exit 1
