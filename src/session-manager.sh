@@ -22,11 +22,9 @@ RECOVERY_DELAY="${RECOVERY_DELAY:-30}"
 MAX_RECOVERY_ATTEMPTS="${MAX_RECOVERY_ATTEMPTS:-3}"
 
 # Session-State-Tracking
-declare -A SESSIONS
-declare -A SESSION_STATES
-declare -A SESSION_RESTART_COUNTS
-declare -A SESSION_RECOVERY_COUNTS
-declare -A SESSION_LAST_SEEN
+# Arrays will be initialized via init_session_arrays() when needed
+# This prevents issues with sourcing contexts and scope problems
+SESSIONS_INITIALIZED=false
 
 # Session-Status-Konstanten
 # Protect against re-sourcing - only declare readonly if not already set
@@ -77,6 +75,96 @@ generate_session_id() {
 }
 
 # ===============================================================================
+# ARRAY INITIALIZATION AND VALIDATION
+# ===============================================================================
+
+# Bulletproof array initialization
+init_session_arrays() {
+    log_debug "Initializing session management arrays"
+    
+    # Use declare -gA for global associative arrays
+    # This ensures arrays are available globally when sourced
+    declare -gA SESSIONS 2>/dev/null || true
+    declare -gA SESSION_STATES 2>/dev/null || true  
+    declare -gA SESSION_RESTART_COUNTS 2>/dev/null || true
+    declare -gA SESSION_RECOVERY_COUNTS 2>/dev/null || true
+    declare -gA SESSION_LAST_SEEN 2>/dev/null || true
+    
+    # Verify successful initialization  
+    if ! declare -p SESSIONS >/dev/null 2>&1; then
+        log_error "CRITICAL: Failed to declare SESSIONS array"
+        return 1
+    fi
+    
+    # Initialize with empty state if not already set
+    # Use safer array length check to avoid nounset errors
+    local session_count=0
+    set +u  # Temporarily disable nounset for array access
+    if declare -p SESSIONS >/dev/null 2>&1; then
+        session_count=${#SESSIONS[@]}
+    fi
+    set -u  # Re-enable nounset
+    
+    if [[ $session_count -eq 0 ]]; then
+        log_debug "SESSIONS array initialized (empty state)"
+    else
+        log_debug "SESSIONS array already contains $session_count entries"
+    fi
+    
+    log_info "Session arrays initialized successfully"
+    return 0
+}
+
+# Comprehensive array validation function
+validate_session_arrays() {
+    local errors=0
+    
+    # Check each required array
+    for array_name in SESSIONS SESSION_STATES SESSION_RESTART_COUNTS SESSION_RECOVERY_COUNTS SESSION_LAST_SEEN; do
+        if ! declare -p "$array_name" >/dev/null 2>&1; then
+            log_error "Array $array_name is not declared"
+            ((errors++))
+        else
+            log_debug "Array $array_name is properly declared"
+        fi
+    done
+    
+    if [[ $errors -gt 0 ]]; then
+        log_error "Found $errors array declaration errors"
+        return 1
+    fi
+    
+    log_debug "All session arrays are properly validated"
+    return 0
+}
+
+# Safe array access wrapper
+safe_array_get() {
+    local array_name="$1"
+    local key="$2"
+    local default_value="${3:-}"
+    
+    # Ensure array exists
+    if ! declare -p "$array_name" >/dev/null 2>&1; then
+        echo "$default_value"
+        return 1
+    fi
+    
+    # Access array value safely
+    local -n array_ref="$array_name"
+    echo "${array_ref[$key]:-$default_value}"
+}
+
+# Ensure arrays are initialized before access
+ensure_arrays_initialized() {
+    if [[ "$SESSIONS_INITIALIZED" != "true" ]]; then
+        log_debug "Arrays not initialized, calling init_session_arrays"
+        init_session_arrays || return 1
+        SESSIONS_INITIALIZED=true
+    fi
+}
+
+# ===============================================================================
 # SESSION-STATE-MANAGEMENT
 # ===============================================================================
 
@@ -88,13 +176,38 @@ register_session() {
     
     log_info "Registering new session: $session_id"
     
-    SESSIONS["$session_id"]="$project_name:$working_dir"
-    SESSION_STATES["$session_id"]="$SESSION_STATE_STARTING"
+    # CRITICAL FIX: Ensure arrays are initialized before access
+    if ! declare -p SESSIONS >/dev/null 2>&1; then
+        log_warn "SESSIONS array not declared, initializing now"
+        init_session_arrays || {
+            log_error "Failed to initialize session arrays"
+            return 1
+        }
+    fi
+    
+    # Validate parameters
+    if [[ -z "$session_id" ]] || [[ -z "$project_name" ]] || [[ -z "$working_dir" ]]; then
+        log_error "Invalid parameters for session registration"
+        return 1
+    fi
+    
+    # Defensive array access with error handling
+    SESSIONS["$session_id"]="$project_name:$working_dir" || {
+        log_error "Failed to register session in SESSIONS array"
+        return 1
+    }
+    
+    SESSION_STATES["$session_id"]="$SESSION_STATE_STARTING" || {
+        log_error "Failed to set session state"
+        return 1  
+    }
+    
     SESSION_RESTART_COUNTS["$session_id"]=0
     SESSION_RECOVERY_COUNTS["$session_id"]=0
     SESSION_LAST_SEEN["$session_id"]=$(date +%s)
     
     log_debug "Session registered: $session_id -> ${SESSIONS[$session_id]}"
+    return 0
 }
 
 # Aktualisiere Session-Status
@@ -102,6 +215,9 @@ update_session_state() {
     local session_id="$1"
     local new_state="$2"
     local details="${3:-}"
+    
+    # Ensure arrays are initialized
+    ensure_arrays_initialized || return 1
     
     local old_state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
     
@@ -122,6 +238,9 @@ update_session_state() {
 # Hole Session-Informationen
 get_session_info() {
     local session_id="$1"
+    
+    # Ensure arrays are initialized
+    ensure_arrays_initialized || return 1
     
     if [[ -z "${SESSIONS[$session_id]:-}" ]]; then
         return 1
@@ -543,6 +662,21 @@ init_session_manager() {
     local config_file="${1:-config/default.conf}"
     
     log_info "Initializing session manager"
+    
+    # CRITICAL: Initialize arrays first
+    if ! init_session_arrays; then
+        log_error "Failed to initialize session arrays"
+        return 1
+    fi
+    
+    # Mark arrays as initialized
+    SESSIONS_INITIALIZED=true
+    
+    # Validate array initialization  
+    if ! validate_session_arrays; then
+        log_error "Session array validation failed"
+        return 1
+    fi
     
     # Lade Konfiguration
     if [[ -f "$config_file" ]]; then
