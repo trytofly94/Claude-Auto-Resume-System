@@ -293,12 +293,40 @@ validate_system_requirements() {
         ((errors++))
     fi
     
-    # claunch prüfen (falls aktiviert)
+    # Enhanced claunch detection with graceful fallback (addresses GitHub issue #77)
     if [[ "$USE_CLAUNCH" == "true" ]]; then
-        if ! has_command claunch && ! detect_claunch >/dev/null 2>&1; then
-            log_error "claunch not found but USE_CLAUNCH=true"
-            log_error "Please install claunch: npm install -g @0xkaz/claunch"
-            ((errors++))
+        log_debug "Validating claunch availability with enhanced detection..."
+        
+        # Use enhanced detection if available
+        if declare -f detect_claunch >/dev/null 2>&1; then
+            if detect_claunch >/dev/null 2>&1; then
+                log_debug "claunch detected successfully via enhanced detection"
+                
+                # Validate functionality
+                if declare -f validate_claunch >/dev/null 2>&1; then
+                    if validate_claunch >/dev/null 2>&1; then
+                        log_debug "claunch validated and functional"
+                    else
+                        log_warn "claunch detected but validation failed"
+                        log_info "System will automatically fall back to direct Claude CLI mode"
+                        USE_CLAUNCH="false"
+                    fi
+                fi
+            else
+                log_warn "claunch not detected with enhanced detection methods"
+                log_info "Gracefully falling back to direct Claude CLI mode"
+                log_info "Install claunch to enable full session management features:"
+                log_info "  ./scripts/install-claunch.sh"
+                USE_CLAUNCH="false"
+            fi
+        else
+            # Fallback to basic detection
+            if ! has_command claunch; then
+                log_warn "claunch not found in PATH (USE_CLAUNCH=true but claunch unavailable)"
+                log_info "Automatically switching to direct Claude CLI mode"
+                log_info "To enable claunch features, install with: ./scripts/install-claunch.sh"
+                USE_CLAUNCH="false"
+            fi
         fi
     fi
     
@@ -556,26 +584,52 @@ start_or_continue_claude_session() {
     local project_name
     project_name=$(basename "$WORKING_DIR")
     
+    # Enhanced session management with intelligent fallback (addresses GitHub issue #77)
     if [[ "$USE_CLAUNCH" == "true" ]]; then
         log_info "Starting Claude via claunch integration"
         
-        if MAIN_SESSION_ID=$(start_managed_session "$project_name" "$WORKING_DIR" "$USE_NEW_TERMINAL" "${CLAUDE_ARGS[@]}"); then
-            log_info "Claude session started successfully (ID: $MAIN_SESSION_ID)"
-            return 0
+        # Try claunch integration first
+        if declare -f start_managed_session >/dev/null 2>&1; then
+            if MAIN_SESSION_ID=$(start_managed_session "$project_name" "$WORKING_DIR" "$USE_NEW_TERMINAL" "${CLAUDE_ARGS[@]}"); then
+                log_info "Claude session started successfully via claunch (ID: $MAIN_SESSION_ID)"
+                return 0
+            else
+                log_warn "claunch session start failed - falling back to direct mode"
+                USE_CLAUNCH="false"
+                # Continue to direct mode below
+            fi
         else
-            log_error "Failed to start Claude session via claunch"
-            return 1
+            log_warn "claunch session management not available - falling back to direct mode"
+            USE_CLAUNCH="false"
+            # Continue to direct mode below  
         fi
-    else
-        log_info "Starting Claude in legacy mode"
+    fi
+    
+    # Direct Claude CLI mode (either configured or fallen back)
+    if [[ "$USE_CLAUNCH" == "false" ]]; then
+        log_info "Starting Claude directly (direct mode)"
         
-        if [[ "$USE_NEW_TERMINAL" == "true" ]]; then
-            # Starte in neuem Terminal
-            open_claude_in_terminal "${CLAUDE_ARGS[@]}"
+        # Use enhanced direct mode functions if available
+        if declare -f start_claude_direct >/dev/null 2>&1; then
+            if [[ "$USE_NEW_TERMINAL" == "true" ]]; then
+                start_claude_direct_in_new_terminal "$WORKING_DIR" "${CLAUDE_ARGS[@]}"
+            else
+                start_claude_direct "$WORKING_DIR" "${CLAUDE_ARGS[@]}"
+            fi
         else
-            # Direkte Ausführung
-            # Direct execution without bypass flags for security
-            claude "${CLAUDE_ARGS[@]}"
+            # Fallback to terminal integration or basic direct execution
+            if [[ "$USE_NEW_TERMINAL" == "true" ]]; then
+                # Try to use terminal integration
+                if declare -f open_claude_in_terminal >/dev/null 2>&1; then
+                    open_claude_in_terminal "${CLAUDE_ARGS[@]}"
+                else
+                    log_warn "Terminal integration not available - running in current terminal"
+                    claude "${CLAUDE_ARGS[@]}"
+                fi
+            else
+                # Direct execution without bypass flags for security
+                claude "${CLAUDE_ARGS[@]}"
+            fi
         fi
     fi
 }
@@ -591,6 +645,7 @@ send_recovery_command() {
         return 0
     fi
     
+    # Enhanced recovery with fallback support (addresses GitHub issue #77)
     if [[ "$USE_CLAUNCH" == "true" && -n "$MAIN_SESSION_ID" ]]; then
         # Verwende Session-Manager für Recovery
         if declare -f perform_session_recovery >/dev/null 2>&1; then
@@ -603,6 +658,10 @@ send_recovery_command() {
         fi
     else
         log_warn "Recovery command sending only supported with claunch integration"
+        if [[ "$USE_CLAUNCH" == "false" ]]; then
+            log_info "Running in direct Claude CLI mode - automatic recovery not available"
+            log_info "Please manually restart your Claude session if needed"
+        fi
         return 1
     fi
 }
@@ -772,11 +831,24 @@ handle_session_management_operations() {
         echo "Task Queue Available: ${TASK_QUEUE_AVAILABLE:-false}"
         echo "Task Queue Processing: ${TASK_QUEUE_PROCESSING:-false}"
         echo "Claude Integration: $USE_CLAUNCH"
-        echo "Claunch Mode: $CLAUNCH_MODE"
+        if [[ "$USE_CLAUNCH" == "true" ]]; then
+            echo "Claunch Mode: $CLAUNCH_MODE"
+        else
+            echo "Claunch Mode: Direct Claude CLI (fallback)"
+        fi
         echo ""
         echo "=== Dependencies ==="
         echo "Claude CLI: $(which claude 2>/dev/null || echo 'Not found')"
-        echo "Claunch: $(which claunch 2>/dev/null || echo 'Not found')"
+        
+        # Enhanced claunch detection for status report
+        local claunch_status="Not found"
+        if has_command claunch; then
+            claunch_status="$(claunch --version 2>/dev/null | head -1 || echo 'Found but version unknown')"
+        elif declare -f detect_claunch >/dev/null 2>&1 && detect_claunch >/dev/null 2>&1; then
+            claunch_status="Detected at: $CLAUNCH_PATH"
+        fi
+        echo "Claunch: $claunch_status"
+        
         echo "tmux: $(which tmux 2>/dev/null || echo 'Not found')"
         echo "jq: $(which jq 2>/dev/null || echo 'Not found')"
         echo ""
@@ -1105,8 +1177,25 @@ main() {
         init_terminal_utils "${SPECIFIED_CONFIG:-$CONFIG_FILE}"
     fi
     
+    # Enhanced claunch integration initialization with fallback support (addresses GitHub issue #77)
     if declare -f init_claunch_integration >/dev/null 2>&1; then
-        init_claunch_integration "${SPECIFIED_CONFIG:-$CONFIG_FILE}" "$WORKING_DIR"
+        log_debug "Initializing claunch integration with fallback detection..."
+        
+        if ! init_claunch_integration "${SPECIFIED_CONFIG:-$CONFIG_FILE}" "$WORKING_DIR"; then
+            log_warn "claunch integration initialization failed"
+            log_info "Continuing with direct Claude CLI mode"
+            
+            # Ensure USE_CLAUNCH is properly set to false for fallback mode
+            USE_CLAUNCH="false"
+        else
+            log_debug "claunch integration initialized successfully"
+        fi
+    else
+        log_warn "claunch integration module not available"
+        if [[ "$USE_CLAUNCH" == "true" ]]; then
+            log_info "Falling back to direct Claude CLI mode"
+            USE_CLAUNCH="false"
+        fi
     fi
     
     if declare -f init_session_manager >/dev/null 2>&1; then
