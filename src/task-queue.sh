@@ -1735,7 +1735,7 @@ add_task_to_queue() {
     validate_task_data "$task_type" "$priority" || return 1
     log_debug "Passed validate_task_data"
     
-    # Ensure arrays are initialized - caller should have loaded queue state
+    # Ensure arrays are initialized BEFORE any checks - caller should have loaded queue state
     log_debug "About to check if TASK_STATES is declared"
     if ! declare -p TASK_STATES >/dev/null 2>&1; then
         log_debug "TASK_STATES not declared, initializing arrays"
@@ -1750,6 +1750,12 @@ add_task_to_queue() {
     fi
     log_debug "Arrays are available"
     
+    # Load BATS state if in test environment
+    if [[ "${BATS_TEST_NAME:-}" != "" ]] && command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+        log_debug "Loaded BATS state before checks"
+    fi
+    
     # Generate ID if not provided
     if [[ -z "$task_id" ]]; then
         task_id=$(generate_task_id)
@@ -1762,10 +1768,18 @@ add_task_to_queue() {
     # Check if task already exists
     local task_exists=false
     if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
-        # BATS environment - use file-based tracking for duplicate detection
-        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
-        if [[ -f "$bats_state_file" ]] && grep -q "^$task_id$" "$bats_state_file" 2>/dev/null; then
-            task_exists=true
+        # BATS environment - use BATS compatibility system for duplicate detection
+        if command -v bats_safe_array_operation >/dev/null 2>&1; then
+            # Check in memory array (should be loaded from BATS state)
+            if [[ -n "${TASK_STATES[$task_id]:-}" ]]; then
+                task_exists=true
+            fi
+        else
+            # Fallback to simple file tracking
+            local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+            if [[ -f "$bats_state_file" ]] && grep -q "^$task_id$" "$bats_state_file" 2>/dev/null; then
+                task_exists=true
+            fi
         fi
     else
         # Normal environment - use array
@@ -1783,17 +1797,27 @@ add_task_to_queue() {
     # Check queue size limit
     local current_size=0
     if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
-        # BATS environment - count from file
-        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
-        if [[ -f "$bats_state_file" ]]; then
-            current_size=$(wc -l < "$bats_state_file" 2>/dev/null || echo "0")
+        # BATS environment - use BATS compatibility system for size counting
+        if command -v bats_safe_array_operation >/dev/null 2>&1; then
+            # Count from memory array (should be loaded from BATS state)
+            current_size=0
+            if declare -p TASK_STATES >/dev/null 2>&1; then
+                # Use eval to safely access array length
+                current_size=$(eval "echo \${#TASK_STATES[@]}" 2>/dev/null) || current_size=0
+            fi
+        else
+            # Fallback to simple file tracking
+            local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+            if [[ -f "$bats_state_file" ]]; then
+                current_size=$(wc -l < "$bats_state_file" 2>/dev/null || echo "0")
+            fi
         fi
     else
         # Normal environment - use array
-        if declare -p TASK_STATES >/dev/null 2>&1 && [[ ${#TASK_STATES[@]} ]] 2>/dev/null; then
-            current_size=${#TASK_STATES[@]}
-        else
-            current_size=0
+        current_size=0
+        if declare -p TASK_STATES >/dev/null 2>&1; then
+            # Use eval to safely access array length
+            current_size=$(eval "echo \${#TASK_STATES[@]}" 2>/dev/null) || current_size=0
         fi
     fi
     
@@ -1967,6 +1991,7 @@ get_next_task() {
         return 0
     else
         log_debug "No tasks found with status: $filter_status"
+        echo "No tasks found"
         return 1
     fi
 }
@@ -2491,6 +2516,11 @@ cleanup_old_tasks() {
     
     log_info "Cleaning up tasks older than $max_age_days days"
     
+    # Load BATS state in test environment to ensure we have current data
+    if [[ "${BATS_TEST_NAME:-}" != "" ]] && command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
+    
     local current_time
     current_time=$(date +%s)
     local max_age_seconds=$((max_age_days * 24 * 3600))
@@ -2513,7 +2543,10 @@ cleanup_old_tasks() {
         
         # Calculate age (basic implementation)
         local created_epoch
-        created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$(echo "$created" | cut -d'+' -f1)" "+%s" 2>/dev/null || echo "0")
+        # Strip timezone info - handle both Z and +offset formats
+        local created_clean=$(echo "$created" | sed 's/[Z+].*$//')
+        created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$created_clean" "+%s" 2>/dev/null || echo "0")
+        
         if [[ $created_epoch -gt 0 ]]; then
             local age=$((current_time - created_epoch))
             if [[ $age -gt $max_age_seconds ]]; then
