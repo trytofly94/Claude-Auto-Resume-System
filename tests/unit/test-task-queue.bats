@@ -96,14 +96,12 @@ except:
     test_init_task_queue() {
         # Check if task queue is enabled
         if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then
-            log_warn "Task queue is disabled in configuration"
+            echo "Task queue is disabled"
             return 1
         fi
         
-        # Ensure PROJECT_ROOT is set for test environment
-        if [[ -z "${PROJECT_ROOT:-}" ]]; then
-            export PROJECT_ROOT="$TEST_PROJECT_DIR"
-        fi
+        # Ensure PROJECT_ROOT is set for test environment (override for tests)
+        export PROJECT_ROOT="$TEST_PROJECT_DIR"
         
         # Ensure queue directories exist
         ensure_queue_directories || return 1
@@ -339,6 +337,11 @@ EOF
     local task_id="test-123"
     add_task_to_queue "$TASK_TYPE_CUSTOM" 5 "$task_id"
     
+    # Load BATS state to ensure arrays are synchronized
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
+    
     # Try to add duplicate ID
     run add_task_to_queue "$TASK_TYPE_CUSTOM" 3 "$task_id"
     
@@ -353,6 +356,11 @@ EOF
     # Add first two tasks
     add_task_to_queue "$TASK_TYPE_CUSTOM" 5
     add_task_to_queue "$TASK_TYPE_CUSTOM" 5
+    
+    # Load BATS state to ensure queue count is accurate
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
     
     # Third task should fail
     run add_task_to_queue "$TASK_TYPE_CUSTOM" 5
@@ -415,6 +423,11 @@ EOF
     local task2=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 1)  # Higher priority
     local task3=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 10)  # Lower priority
     
+    # Load BATS state to ensure get_next_task sees all tasks
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
+    
     run get_next_task "$TASK_STATE_PENDING"
     
     [ "$status" -eq 0 ]
@@ -428,6 +441,11 @@ EOF
     local task1=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 5)
     sleep 1
     local task2=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 5)
+    
+    # Load BATS state to ensure get_next_task sees all tasks
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
     
     run get_next_task "$TASK_STATE_PENDING"
     
@@ -815,9 +833,10 @@ EOF
     
     [ "$status" -eq 0 ]
     
-    # Check for lock file (will depend on system - flock vs alternative)
-    local lock_file="$TEST_PROJECT_DIR/queue/.queue.lock"
-    [ -f "$lock_file" ] || [ -f "$lock_file.pid" ]
+    # Check for lock directory structure created by the actual implementation
+    local lock_dir="$TEST_PROJECT_DIR/queue/.queue.lock.d"
+    local pid_file="$lock_dir/pid"
+    [ -d "$lock_dir" ] && [ -f "$pid_file" ]
 }
 
 @test "release_queue_lock removes lock file" {
@@ -857,15 +876,31 @@ EOF
     test_init_task_queue
     
     local task_id=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 5)
+    
+    # Load BATS state to ensure task is available for status updates
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
+    
     update_task_status "$task_id" "$TASK_STATE_IN_PROGRESS"
     update_task_status "$task_id" "$TASK_STATE_COMPLETED"
     
     # Mock old creation time
     TASK_TIMESTAMPS["${task_id}_created"]="2020-01-01T00:00:00Z"
     
+    # Save BATS state after modifying timestamp
+    if command -v save_bats_state >/dev/null 2>&1; then
+        save_bats_state
+    fi
+    
     run cleanup_old_tasks 1  # 1 day retention
     
     [ "$status" -eq 0 ]
+    
+    # Load BATS state to get the updated arrays after cleanup
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
     
     # Task should be cleaned up
     [ -z "${TASK_STATES[$task_id]:-}" ]
@@ -877,12 +912,22 @@ EOF
     local task_id=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 5)
     # Leave in pending state
     
+    # Load BATS state to ensure task is available
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
+    
     # Mock old creation time  
     TASK_TIMESTAMPS["${task_id}_created"]="2020-01-01T00:00:00Z"
     
     run cleanup_old_tasks 1  # 1 day retention
     
     [ "$status" -eq 0 ]
+    
+    # Load BATS state again to check if task was preserved
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
     
     # Pending task should be preserved
     [ -n "${TASK_STATES[$task_id]:-}" ]
@@ -892,13 +937,22 @@ EOF
 @test "handles corrupted JSON gracefully" {
     test_init_task_queue
     
+    # Ensure queue directory exists
+    mkdir -p "$TEST_PROJECT_DIR/queue"
+    
     # Create corrupted JSON
     echo "invalid json content" > "$TEST_PROJECT_DIR/queue/task-queue.json"
+    
+    # Use the real jq command for this test by temporarily unmocking
+    unmock_command "jq"
     
     run load_queue_state
     
     [ "$status" -eq 1 ]
     assert_output_contains "invalid JSON"
+    
+    # Re-establish mock for other tests
+    mock_command "jq" 'mock_jq "$@"'
 }
 
 @test "handles missing queue directory gracefully" {
@@ -934,6 +988,11 @@ EOF
         local task_id=$(add_task_to_queue "$TASK_TYPE_CUSTOM" $((i % 10 + 1)) "" "description" "Task $i")
         task_ids+=("$task_id")
     done
+    
+    # Load BATS state to ensure all tasks are available for operations
+    if command -v load_bats_state >/dev/null 2>&1; then
+        load_bats_state
+    fi
     
     # Test operations work with many tasks
     run list_queue_tasks
