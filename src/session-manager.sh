@@ -684,7 +684,11 @@ init_session_manager() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove quotes from beginning and end
+            value=${value#\"} 
+            value=${value%\"}
+            value=${value#\'} 
+            value=${value%\'}
             
             case "$key" in
                 MAX_RESTARTS|SESSION_RESTART_DELAY|HEALTH_CHECK_ENABLED|HEALTH_CHECK_INTERVAL|HEALTH_CHECK_TIMEOUT|AUTO_RECOVERY_ENABLED|RECOVERY_DELAY|MAX_RECOVERY_ATTEMPTS)
