@@ -1523,8 +1523,8 @@ save_queue_state() {
     
     log_debug "Saving queue state to: $queue_file"
     
-    # Create backup of existing file
-    if [[ -f "$queue_file" ]]; then
+    # Create backup of existing file (skip in performance mode)
+    if [[ -f "$queue_file" && "${SKIP_BACKUP_CREATION:-false}" != "true" ]]; then
         if cp "$queue_file" "$backup_file"; then
             log_debug "Created backup: $backup_file"
         else
@@ -1535,8 +1535,8 @@ save_queue_state() {
     
     # Write to temp file first
     if generate_queue_json > "$temp_file"; then
-        # Validate JSON before replacing original
-        if jq empty "$temp_file" 2>/dev/null; then
+        # Validate JSON before replacing original (skip in performance mode)
+        if [[ "${DISABLE_JSON_VALIDATION:-false}" == "true" ]] || jq empty "$temp_file" 2>/dev/null; then
             if mv "$temp_file" "$queue_file"; then
                 log_debug "Queue state saved successfully"
                 return 0
@@ -1815,12 +1815,19 @@ add_task_to_queue() {
     TASK_METADATA["${task_id}_timeout"]="$TASK_DEFAULT_TIMEOUT"
     TASK_METADATA["${task_id}_max_retries"]="$TASK_MAX_RETRIES"
     
-    # In BATS test environment - also use file-based tracking for persistence validation
+    # In BATS test environment - use enhanced BATS compatibility tracking
     if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
-        local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
-        mkdir -p "$(dirname "$bats_state_file")"
-        echo "$task_id" >> "$bats_state_file"
-        log_debug "Added task to BATS file-based tracking: $task_id"
+        # Use BATS compatibility system for persistent state tracking
+        if command -v save_bats_state >/dev/null 2>&1; then
+            save_bats_state
+            log_debug "Saved task state via BATS compatibility system: $task_id"
+        else
+            # Fallback to simple file tracking
+            local bats_state_file="${TEST_PROJECT_DIR:-/tmp}/queue/bats_task_states.txt"
+            mkdir -p "$(dirname "$bats_state_file")"
+            echo "$task_id" >> "$bats_state_file"
+            log_debug "Added task to BATS file-based tracking: $task_id"
+        fi
     fi
     
     # Process metadata arguments
@@ -1837,10 +1844,12 @@ add_task_to_queue() {
         ((i += 2))
     done
     
-    # Save queue state to persist the new task
-    save_queue_state || {
-        log_warn "Failed to save queue state after adding task $task_id"
-    }
+    # Save queue state to persist the new task (skip in performance mode)
+    if [[ "${TASK_QUEUE_PERFORMANCE_MODE:-false}" != "true" ]]; then
+        save_queue_state || {
+            log_warn "Failed to save queue state after adding task $task_id"
+        }
+    fi
     
     log_info "Task added to queue: $task_id ($task_type, priority=$priority)"
     echo "$task_id"  # Return task ID for caller
@@ -1897,6 +1906,14 @@ remove_task_from_queue() {
             rm -f "$task_state_file" || {
                 log_warn "Failed to remove task state file: $task_state_file"
             }
+        fi
+    fi
+    
+    # In BATS test environment - update BATS compatibility tracking  
+    if [[ "${BATS_TEST_NAME:-}" != "" ]]; then
+        if command -v save_bats_state >/dev/null 2>&1; then
+            save_bats_state
+            log_debug "Updated BATS state after task removal: $task_id"
         fi
     fi
     
