@@ -501,9 +501,12 @@ acquire_queue_lock_atomic() {
         
         # Exponential backoff with jitter
         local base_delay=0.1
-        local delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
-        local jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
-        local wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
+        local delay
+        delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
+        local jitter
+        jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
+        local wait_time
+        wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
         
         # Cap wait time at 2 seconds for CLI operations
         if [[ "${CLI_MODE:-false}" == "true" ]]; then
@@ -528,7 +531,8 @@ release_queue_lock_atomic() {
     local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/.queue.lock.d"
     
     if [[ -d "$lock_dir" ]]; then
-        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+        local lock_pid
+        lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
         
         if [[ "$lock_pid" == "$$" ]]; then
             rm -rf "$lock_dir" 2>/dev/null && {
@@ -1227,9 +1231,12 @@ acquire_typed_lock() {
         
         # Exponential backoff with jitter (same as atomic lock)
         local base_delay=0.1
-        local delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
-        local jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
-        local wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
+        local delay
+        delay=$(echo "$base_delay * (1.5 ^ $attempts)" | bc -l 2>/dev/null || echo "1")
+        local jitter
+        jitter=$(echo "scale=3; $RANDOM / 32767 * 0.1" | bc -l 2>/dev/null || echo "0")
+        local wait_time
+        wait_time=$(echo "$delay + $jitter" | bc -l 2>/dev/null || echo "1")
         
         # Cap wait time for CLI operations
         if [[ "${CLI_MODE:-false}" == "true" ]]; then
@@ -1254,7 +1261,8 @@ release_typed_lock() {
     local lock_dir="$PROJECT_ROOT/$TASK_QUEUE_DIR/${LOCK_TYPES[$lock_type]}"
     
     if [[ -d "$lock_dir" ]]; then
-        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+        local lock_pid
+        lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
         
         if [[ "$lock_pid" == "$$" ]]; then
             rm -rf "$lock_dir" 2>/dev/null && {

@@ -394,7 +394,8 @@ handle_task_queue_operations() {
     if [[ "$ADD_CUSTOM" != "" ]]; then
         log_info "Adding custom task to queue: $ADD_CUSTOM"
         # Generate unique task ID
-        local task_id="custom-$(date +%s)"
+        local task_id
+        task_id="custom-$(date +%s)"
         if "${TASK_QUEUE_SCRIPT}" add custom 3 "$task_id" "description" "$ADD_CUSTOM"; then
             log_info "Successfully added custom task to queue: $task_id"
             operation_handled=true
@@ -545,7 +546,8 @@ check_usage_limits() {
 # Behandle Usage-Limit mit intelligentem Warten
 handle_usage_limit() {
     local resume_timestamp="$1"
-    local current_timestamp=$(date +%s)
+    local current_timestamp
+    current_timestamp=$(date +%s)
     local wait_seconds=$((resume_timestamp - current_timestamp))
     
     if [[ $wait_seconds -le 0 ]]; then
