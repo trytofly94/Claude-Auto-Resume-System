@@ -327,14 +327,14 @@ install_claude_cli() {
     fi
 }
 
-# Installiere claunch
+# Enhanced claunch installation with fallback guidance (addresses GitHub issue #77)
 install_claunch() {
     if [[ "$SKIP_CLAUNCH" == "true" ]]; then
         log_info "Skipping claunch installation (--skip-claunch)"
         return 0
     fi
     
-    log_step "Installing claunch"
+    log_step "Installing claunch with enhanced detection and fallback guidance"
     
     local install_script="$SCRIPT_DIR/install-claunch.sh"
     
@@ -343,10 +343,31 @@ install_claunch() {
         return 1
     fi
     
+    # Pre-installation: Check if claunch is already available with enhanced detection
+    log_info "Pre-installation check: Detecting existing claunch installation..."
+    
+    # Source enhanced detection temporarily
+    local claunch_integration="$PROJECT_ROOT/src/claunch-integration.sh"
+    if [[ -f "$claunch_integration" ]]; then
+        source "$claunch_integration" || true
+        
+        if detect_claunch >/dev/null 2>&1 && validate_claunch >/dev/null 2>&1; then
+            if [[ "$FORCE_REINSTALL" != "true" ]]; then
+                log_success "claunch already available and functional: $CLAUNCH_PATH ($CLAUNCH_VERSION)"
+                log_info "Skipping installation (use --force to reinstall)"
+                return 0
+            else
+                log_info "claunch detected but forcing reinstallation as requested"
+            fi
+        else
+            log_info "claunch not detected or not functional - proceeding with installation"
+        fi
+    fi
+    
     # Baue Argumente für claunch-Installer
     local claunch_args=()
     
-    # Use specified claunch installation method
+    # Use specified claunch installation method (official installer from 2025-08-27 work)
     claunch_args+=("--method" "$CLAUNCH_METHOD")
     
     if [[ "$FORCE_REINSTALL" == "true" ]]; then
@@ -360,13 +381,58 @@ install_claunch() {
     # Führe claunch-Installation aus
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would run: $install_script ${claunch_args[*]}"
-    else
-        if bash "$install_script" "${claunch_args[@]}"; then
-            log_success "claunch installation completed"
+        return 0
+    fi
+    
+    log_info "Running claunch installer with method: $CLAUNCH_METHOD"
+    if bash "$install_script" "${claunch_args[@]}"; then
+        log_success "claunch installation completed successfully"
+        
+        # Post-installation verification with enhanced detection
+        log_info "Post-installation verification with enhanced detection..."
+        if verify_claunch_installation; then
+            log_success "claunch installation verified and ready for use"
+            
+            # Show user what was installed
+            if [[ -n "${CLAUNCH_PATH:-}" ]]; then
+                log_info "claunch installed at: $CLAUNCH_PATH"
+                log_info "claunch version: ${CLAUNCH_VERSION:-unknown}"
+            fi
         else
-            log_error "claunch installation failed"
-            return 1
+            log_warn "claunch installation completed but verification failed"
+            log_warn "The system will fall back to direct Claude CLI mode if needed"
         fi
+        
+        return 0
+    else
+        local install_exit_code=$?
+        log_error "claunch installation failed (exit code: $install_exit_code)"
+        
+        # Provide detailed fallback guidance
+        echo ""
+        log_info "═══════════════════════════════════════════════════════════"
+        log_info "  claunch Installation Failed - Fallback Guidance"
+        log_info "═══════════════════════════════════════════════════════════"
+        log_info "Don't worry! The system can still function without claunch."
+        log_info ""
+        log_info "What happens next:"
+        log_info "  • The system will automatically use direct Claude CLI mode"
+        log_info "  • All core functionality remains available"
+        log_info "  • You'll lose session persistence and tmux integration"
+        log_info ""
+        log_info "To fix claunch installation later:"
+        log_info "  1. Try different method: ./scripts/install-claunch.sh --method npm"
+        log_info "  2. Check network connection and retry: ./scripts/install-claunch.sh --force"
+        log_info "  3. Install manually: curl -sSL https://raw.githubusercontent.com/0xkaz/claunch/main/install.sh | bash"
+        log_info "  4. Debug installation: ./scripts/install-claunch.sh --debug"
+        log_info ""
+        log_info "System will continue with direct Claude CLI mode..."
+        log_info "═══════════════════════════════════════════════════════════"
+        echo ""
+        
+        # Don't fail the entire setup - just warn and continue
+        log_warn "Continuing setup without claunch (fallback mode enabled)"
+        return 0
     fi
 }
 
@@ -584,22 +650,32 @@ create_user_config() {
 # CLAUNCH-VALIDIERUNG
 # ===============================================================================
 
-# Überprüfe claunch-Installation
+# Enhanced claunch installation verification (from 2025-08-27 enhancement work)
 verify_claunch_installation() {
-    log_debug "Verifying claunch installation"
+    log_info "Performing comprehensive claunch installation verification"
     
-    # Prüfe ob claunch verfügbar ist
-    if ! has_command claunch; then
-        log_warn "claunch command not found in PATH"
+    # Source the enhanced installer functions
+    local install_script="$SCRIPT_DIR/install-claunch.sh"
+    if [[ -f "$install_script" ]]; then
+        # Source the enhanced verification function
+        source "$install_script"
+    else
+        log_error "Enhanced claunch installer not found: $install_script"
         return 1
     fi
     
-    # Teste claunch-Funktionalität
-    if claunch --help >/dev/null 2>&1; then
-        log_debug "claunch help command works"
+    # Use the comprehensive verification from the enhanced installer
+    if verify_installation; then
+        log_success "claunch installation verified successfully with enhanced detection"
         return 0
     else
-        log_warn "claunch found but help command fails"
+        log_error "claunch installation verification failed"
+        log_error ""
+        log_error "Troubleshooting options:"
+        log_error "  1. Run: ./scripts/install-claunch.sh --force"
+        log_error "  2. Check PATH configuration in your shell profile"
+        log_error "  3. Try different installation method: ./scripts/install-claunch.sh --method npm"
+        log_error "  4. Use debug mode: ./scripts/install-claunch.sh --debug"
         return 1
     fi
 }
@@ -658,30 +734,43 @@ run_setup_tests() {
         ((missing_deps++))
     fi
     
-    # Enhanced claunch verification (addresses GitHub issue #4)
+    # Enhanced claunch verification with comprehensive detection (addresses GitHub issues #4 and #77)
     if [[ "$SKIP_CLAUNCH" != "true" ]]; then
-        if has_command claunch; then
-            # Test if claunch actually works
-            if claunch --help >/dev/null 2>&1; then
-                log_info "claunch is available and functional"
+        log_info "Checking claunch availability with enhanced detection..."
+        
+        # Source the enhanced claunch integration for better detection
+        local claunch_integration="$PROJECT_ROOT/src/claunch-integration.sh"
+        if [[ -f "$claunch_integration" ]]; then
+            # Temporarily source the enhanced detection functions
+            source "$claunch_integration" || true
+            
+            # Use the enhanced detection logic
+            if detect_claunch >/dev/null 2>&1; then
+                log_info "claunch detected and available: $CLAUNCH_PATH"
+                
+                # Validate functionality
+                if validate_claunch >/dev/null 2>&1; then
+                    log_info "claunch is functional and ready: $CLAUNCH_VERSION"
+                else
+                    log_warn "claunch detected but validation failed"
+                fi
             else
-                log_warn "claunch found but may not be functional"
+                log_warn "claunch not detected with enhanced detection methods"
+                log_info "This is normal for fresh installations - claunch will be installed during setup"
+                log_info "You can install claunch manually with: ./scripts/install-claunch.sh"
             fi
         else
-            # Check common installation paths before warning
-            local claunch_found=false
-            local common_paths=("$HOME/.local/bin/claunch" "$HOME/bin/claunch" "/usr/local/bin/claunch")
+            log_warn "Enhanced claunch detection not available - using basic check"
             
-            for path in "${common_paths[@]}"; do
-                if [[ -x "$path" ]] && "$path" --help >/dev/null 2>&1; then
-                    log_info "claunch found at $path (may need PATH update)"
-                    claunch_found=true
-                    break
+            # Fallback to basic detection
+            if has_command claunch; then
+                if claunch --help >/dev/null 2>&1; then
+                    log_info "claunch is available and functional (basic check)"
+                else
+                    log_warn "claunch found but may not be functional"
                 fi
-            done
-            
-            if [[ "$claunch_found" == "false" ]]; then
-                log_warn "claunch not found - install with: ./scripts/install-claunch.sh"
+            else
+                log_warn "claunch not found - will be installed during setup"
             fi
         fi
     fi

@@ -56,60 +56,217 @@ has_command() {
 # CLAUNCH-ERKENNUNG UND -VALIDIERUNG
 # ===============================================================================
 
-# Erkenne claunch-Installation
-detect_claunch() {
-    log_debug "Detecting claunch installation"
+# Enhanced shell PATH environment refresh (from 2025-08-27 enhancement)
+refresh_shell_path() {
+    log_debug "Refreshing shell PATH environment with enhanced detection"
     
-    # Methode 1: claunch im PATH
-    if has_command claunch; then
-        CLAUNCH_PATH=$(command -v claunch)
-        log_debug "Found claunch in PATH: $CLAUNCH_PATH"
-        return 0
-    fi
-    
-    # Methode 2: Häufige Installationsorte prüfen
-    local common_paths=(
-        "$HOME/bin/claunch"
-        "$HOME/.local/bin/claunch"
-        "/usr/local/bin/claunch"
-        "/opt/homebrew/bin/claunch"
-        "$HOME/.npm-global/bin/claunch"
+    # Add common claunch installation paths to PATH
+    local common_claunch_paths=(
+        "$HOME/.local/bin"
+        "$HOME/bin"
+        "/usr/local/bin"
+        "$HOME/.npm-global/bin"
+        "$HOME/.nvm/versions/node/*/bin"
+        "/opt/homebrew/bin"
     )
     
-    for path in "${common_paths[@]}"; do
-        if [[ -x "$path" ]]; then
-            CLAUNCH_PATH="$path"
-            log_debug "Found claunch at: $CLAUNCH_PATH"
-            return 0
+    for path in "${common_claunch_paths[@]}"; do
+        # Handle glob patterns for NVM paths
+        if [[ "$path" == *"*"* ]]; then
+            for expanded_path in $path; do
+                if [[ -d "$expanded_path" ]] && [[ ":$PATH:" != *":$expanded_path:"* ]]; then
+                    export PATH="$expanded_path:$PATH"
+                    log_debug "Added NVM path $expanded_path to current PATH"
+                fi
+            done
+        else
+            if [[ -d "$path" ]] && [[ ":$PATH:" != *":$path:"* ]]; then
+                export PATH="$path:$PATH"
+                log_debug "Added common path $path to current PATH"
+            fi
         fi
     done
     
-    log_error "claunch not found in PATH or common locations"
+    # Refresh hash table for command lookups
+    hash -r 2>/dev/null || true
+    
+    # Allow a moment for environment changes to take effect
+    sleep 1
+    
+    log_debug "PATH refresh completed. Current PATH length: ${#PATH}"
+}
+
+# Enhanced claunch detection with comprehensive methods (from 2025-08-27 enhancement)
+detect_claunch() {
+    log_debug "Detecting claunch installation with enhanced multi-method approach"
+    
+    # First refresh the PATH to pick up any new installations
+    refresh_shell_path
+    
+    # Multi-round detection with different strategies
+    local detection_attempts=5
+    local attempt=1
+    local detection_methods=()
+    
+    while [[ $attempt -le $detection_attempts ]]; do
+        log_debug "Detection attempt $attempt/$detection_attempts"
+        
+        # Method 1: Check if claunch is in PATH
+        if has_command claunch; then
+            CLAUNCH_PATH=$(command -v claunch 2>/dev/null)
+            if [[ -n "$CLAUNCH_PATH" && -x "$CLAUNCH_PATH" ]]; then
+                detection_methods+=("PATH lookup")
+                log_debug "Found claunch via PATH: $CLAUNCH_PATH"
+                return 0
+            fi
+        fi
+        
+        # Method 2: Check common installation paths
+        local common_paths=(
+            "$HOME/.local/bin/claunch"
+            "$HOME/bin/claunch"
+            "/usr/local/bin/claunch"
+            "$HOME/.npm-global/bin/claunch"
+            "/opt/homebrew/bin/claunch"
+            "/usr/bin/claunch"
+        )
+        
+        local found_common=false
+        for path in "${common_paths[@]}"; do
+            if [[ -x "$path" ]]; then
+                CLAUNCH_PATH="$path"
+                detection_methods+=("Common path")
+                log_debug "Found claunch at common path: $CLAUNCH_PATH"
+                found_common=true
+                break
+            fi
+        done
+        
+        if [[ "$found_common" == "true" ]]; then
+            return 0
+        fi
+        
+        # Method 3: Search in NVM paths (for npm installations)
+        local nvm_search_paths=("$HOME/.nvm/versions/node/*/bin/claunch")
+        for nvm_path in "${nvm_search_paths[@]}"; do
+            # Use shell globbing to expand the path
+            for expanded_nvm_path in $nvm_path; do
+                if [[ -x "$expanded_nvm_path" ]]; then
+                    CLAUNCH_PATH="$expanded_nvm_path"
+                    detection_methods+=("NVM path")
+                    log_debug "Found claunch in NVM path: $CLAUNCH_PATH"
+                    return 0
+                fi
+            done
+        done
+        
+        # Method 4: Search via which/whereis commands
+        if has_command which; then
+            local which_result
+            which_result=$(which claunch 2>/dev/null) || true
+            if [[ -n "$which_result" && -x "$which_result" ]]; then
+                CLAUNCH_PATH="$which_result"
+                detection_methods+=("which command")
+                log_debug "Found claunch via 'which': $CLAUNCH_PATH"
+                return 0
+            fi
+        fi
+        
+        if has_command whereis; then
+            local whereis_result
+            whereis_result=$(whereis claunch 2>/dev/null | cut -d: -f2 | awk '{print $1}') || true
+            if [[ -n "$whereis_result" && -x "$whereis_result" ]]; then
+                CLAUNCH_PATH="$whereis_result"
+                detection_methods+=("whereis command")
+                log_debug "Found claunch via 'whereis': $CLAUNCH_PATH"
+                return 0
+            fi
+        fi
+        
+        # If not found and we have more attempts, wait and refresh
+        if [[ $attempt -lt $detection_attempts ]]; then
+            log_debug "claunch not found, waiting 2s and refreshing environment..."
+            sleep 2
+            refresh_shell_path
+        fi
+        
+        ((attempt++))
+    done
+    
+    # Enhanced error reporting with diagnostic information
+    log_error "claunch not found after $detection_attempts comprehensive detection attempts"
+    log_error "Searched in:"
+    log_error "  - PATH directories: $(echo "$PATH" | tr ':' ' ' | wc -w) locations"
+    log_error "  - Common installation paths: $HOME/.local/bin, $HOME/bin, /usr/local/bin, etc."
+    log_error "  - NVM node versions: $HOME/.nvm/versions/node/*/bin"
+    log_error "  - System commands: which, whereis"
+    log_error ""
+    log_error "Possible solutions:"
+    log_error "  1. Install claunch: ./scripts/install-claunch.sh"
+    log_error "  2. Add claunch to PATH if already installed"
+    log_error "  3. Use direct Claude CLI mode (fallback)"
+    
     return 1
 }
 
-# Validiere claunch-Installation
+# Enhanced claunch validation with comprehensive testing (from 2025-08-27 enhancement)
 validate_claunch() {
-    log_debug "Validating claunch installation"
+    log_debug "Validating claunch installation with comprehensive testing"
     
     if [[ -z "$CLAUNCH_PATH" ]]; then
-        detect_claunch || return 1
+        if ! detect_claunch; then
+            log_error "claunch detection failed - cannot proceed with validation"
+            return 1
+        fi
     fi
     
-    # Teste claunch-Aufruf
-    if ! "$CLAUNCH_PATH" --help >/dev/null 2>&1; then
-        log_error "claunch at $CLAUNCH_PATH is not executable or corrupted"
+    log_info "Performing comprehensive claunch validation at: $CLAUNCH_PATH"
+    
+    # Test 1: File existence and permissions
+    if [[ ! -f "$CLAUNCH_PATH" ]]; then
+        log_error "claunch file not found: $CLAUNCH_PATH"
         return 1
     fi
     
-    # Hole Version
-    if CLAUNCH_VERSION=$("$CLAUNCH_PATH" --version 2>/dev/null | head -1); then
-        log_info "claunch validated: $CLAUNCH_VERSION"
+    if [[ ! -x "$CLAUNCH_PATH" ]]; then
+        log_error "claunch file not executable: $CLAUNCH_PATH"
+        return 1
+    fi
+    
+    # Test 2: File type validation
+    local file_type
+    if file_type=$(file "$CLAUNCH_PATH" 2>/dev/null); then
+        log_debug "claunch file type: $file_type"
     else
-        log_warn "Could not determine claunch version"
+        log_warn "Could not determine file type for $CLAUNCH_PATH"
+    fi
+    
+    # Test 3: Help command functionality
+    log_debug "Testing claunch help command..."
+    if ! "$CLAUNCH_PATH" --help >/dev/null 2>&1; then
+        log_error "claunch at $CLAUNCH_PATH is not functional (help command failed)"
+        log_error "This may indicate a corrupted or incompatible installation"
+        return 1
+    fi
+    
+    # Test 4: Version retrieval
+    log_debug "Retrieving claunch version..."
+    if CLAUNCH_VERSION=$("$CLAUNCH_PATH" --version 2>/dev/null | head -1); then
+        log_info "claunch validated successfully: $CLAUNCH_VERSION"
+    else
+        log_warn "Could not determine claunch version (non-critical)"
         CLAUNCH_VERSION="unknown"
     fi
     
+    # Test 5: List command (non-critical, may fail if no sessions)
+    log_debug "Testing claunch list command..."
+    if "$CLAUNCH_PATH" list >/dev/null 2>&1; then
+        log_debug "claunch list command works"
+    else
+        log_debug "claunch list command failed (may be normal if no sessions exist)"
+    fi
+    
+    log_info "claunch validation completed successfully"
     return 0
 }
 
@@ -379,12 +536,51 @@ cleanup_orphaned_sessions() {
 # ÖFFENTLICHE API-FUNKTIONEN
 # ===============================================================================
 
-# Initialisiere claunch-Integration
+# Fallback detection and automatic mode switching
+detect_and_configure_fallback() {
+    log_info "Detecting optimal session management mode"
+    
+    # Try to detect and validate claunch
+    if detect_claunch && validate_claunch; then
+        log_info "claunch detected and validated - using claunch mode"
+        USE_CLAUNCH="true"
+        return 0
+    else
+        log_warn "claunch not available - switching to direct Claude CLI mode"
+        log_info "This is a graceful fallback and the system will still function"
+        USE_CLAUNCH="false"
+        
+        # Inform user about the mode switch with helpful information
+        echo ""
+        log_info "═══════════════════════════════════════════════════════════"
+        log_info "  FALLBACK MODE: Direct Claude CLI"
+        log_info "═══════════════════════════════════════════════════════════"
+        log_info "The system has automatically switched to direct Claude CLI mode"
+        log_info "because claunch is not available on this system."
+        log_info ""
+        log_info "What this means:"
+        log_info "  ✓ The system will still work normally"
+        log_info "  ✓ Claude CLI sessions will be managed directly"
+        log_info "  ✗ No automatic session persistence across terminal restarts"
+        log_info "  ✗ No tmux integration for background sessions"
+        log_info ""
+        log_info "To enable full claunch functionality:"
+        log_info "  1. Install claunch: ./scripts/install-claunch.sh"
+        log_info "  2. Or install manually: curl -sSL https://raw.githubusercontent.com/0xkaz/claunch/main/install.sh | bash"
+        log_info "  3. Then restart the system to automatically detect claunch"
+        log_info "═══════════════════════════════════════════════════════════"
+        echo ""
+        
+        return 0  # Don't fail - this is a valid fallback mode
+    fi
+}
+
+# Initialisiere claunch-Integration mit intelligenter Fallback-Erkennung
 init_claunch_integration() {
     local config_file="${1:-config/default.conf}"
     local working_dir="${2:-$(pwd)}"
     
-    log_info "Initializing claunch integration"
+    log_info "Initializing claunch integration with fallback detection"
     
     # Lade Konfiguration
     if [[ -f "$config_file" ]]; then
@@ -402,71 +598,173 @@ init_claunch_integration() {
         done < <(grep -E '^[^#]*=' "$config_file" || true)
     fi
     
-    # Prüfe ob claunch verwendet werden soll
-    if [[ "$USE_CLAUNCH" != "true" ]]; then
-        log_info "claunch integration disabled by configuration"
-        return 1
+    # Intelligent mode detection with fallback
+    if [[ "$USE_CLAUNCH" == "true" ]]; then
+        log_debug "Configuration specifies claunch mode - attempting detection"
+        detect_and_configure_fallback
+    else
+        log_info "claunch integration disabled by configuration - using direct mode"
+        USE_CLAUNCH="false"
     fi
     
-    # Validiere claunch
-    validate_claunch || return 1
-    
-    # Prüfe tmux-Verfügbarkeit
-    check_tmux_availability || return 1
+    # If claunch is enabled, check tmux availability for tmux mode
+    if [[ "$USE_CLAUNCH" == "true" ]]; then
+        if ! check_tmux_availability; then
+            log_warn "tmux not available - falling back to claunch direct mode"
+            CLAUNCH_MODE="direct"
+        fi
+    fi
     
     # Erkenne Projekt
     detect_project "$working_dir"
     
-    log_info "claunch integration initialized successfully"
+    # Report final configuration
+    log_info "Session management configuration:"
+    log_info "  Mode: $(if [[ "$USE_CLAUNCH" == "true" ]]; then echo "claunch ($CLAUNCH_MODE)"; else echo "direct Claude CLI"; fi)"
+    log_info "  Project: $PROJECT_NAME"
+    if [[ "$USE_CLAUNCH" == "true" && "$CLAUNCH_MODE" == "tmux" ]]; then
+        log_info "  tmux session: $TMUX_SESSION_NAME"
+    fi
+    
+    log_info "Session management initialization completed successfully"
     return 0
 }
 
-# Starte oder setze Session fort
+# Direct Claude CLI fallback functions
+start_claude_direct() {
+    local working_dir="${1:-$(pwd)}"
+    shift
+    local claude_args=("$@")
+    
+    log_info "Starting Claude CLI directly (no claunch)"
+    log_debug "Working directory: $working_dir"
+    log_debug "Claude arguments: ${claude_args[*]}"
+    
+    # Wechsele ins Arbeitsverzeichnis
+    cd "$working_dir"
+    
+    # Baue Claude-Kommando zusammen
+    local claude_cmd=("claude")
+    
+    # Füge Claude-Argumente hinzu
+    if [[ ${#claude_args[@]} -gt 0 ]]; then
+        claude_cmd+=("${claude_args[@]}")
+    fi
+    
+    log_debug "Executing: ${claude_cmd[*]}"
+    
+    # Führe Claude direkt aus
+    if "${claude_cmd[@]}"; then
+        log_info "Claude session completed successfully"
+        return 0
+    else
+        local exit_code=$?
+        log_error "Claude session failed (exit code: $exit_code)"
+        return $exit_code
+    fi
+}
+
+start_claude_direct_in_new_terminal() {
+    local working_dir="${1:-$(pwd)}"
+    shift
+    local claude_args=("$@")
+    
+    log_info "Starting Claude CLI in new terminal (direct mode)"
+    
+    # Stelle sicher, dass Terminal-Utils verfügbar sind
+    if ! declare -f open_terminal_window >/dev/null 2>&1; then
+        log_error "Terminal utilities not available for new terminal mode"
+        log_info "Falling back to current terminal"
+        start_claude_direct "$working_dir" "${claude_args[@]}"
+        return $?
+    fi
+    
+    # Baue Claude-Kommando für Terminal zusammen
+    local claude_cmd=("claude")
+    
+    # Füge Claude-Argumente hinzu
+    if [[ ${#claude_args[@]} -gt 0 ]]; then
+        # Escape Argumente für Terminal
+        local escaped_args=()
+        for arg in "${claude_args[@]}"; do
+            escaped_args+=("$(printf '%q' "$arg")")
+        done
+        claude_cmd+=("${escaped_args[@]}")
+    fi
+    
+    # Öffne in Terminal
+    cd "$working_dir"
+    open_terminal_window "${claude_cmd[*]}" "$working_dir" "Claude Direct - $PROJECT_NAME"
+}
+
+# Starte oder setze Session fort mit intelligenter Fallback-Unterstützung
 start_or_resume_session() {
     local working_dir="${1:-$(pwd)}"
     local use_new_terminal="${2:-false}"
     shift 2 2>/dev/null || shift $# # Remove processed args
     local claude_args=("$@")
     
-    log_info "Starting or resuming claunch session"
+    log_info "Starting or resuming session with intelligent mode selection"
     
-    # Erkenne bestehende Session
-    if detect_existing_session "$working_dir"; then
-        log_info "Resuming existing session"
+    # Check if claunch mode is enabled and available
+    if [[ "$USE_CLAUNCH" == "true" ]] && [[ -n "$CLAUNCH_PATH" ]]; then
+        log_debug "Using claunch mode for session management"
         
-        if [[ "$use_new_terminal" == "true" ]]; then
-            # Öffne neues Terminal und attachiere an bestehende Session
-            if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
-                local attach_cmd="tmux attach-session -t $TMUX_SESSION_NAME"
-                open_terminal_window "$attach_cmd" "$working_dir" "Claude - $PROJECT_NAME (Resume)"
+        # Erkenne bestehende Session
+        if detect_existing_session "$working_dir"; then
+            log_info "Resuming existing claunch session"
+            
+            if [[ "$use_new_terminal" == "true" ]]; then
+                # Öffne neues Terminal und attachiere an bestehende Session
+                if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
+                    local attach_cmd="tmux attach-session -t $TMUX_SESSION_NAME"
+                    open_terminal_window "$attach_cmd" "$working_dir" "Claude - $PROJECT_NAME (Resume)"
+                else
+                    log_warn "Resume in new terminal only supported in tmux mode"
+                    return 1
+                fi
+            fi
+            
+            return 0
+        else
+            log_info "Starting new claunch session"
+            
+            if [[ "$use_new_terminal" == "true" ]]; then
+                start_claunch_in_new_terminal "$working_dir" "${claude_args[@]}"
             else
-                log_warn "Resume in new terminal only supported in tmux mode"
-                return 1
+                start_claunch_session "$working_dir" "${claude_args[@]}"
             fi
         fi
-        
-        return 0
     else
-        log_info "Starting new session"
+        # Fallback to direct Claude CLI mode
+        log_debug "Using direct Claude CLI mode (claunch not available)"
         
         if [[ "$use_new_terminal" == "true" ]]; then
-            start_claunch_in_new_terminal "$working_dir" "${claude_args[@]}"
+            start_claude_direct_in_new_terminal "$working_dir" "${claude_args[@]}"
         else
-            start_claunch_session "$working_dir" "${claude_args[@]}"
+            start_claude_direct "$working_dir" "${claude_args[@]}"
         fi
     fi
 }
 
-# Sende Recovery-Kommando
+# Sende Recovery-Kommando mit Fallback-Unterstützung
 send_recovery_command() {
     local recovery_cmd="${1:-/dev bitte mach weiter}"
     
     log_info "Sending recovery command to active session"
     
-    if check_session_status; then
-        send_command_to_session "$recovery_cmd"
+    # Only works in claunch mode with tmux
+    if [[ "$USE_CLAUNCH" == "true" && "$CLAUNCH_MODE" == "tmux" ]]; then
+        if check_session_status; then
+            send_command_to_session "$recovery_cmd"
+        else
+            log_error "No active claunch session found for recovery command"
+            return 1
+        fi
     else
-        log_error "No active session found for recovery command"
+        log_warn "Recovery commands only supported in claunch tmux mode"
+        log_info "Current mode: $(if [[ "$USE_CLAUNCH" == "true" ]]; then echo "claunch ($CLAUNCH_MODE)"; else echo "direct Claude CLI"; fi)"
+        log_info "To use recovery commands, enable claunch with tmux mode"
         return 1
     fi
 }
