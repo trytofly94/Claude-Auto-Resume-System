@@ -227,7 +227,11 @@ load_configuration() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove quotes from beginning and end
+            value=${value#\"} 
+            value=${value%\"}
+            value=${value#\'} 
+            value=${value%\'}
             
             # Setze bekannte Konfigurationsvariablen
             case "$key" in
@@ -499,7 +503,7 @@ check_usage_limits() {
     # Test-Modus für Entwicklung
     if [[ "$TEST_MODE" == "true" ]]; then
         log_info "[TEST MODE] Simulating usage limit with ${TEST_WAIT_SECONDS}s wait"
-        resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+${TEST_WAIT_SECONDS}S +%s 2>/dev/null || echo $(($(date +%s) + TEST_WAIT_SECONDS)))
+        resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+${TEST_WAIT_SECONDS}S +%s 2>/dev/null || echo $(($(date +%s) + ${TEST_WAIT_SECONDS})))
         limit_detected=true
     else
         # Echte Limit-Prüfung
@@ -526,7 +530,7 @@ check_usage_limits() {
                     resume_timestamp="$extracted_timestamp"
                 else
                     # Standard-Wartezeit falls kein Timestamp verfügbar
-                    resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+${USAGE_LIMIT_COOLDOWN:-300}S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
+                    resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+"${USAGE_LIMIT_COOLDOWN:-300}"S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
                 fi
             fi
         else
@@ -761,7 +765,7 @@ continuous_monitoring_loop() {
         # Schritt 3: Nächster Check
         if [[ $CURRENT_CYCLE -lt $MAX_RESTARTS && "$MONITORING_ACTIVE" == "true" ]]; then
             local next_check_time
-            next_check_time=$(date -d "+$CHECK_INTERVAL_MINUTES minutes" 2>/dev/null || date -v+${CHECK_INTERVAL_MINUTES}M 2>/dev/null || echo "in $CHECK_INTERVAL_MINUTES minutes")
+            next_check_time=$(date -d "+$CHECK_INTERVAL_MINUTES minutes" 2>/dev/null || date -v+"${CHECK_INTERVAL_MINUTES}"M 2>/dev/null || echo "in $CHECK_INTERVAL_MINUTES minutes")
             
             log_info "Next check at: $next_check_time"
             log_debug "Waiting $CHECK_INTERVAL_MINUTES minutes before next check"

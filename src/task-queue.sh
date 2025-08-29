@@ -2112,7 +2112,7 @@ list_queue_tasks() {
     echo "=== Task Queue ==="
     printf "%-20s %-15s %-12s %-3s %-8s %-10s %s\n" \
            "TASK_ID" "TYPE" "STATUS" "PRI" "RETRIES" "CREATED" "TITLE/DESC"
-    echo "$(printf '%.0s-' {1..100})"
+    printf '%.0s-' {1..100}; echo
     
     # Sammle und sortiere Tasks
     local task_list=()
@@ -2552,7 +2552,8 @@ cleanup_old_tasks() {
         # Calculate age (basic implementation)
         local created_epoch
         # Strip timezone info - handle both Z and +offset formats
-        local created_clean=$(echo "$created" | sed 's/[Z+].*$//')
+        local created_clean
+        created_clean="${created%%[Z+]*}"
         created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$created_clean" "+%s" 2>/dev/null || echo "0")
         
         if [[ $created_epoch -gt 0 ]]; then
@@ -2603,7 +2604,7 @@ cleanup_old_backups() {
     if command -v find >/dev/null 2>&1; then
         # Use find command if available
         local old_backups
-        mapfile -t old_backups < <(find "$backups_dir" -name "backup-*.json" -type f -mtime +$max_age_days 2>/dev/null)
+        mapfile -t old_backups < <(find "$backups_dir" -name "backup-*.json" -type f -mtime +"$max_age_days" 2>/dev/null)
         
         for backup_file in "${old_backups[@]}"; do
             if rm -f "$backup_file"; then
@@ -2724,7 +2725,11 @@ init_task_queue_readonly() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove quotes from beginning and end
+            value=${value#\"} 
+            value=${value%\"}
+            value=${value#\'} 
+            value=${value%\'}
             
             case "$key" in
                 TASK_QUEUE_ENABLED|TASK_QUEUE_DIR|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|TASK_QUEUE_MAX_SIZE|TASK_AUTO_CLEANUP_DAYS|TASK_BACKUP_RETENTION_DAYS|QUEUE_LOCK_TIMEOUT)
@@ -2821,10 +2826,10 @@ show_queue_status() {
     
     echo "=== Task Queue Status ==="
     echo "Queue Directory: $PROJECT_ROOT/$TASK_QUEUE_DIR"
-    echo "Max Queue Size: $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "unlimited" || echo $TASK_QUEUE_MAX_SIZE)"
+    echo "Max Queue Size: $([ "$TASK_QUEUE_MAX_SIZE" -eq 0 ] && echo "unlimited" || echo "$TASK_QUEUE_MAX_SIZE")"
     echo "Default Timeout: ${TASK_DEFAULT_TIMEOUT}s"
     echo "Max Retries: $TASK_MAX_RETRIES"
-    echo "Auto Cleanup: $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo "${TASK_AUTO_CLEANUP_DAYS} days" || echo "disabled")"
+    echo "Auto Cleanup: $([ "$TASK_AUTO_CLEANUP_DAYS" -gt 0 ] && echo "${TASK_AUTO_CLEANUP_DAYS} days" || echo "disabled")"
     echo ""
     
     get_queue_statistics
@@ -3020,10 +3025,10 @@ show_enhanced_status() {
   "status": "enabled",
   "queue_directory": "$PROJECT_ROOT/$TASK_QUEUE_DIR",
   "configuration": {
-    "max_queue_size": $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "null" || echo $TASK_QUEUE_MAX_SIZE),
+    "max_queue_size": $([ "$TASK_QUEUE_MAX_SIZE" -eq 0 ] && echo "null" || echo "$TASK_QUEUE_MAX_SIZE"),
     "default_timeout": $TASK_DEFAULT_TIMEOUT,
     "max_retries": $TASK_MAX_RETRIES,
-    "auto_cleanup_days": $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo $TASK_AUTO_CLEANUP_DAYS || echo "null")
+    "auto_cleanup_days": $([ "$TASK_AUTO_CLEANUP_DAYS" -gt 0 ] && echo "$TASK_AUTO_CLEANUP_DAYS" || echo "null")
   },
   "statistics": {
     "total_tasks": $total_tasks,
@@ -3051,10 +3056,10 @@ EOF
     # Default detailed text output
     echo -e "${CYAN}=== Enhanced Task Queue Status ===${RESET}"
     echo "Queue Directory: $PROJECT_ROOT/$TASK_QUEUE_DIR"
-    echo "Max Queue Size: $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "unlimited" || echo $TASK_QUEUE_MAX_SIZE)"
+    echo "Max Queue Size: $([ "$TASK_QUEUE_MAX_SIZE" -eq 0 ] && echo "unlimited" || echo "$TASK_QUEUE_MAX_SIZE")"
     echo "Default Timeout: ${TASK_DEFAULT_TIMEOUT}s"
     echo "Max Retries: $TASK_MAX_RETRIES"
-    echo "Auto Cleanup: $([ $TASK_AUTO_CLEANUP_DAYS -gt 0 ] && echo "${TASK_AUTO_CLEANUP_DAYS} days" || echo "disabled")"
+    echo "Auto Cleanup: $([ "$TASK_AUTO_CLEANUP_DAYS" -gt 0 ] && echo "${TASK_AUTO_CLEANUP_DAYS} days" || echo "disabled")"
     echo ""
     
     echo -e "${CYAN}=== Task Statistics ===${RESET}"
@@ -3180,7 +3185,7 @@ start_interactive_mode() {
                 show_enhanced_status "true" "compact"
                 ;;
             "list"|"l")
-                list_queue_tasks ${args:-all} priority
+                list_queue_tasks "${args:-all}" priority
                 ;;
             "add"|"a")
                 if [[ -n "$args" ]]; then
@@ -3197,7 +3202,7 @@ start_interactive_mode() {
                 ;;
             "remove"|"rm"|"r")
                 if [[ -n "$args" ]]; then
-                    cli_operation_wrapper remove_task_cmd $args
+                    cli_operation_wrapper remove_task_cmd "$args"
                 else
                     echo "Usage: remove <task_id>"
                 fi
@@ -4421,7 +4426,7 @@ show_current_config() {
 Core Settings:
   TASK_QUEUE_ENABLED         = $TASK_QUEUE_ENABLED
   TASK_QUEUE_DIR             = $TASK_QUEUE_DIR
-  TASK_QUEUE_MAX_SIZE        = $TASK_QUEUE_MAX_SIZE $([ $TASK_QUEUE_MAX_SIZE -eq 0 ] && echo "(unlimited)")
+  TASK_QUEUE_MAX_SIZE        = $TASK_QUEUE_MAX_SIZE $([ "$TASK_QUEUE_MAX_SIZE" -eq 0 ] && echo "(unlimited)")
   
 Task Settings:
   TASK_DEFAULT_TIMEOUT       = $TASK_DEFAULT_TIMEOUT seconds
@@ -4430,7 +4435,7 @@ Task Settings:
   TASK_COMPLETION_PATTERN    = $TASK_COMPLETION_PATTERN
   
 Cleanup Settings:
-  TASK_AUTO_CLEANUP_DAYS     = $TASK_AUTO_CLEANUP_DAYS $([ $TASK_AUTO_CLEANUP_DAYS -eq 0 ] && echo "(disabled)" || echo "days")
+  TASK_AUTO_CLEANUP_DAYS     = $TASK_AUTO_CLEANUP_DAYS $([ "$TASK_AUTO_CLEANUP_DAYS" -eq 0 ] && echo "(disabled)" || echo "days")
   TASK_BACKUP_RETENTION_DAYS = $TASK_BACKUP_RETENTION_DAYS days
   
 System Settings:
