@@ -481,8 +481,8 @@ log_lock_error() {
     local lock_diagnostics=""
     
     if [[ -n "$lock_file" ]] && [[ -e "$lock_file" || -d "$lock_file" ]]; then
-        local lock_permissions=$(ls -ld "$lock_file" 2>/dev/null | awk '{print $1}' || echo "unknown")
-        local lock_owner=$(ls -ld "$lock_file" 2>/dev/null | awk '{print $3":"$4}' || echo "unknown")
+        local lock_permissions=$(stat -c "%A" "$lock_file" 2>/dev/null || stat -f "%Sp" "$lock_file" 2>/dev/null || echo "unknown")
+        local lock_owner=$(stat -c "%U:%G" "$lock_file" 2>/dev/null || stat -f "%Su:%Sg" "$lock_file" 2>/dev/null || echo "unknown")
         local lock_size=$(du -sh "$lock_file" 2>/dev/null | cut -f1 || echo "unknown")
         
         lock_diagnostics="permissions=$lock_permissions,owner=$lock_owner,size=$lock_size"
@@ -569,7 +569,7 @@ generate_system_diagnostics() {
         
         if [[ -n "${PROJECT_ROOT:-}" ]] && [[ -d "$PROJECT_ROOT" ]]; then
             echo "Project Directory Contents:"
-            ls -la "$PROJECT_ROOT" 2>/dev/null | head -20 || echo 'N/A'
+            find "$PROJECT_ROOT" -maxdepth 1 -ls 2>/dev/null | head -20 || echo 'N/A'
             echo ""
             
             if [[ -n "${TASK_QUEUE_DIR:-}" ]] && [[ -d "$PROJECT_ROOT/$TASK_QUEUE_DIR" ]]; then

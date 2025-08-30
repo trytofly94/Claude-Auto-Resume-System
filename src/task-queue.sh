@@ -650,10 +650,10 @@ show_lock_diagnostic_info() {
         get_lock_info "$lock_dir" | sed 's/^/  /'
         echo
         echo "Directory contents:"
-        ls -la "$lock_dir" 2>/dev/null | sed 's/^/  /' || echo "  (Cannot list contents)"
+        find "$lock_dir" -maxdepth 1 -ls 2>/dev/null | sed 's/^/  /' || echo "  (Cannot list contents)"
         echo
         echo "Directory permissions:"
-        ls -ld "$lock_dir" 2>/dev/null | sed 's/^/  /' || echo "  (Cannot check permissions)"
+        find "$lock_dir" -maxdepth 0 -ls 2>/dev/null | sed 's/^/  /' || echo "  (Cannot check permissions)"
     fi
     
     echo "System information:"
