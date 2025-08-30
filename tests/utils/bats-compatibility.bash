@@ -99,21 +99,30 @@ skip_if_incompatible() {
 # ===============================================================================
 
 # Enhanced file-based state tracking for BATS associative arrays
-# Based on breakthrough solution from 2025-08-24_test-environment-fixes.md
+# Phase 2 Solution: Robust BATS array persistence with JSON-based state management
 bats_safe_array_operation() {
     local operation="$1"
     local array_name="$2"
     shift 2
     
     if [[ "$BATS_SUBPROCESS_MODE" == "true" ]]; then
-        # Use file-based tracking in BATS context
-        local state_file="${BATS_STATE_DIR}/${array_name//[^A-Za-z0-9]/_}.state"
+        # Use enhanced file-based tracking in BATS context with JSON format
+        local state_file="${BATS_STATE_DIR}/${array_name//[^A-Za-z0-9]/_}.json"
         
         case "$operation" in
             "get")
                 local key="$1"
                 if [[ -f "$state_file" ]]; then
-                    grep "^$key=" "$state_file" 2>/dev/null | cut -d'=' -f2- || echo ""
+                    # Use Python for reliable JSON parsing
+                    python3 -c "
+import json, sys
+try:
+    with open('$state_file') as f:
+        data = json.load(f)
+    print(data.get('$key', ''))
+except:
+    print('')
+" 2>/dev/null || echo ""
                 else
                     echo ""
                 fi
@@ -123,39 +132,128 @@ bats_safe_array_operation() {
                 local value="$2"
                 # Ensure state directory exists
                 mkdir -p "$BATS_STATE_DIR"
-                # Remove existing entry and add new one atomically
-                local temp_file="${state_file}.tmp.$$"
-                if [[ -f "$state_file" ]]; then
-                    grep -v "^$key=" "$state_file" 2>/dev/null > "$temp_file" || true
-                fi
-                echo "$key=$value" >> "$temp_file"
-                mv "$temp_file" "$state_file"
+                
+                # Use Python for atomic JSON update
+                python3 -c "
+import json, os
+state_file = '$state_file'
+temp_file = state_file + '.tmp.' + str(os.getpid())
+
+# Load existing data or create empty dict
+data = {}
+if os.path.exists(state_file):
+    try:
+        with open(state_file) as f:
+            data = json.load(f)
+    except:
+        data = {}
+
+# Update data
+data['$key'] = '$value'
+
+# Write atomically
+with open(temp_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    
+os.rename(temp_file, state_file)
+" 2>/dev/null || {
+                    # Fallback to simple key=value format if Python fails
+                    local temp_file="${state_file}.tmp.$$"
+                    if [[ -f "$state_file" ]]; then
+                        grep -v "^$key=" "$state_file" 2>/dev/null > "$temp_file" || true
+                    fi
+                    echo "$key=$value" >> "$temp_file"
+                    mv "$temp_file" "$state_file"
+                }
                 ;;
             "exists")
                 local key="$1"
-                [[ -f "$state_file" ]] && grep -q "^$key=" "$state_file" 2>/dev/null
+                if [[ -f "$state_file" ]]; then
+                    python3 -c "
+import json
+try:
+    with open('$state_file') as f:
+        data = json.load(f)
+    exit(0 if '$key' in data else 1)
+except:
+    exit(1)
+" 2>/dev/null
+                else
+                    return 1
+                fi
                 ;;
             "clear")
                 rm -f "$state_file" 2>/dev/null || true
                 ;;
             "sync_from_array")
-                # Sync array contents to file for BATS persistence
+                # Sync array contents to JSON file for BATS persistence
                 local -n array_ref="$array_name"
                 mkdir -p "$BATS_STATE_DIR"
-                rm -f "$state_file"
+                
+                # Create JSON representation using Python
+                python3 -c "
+import json
+data = {}
+" > /tmp/array_data.py
+                
+                # Add array elements to Python script
                 for key in "${!array_ref[@]}"; do
-                    echo "$key=${array_ref[$key]}" >> "$state_file"
+                    # Escape special characters for Python
+                    local escaped_key="${key//\'/\'\"\'\"\'}"
+                    local escaped_value="${array_ref[$key]//\'/\'\"\'\"\'}"
+                    echo "data['$escaped_key'] = '$escaped_value'" >> /tmp/array_data.py
                 done
+                
+                echo "
+with open('$state_file', 'w') as f:
+    json.dump(data, f, indent=2)
+" >> /tmp/array_data.py
+                
+                python3 /tmp/array_data.py 2>/dev/null || {
+                    # Fallback to simple format
+                    rm -f "$state_file"
+                    for key in "${!array_ref[@]}"; do
+                        echo "$key=${array_ref[$key]}" >> "$state_file"
+                    done
+                }
+                rm -f /tmp/array_data.py
                 ;;
             "sync_to_array")
-                # Load file contents into array for BATS context
+                # Load JSON contents into array for BATS context
                 if [[ -f "$state_file" ]]; then
+                    # Ensure array exists
+                    if ! declare -p "$array_name" >/dev/null 2>&1; then
+                        declare -gA "$array_name"
+                    fi
+                    
                     local -n array_ref="$array_name"
-                    while IFS='=' read -r key value; do
-                        if [[ -n "$key" ]]; then
-                            array_ref["$key"]="$value"
-                        fi
-                    done < "$state_file"
+                    
+                    # Try JSON format first
+                    if python3 -c "
+import json
+try:
+    with open('$state_file') as f:
+        data = json.load(f)
+    for key, value in data.items():
+        print(f'{key}={value}')
+except:
+    exit(1)
+" 2>/dev/null > /tmp/array_restore.txt; then
+                        # Load from JSON format
+                        while IFS='=' read -r key value; do
+                            if [[ -n "$key" ]]; then
+                                array_ref["$key"]="$value"
+                            fi
+                        done < /tmp/array_restore.txt
+                        rm -f /tmp/array_restore.txt
+                    else
+                        # Fallback to key=value format
+                        while IFS='=' read -r key value; do
+                            if [[ -n "$key" ]]; then
+                                array_ref["$key"]="$value"
+                            fi
+                        done < "$state_file"
+                    fi
                 fi
                 ;;
             *)
@@ -247,6 +345,7 @@ save_bats_state() {
 # ===============================================================================
 
 # Timeout wrapper that works reliably in BATS subprocess context
+# Phase 1: Enhanced with per-test timeouts and hanging test detection
 bats_safe_timeout() {
     local timeout_duration="$1"
     local timeout_type="${2:-default}"
@@ -266,21 +365,62 @@ bats_safe_timeout() {
         "integration")
             timeout_duration="$INTEGRATION_TEST_TIMEOUT"
             ;;
+        "per_test")
+            # Individual test timeout - use default passed value
+            ;;
     esac
     
     echo "[BATS-COMPAT] [DEBUG] Running with timeout: ${timeout_duration}s (type: $timeout_type)" >&2
     
+    # Start timeout watchdog
+    local watchdog_pid=""
+    if [[ "$timeout_type" == "per_test" ]]; then
+        # Enhanced watchdog for individual tests
+        (
+            local elapsed=0
+            local warning_threshold=$((timeout_duration * 3 / 4))
+            
+            while [[ $elapsed -lt $timeout_duration ]]; do
+                sleep 1
+                elapsed=$((elapsed + 1))
+                
+                # Warning at 75% threshold
+                if [[ $elapsed -eq $warning_threshold ]]; then
+                    echo "[BATS-COMPAT] [WARN] Test approaching timeout: ${elapsed}s/${timeout_duration}s" >&2
+                fi
+            done
+            
+            echo "[BATS-COMPAT] [ERROR] Test watchdog triggered after ${timeout_duration}s" >&2
+            # Force kill the test subprocess tree
+            pkill -P $$ 2>/dev/null || true
+        ) &
+        watchdog_pid=$!
+    fi
+    
     # Use timeout with proper signal handling
+    local exit_code=0
     if timeout --preserve-status "$timeout_duration" "$@"; then
-        return 0
+        exit_code=0
     else
-        local exit_code=$?
+        exit_code=$?
         if [[ $exit_code -eq 124 ]]; then
             echo "[BATS-COMPAT] [ERROR] Operation timed out after ${timeout_duration}s: $*" >&2
             echo "[BATS-COMPAT] [ERROR] Timeout type: $timeout_type" >&2
+            
+            # Additional diagnostics for hanging tests
+            if [[ "$timeout_type" == "per_test" ]]; then
+                echo "[BATS-COMPAT] [ERROR] Possible hanging test detected - consider optimization" >&2
+                echo "[BATS-COMPAT] [ERROR] Test name: ${BATS_TEST_NAME:-unknown}" >&2
+            fi
         fi
-        return $exit_code
     fi
+    
+    # Cleanup watchdog
+    if [[ -n "$watchdog_pid" ]]; then
+        kill "$watchdog_pid" 2>/dev/null || true
+    fi
+    
+    return $exit_code
 }
 
 # Timeout warnings before reaching limits
@@ -322,32 +462,79 @@ provide_timeout_progress() {
 # ===============================================================================
 
 # Enhanced teardown function for each test
+# Phase 1: Comprehensive resource cleanup to prevent hanging tests
 enhanced_test_teardown() {
     local test_name="${BATS_TEST_NAME:-unknown_test}"
     
     echo "[BATS-COMPAT] [DEBUG] Starting enhanced teardown for: $test_name" >&2
     
-    # Clean temporary files with specific patterns - avoid cleanup failures
-    if [[ -n "${TEST_TMP_DIR:-}" && -d "${TEST_TMP_DIR}" ]]; then
-        find "$TEST_TMP_DIR" -name "test-*" -mtime +0 -delete 2>/dev/null || true
-        find "$TEST_TMP_DIR" -name "bats_*" -type f -delete 2>/dev/null || true
-    fi
+    # Phase 1: Kill any lingering background processes first
+    local test_pids=($(jobs -p 2>/dev/null || true))
+    for pid in "${test_pids[@]}"; do
+        if [[ -n "$pid" ]]; then
+            echo "[BATS-COMPAT] [DEBUG] Killing background job: $pid" >&2
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
     
-    # Reset environment variables to known state
-    unset TASK_QUEUE_ENABLED TEST_MODE BATS_TEST_STATE 2>/dev/null || true
-    
-    # Clear any background processes started by tests
+    # Kill test-specific processes that might hang
     pkill -f "test-hybrid-monitor" 2>/dev/null || true
     pkill -f "bats-test-$$" 2>/dev/null || true
+    pkill -f "task-queue-test" 2>/dev/null || true
+    pkill -f "${test_name//[^A-Za-z0-9]/_}" 2>/dev/null || true
     
-    # Clean up BATS state files
-    if [[ -n "$BATS_STATE_DIR" && -d "$BATS_STATE_DIR" ]]; then
-        rm -f "$BATS_STATE_DIR"/*.state 2>/dev/null || true
+    # Wait briefly for process cleanup
+    sleep 0.1
+    
+    # Phase 1: Enhanced temporary file cleanup
+    if [[ -n "${TEST_TMP_DIR:-}" && -d "${TEST_TMP_DIR}" ]]; then
+        # Clean with timeout to prevent hanging on stuck file operations
+        timeout 5 find "$TEST_TMP_DIR" -name "test-*" -mtime +0 -delete 2>/dev/null || true
+        timeout 5 find "$TEST_TMP_DIR" -name "bats_*" -type f -delete 2>/dev/null || true
+        timeout 5 find "$TEST_TMP_DIR" -name "*.tmp" -delete 2>/dev/null || true
+        timeout 5 find "$TEST_TMP_DIR" -name "*.lock" -delete 2>/dev/null || true
     fi
+    
+    # Phase 1: Reset environment variables comprehensively
+    local test_vars=(
+        "TASK_QUEUE_ENABLED" "TEST_MODE" "BATS_TEST_STATE"
+        "TEST_TASK_ID" "TEST_TIMEOUT_PID" "TEST_LOG_DIR"
+        "HYBRID_MONITOR_LOG" "TASK_QUEUE_LOG" "BATS_COMPAT_LOG"
+    )
+    
+    for var in "${test_vars[@]}"; do
+        unset "$var" 2>/dev/null || true
+    done
+    
+    # Phase 1: Clean up BATS state files with enhanced patterns
+    if [[ -n "$BATS_STATE_DIR" && -d "$BATS_STATE_DIR" ]]; then
+        timeout 3 rm -f "$BATS_STATE_DIR"/*.state 2>/dev/null || true
+        timeout 3 rm -f "$BATS_STATE_DIR"/*.json 2>/dev/null || true
+        timeout 3 rm -f "$BATS_STATE_DIR"/*.tmp.* 2>/dev/null || true
+    fi
+    
+    # Phase 1: Clean up any test-specific log files
+    if [[ -n "${TEST_LOG_DIR:-}" && -d "${TEST_LOG_DIR}" ]]; then
+        timeout 2 rm -rf "$TEST_LOG_DIR" 2>/dev/null || true
+    fi
+    
+    # Phase 1: Clear any file locks that might cause hanging
+    local lock_patterns=(
+        "${TEST_PROJECT_DIR:-}/queue/*.lock"
+        "${TEST_PROJECT_DIR:-}/queue/task-states/*.lock" 
+        "/tmp/test-*.lock"
+    )
+    
+    for pattern in "${lock_patterns[@]}"; do
+        timeout 2 rm -f $pattern 2>/dev/null || true
+    done
     
     # Validate clean state before next test
     if ! verify_clean_test_state; then
         echo "[BATS-COMPAT] [WARN] Test state not completely clean after teardown" >&2
+        # Force additional cleanup for critical issues
+        pkill -f "python3.*test" 2>/dev/null || true
+        sleep 0.2
     fi
     
     echo "[BATS-COMPAT] [DEBUG] Enhanced teardown completed for: $test_name" >&2
