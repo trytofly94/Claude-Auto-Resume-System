@@ -73,7 +73,7 @@ classify_error_severity() {
     
     if [[ -z "$error_message" ]]; then
         log_debug "Empty error message - returning unknown severity"
-        return $ERROR_SEVERITY_UNKNOWN
+        return "$ERROR_SEVERITY_UNKNOWN"
     fi
     
     log_debug "Classifying error severity for context '$error_context': '$error_message'"
@@ -147,31 +147,31 @@ classify_error_severity() {
     for pattern in "${critical_patterns[@]}"; do
         if echo "$error_message" | grep -qi "$pattern"; then
             log_error "CRITICAL error detected: pattern '$pattern' matched"
-            record_error_occurrence "$error_message" $ERROR_SEVERITY_CRITICAL "$error_context" "$task_id"
-            return $ERROR_SEVERITY_CRITICAL
+            record_error_occurrence "$error_message" "$ERROR_SEVERITY_CRITICAL" "$error_context" "$task_id"
+            return "$ERROR_SEVERITY_CRITICAL"
         fi
     done
     
     for pattern in "${warning_patterns[@]}"; do
         if echo "$error_message" | grep -qi "$pattern"; then
             log_warn "WARNING level error detected: pattern '$pattern' matched"
-            record_error_occurrence "$error_message" $ERROR_SEVERITY_WARNING "$error_context" "$task_id"
-            return $ERROR_SEVERITY_WARNING
+            record_error_occurrence "$error_message" "$ERROR_SEVERITY_WARNING" "$error_context" "$task_id"
+            return "$ERROR_SEVERITY_WARNING"
         fi
     done
     
     for pattern in "${info_patterns[@]}"; do
         if echo "$error_message" | grep -qi "$pattern"; then
             log_info "INFO level error detected: pattern '$pattern' matched"
-            record_error_occurrence "$error_message" $ERROR_SEVERITY_INFO "$error_context" "$task_id"
-            return $ERROR_SEVERITY_INFO
+            record_error_occurrence "$error_message" "$ERROR_SEVERITY_INFO" "$error_context" "$task_id"
+            return "$ERROR_SEVERITY_INFO"
         fi
     done
     
     # Unknown error pattern
     log_debug "Unknown error pattern detected: '$error_message'"
-    record_error_occurrence "$error_message" $ERROR_SEVERITY_UNKNOWN "$error_context" "$task_id"
-    return $ERROR_SEVERITY_UNKNOWN
+    record_error_occurrence "$error_message" "$ERROR_SEVERITY_UNKNOWN" "$error_context" "$task_id"
+    return "$ERROR_SEVERITY_UNKNOWN"
 }
 
 # Record error occurrence for tracking and analysis
