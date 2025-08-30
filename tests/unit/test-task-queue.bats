@@ -462,17 +462,54 @@ EOF
     assert_output_contains "No tasks found"
 }
 
-# Test: Update task status
+# Test: Update task status (Phase 2: Enhanced BATS state management)
 @test "update_task_status updates status successfully" {
     test_init_task_queue
     
     local task_id=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 5)
     
-    run update_task_status "$task_id" "$TASK_STATE_IN_PROGRESS"
+    # Save state before subprocess operation
+    bats_safe_array_operation "sync_from_array" "TASK_STATES"
+    bats_safe_array_operation "sync_from_array" "TASK_TIMESTAMPS"
+    
+    # Run update in subprocess with enhanced state management
+    run bash -c "
+        source '$BATS_TEST_DIRNAME/../utils/bats-compatibility.bash'
+        source '$BATS_TEST_DIRNAME/../../src/task-queue.sh'
+        
+        # Load state from BATS files
+        bats_safe_array_operation 'sync_to_array' 'TASK_STATES'
+        bats_safe_array_operation 'sync_to_array' 'TASK_TIMESTAMPS'
+        
+        # Perform the update
+        update_task_status '$task_id' '$TASK_STATE_IN_PROGRESS'
+        result=\$?
+        
+        # Save state back to BATS files
+        bats_safe_array_operation 'sync_from_array' 'TASK_STATES'
+        bats_safe_array_operation 'sync_from_array' 'TASK_TIMESTAMPS'
+        
+        exit \$result
+    "
     
     [ "$status" -eq 0 ]
-    [ "${TASK_STATES[$task_id]}" = "$TASK_STATE_IN_PROGRESS" ]
-    [ -n "${TASK_TIMESTAMPS[${task_id}_${TASK_STATE_IN_PROGRESS}]:-}" ]
+    
+    # Load updated state from BATS files
+    bats_safe_array_operation "sync_to_array" "TASK_STATES"
+    bats_safe_array_operation "sync_to_array" "TASK_TIMESTAMPS"
+    
+    # Verify state changes using BATS-safe operations
+    local current_state
+    current_state=$(bats_safe_array_operation "get" "TASK_STATES" "$task_id")
+    [ "$current_state" = "$TASK_STATE_IN_PROGRESS" ]
+    
+    local timestamp_key="${task_id}_${TASK_STATE_IN_PROGRESS}"
+    if bats_safe_array_operation "exists" "TASK_TIMESTAMPS" "$timestamp_key"; then
+        echo "Timestamp exists for state transition" >&2
+    else
+        echo "ERROR: Timestamp missing for state transition" >&2
+        false
+    fi
 }
 
 @test "update_task_status validates state transitions" {
@@ -480,11 +517,32 @@ EOF
     
     local task_id=$(add_task_to_queue "$TASK_TYPE_CUSTOM" 5)
     
-    # Valid transition: pending -> in_progress
-    update_task_status "$task_id" "$TASK_STATE_IN_PROGRESS"
+    # Save initial state
+    bats_safe_array_operation "sync_from_array" "TASK_STATES"
     
-    # Invalid transition: in_progress -> pending  
-    run update_task_status "$task_id" "$TASK_STATE_PENDING"
+    # Valid transition: pending -> in_progress (via subprocess)
+    run bash -c "
+        source '$BATS_TEST_DIRNAME/../utils/bats-compatibility.bash'
+        source '$BATS_TEST_DIRNAME/../../src/task-queue.sh'
+        
+        bats_safe_array_operation 'sync_to_array' 'TASK_STATES'
+        update_task_status '$task_id' '$TASK_STATE_IN_PROGRESS'
+        bats_safe_array_operation 'sync_from_array' 'TASK_STATES'
+    "
+    
+    [ "$status" -eq 0 ]
+    
+    # Load updated state
+    bats_safe_array_operation "sync_to_array" "TASK_STATES"
+    
+    # Invalid transition: in_progress -> pending (should fail)
+    run bash -c "
+        source '$BATS_TEST_DIRNAME/../utils/bats-compatibility.bash'
+        source '$BATS_TEST_DIRNAME/../../src/task-queue.sh'
+        
+        bats_safe_array_operation 'sync_to_array' 'TASK_STATES'
+        update_task_status '$task_id' '$TASK_STATE_PENDING'
+    "
     
     [ "$status" -eq 1 ]
     assert_output_contains "Invalid state transition"

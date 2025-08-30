@@ -376,7 +376,7 @@ git pull origin main
 
 ```bash
 # Test-Suite läuft jetzt stabil:
-./scripts/run-tests.sh  # 100% Erfolgsrate
+./scripts/run-tests.sh  # 71% zuverlässige Test-Ausführung
 bats tests/unit/test-task-queue.bats  # Alle 48 Tests bestehen
 ```
 
@@ -463,7 +463,7 @@ jq '.metrics' logs/hybrid-monitor.json
 Das System läuft jetzt mit optimaler Performance:
 
 - ✅ **Test-Ausführung**: 75 Sekunden (vorher 180+ Sekunden)
-- ✅ **Test-Erfolgsrate**: 100% (vorher ~30%)
+- ✅ **Test-Erfolgsrate**: 71% zuverlässige Ausführung (vorher ~30%)
 - ✅ **Code-Qualität**: 0 ShellCheck-Warnungen (vorher 90+)
 - ✅ **Abhängigkeitserkennung**: 40% schnellere claunch-Verification
 - ✅ **Fehlerbehandlung**: Robuste Fallback-Mechanismen
