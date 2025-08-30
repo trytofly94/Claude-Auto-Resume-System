@@ -758,7 +758,7 @@ invalidate_github_cache() {
     local invalidated_count=0
     local cache_key
     for cache_key in "${!GITHUB_API_CACHE[@]}"; do
-        if [[ "$cache_key" == $cache_pattern ]]; then
+        if [[ "$cache_key" == "$cache_pattern" ]]; then
             unset "GITHUB_API_CACHE[$cache_key]"
             ((invalidated_count++))
             log_debug "Invalidated cache entry: $cache_key"
