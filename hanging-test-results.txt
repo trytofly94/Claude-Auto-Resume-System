@@ -1,6 +1,6 @@
 FILE: test-claunch-integration.bats
 STATUS: FAIL (1)
-DURATION: 23s
+DURATION: 27s
 OUTPUT: 1..16
 ok 1 claunch integration module loads without errors
 ok 2 detect_claunch function works
