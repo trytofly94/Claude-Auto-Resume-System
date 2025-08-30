@@ -268,19 +268,32 @@ except:
         case "$operation" in
             "get")
                 local key="$1"
-                echo "${array_ref[$key]:-}"
+                if declare -p "$array_name" >/dev/null 2>&1; then
+                    echo "${array_ref[$key]:-}"
+                else
+                    echo ""
+                fi
                 ;;
             "set")
                 local key="$1"
                 local value="$2"
+                # Ensure array exists
+                if ! declare -p "$array_name" >/dev/null 2>&1; then
+                    declare -gA "$array_name"
+                    local -n array_ref="$array_name"
+                fi
                 array_ref["$key"]="$value"
                 ;;
             "exists")
                 local key="$1"
-                [[ -v "array_ref[$key]" ]]
+                if declare -p "$array_name" >/dev/null 2>&1; then
+                    [[ -v "array_ref[$key]" ]]
+                else
+                    return 1
+                fi
                 ;;
             "clear")
-                unset "$array_name"
+                unset "$array_name" 2>/dev/null || true
                 declare -gA "$array_name"
                 ;;
             "sync_from_array"|"sync_to_array")
