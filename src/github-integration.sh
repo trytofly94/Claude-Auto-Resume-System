@@ -19,7 +19,7 @@ set -euo pipefail
 # Protect against re-sourcing - only declare readonly if not already set
 if [[ -z "${GITHUB_API_BASE_URL:-}" ]]; then
     readonly GITHUB_API_BASE_URL="https://api.github.com"
-    readonly GITHUB_API_VERSION="2022-11-28"
+    readonly GITHUB_API_VERSION="2022-11-28"; export GITHUB_API_VERSION
 
     # Rate Limiting Configuration  
     readonly GITHUB_RATE_LIMIT_THRESHOLD="${GITHUB_RATE_LIMIT_THRESHOLD:-100}"
@@ -81,10 +81,10 @@ if [[ -z "${GITHUB_ITEM_TYPE_ISSUE:-}" ]]; then
     readonly GITHUB_ITEM_TYPE_UNKNOWN="unknown"
 
     # Comment Template Constants
-    readonly GITHUB_COMMENT_TEMPLATE_TASK_START="task_start"
-    readonly GITHUB_COMMENT_TEMPLATE_PROGRESS="progress"
-    readonly GITHUB_COMMENT_TEMPLATE_COMPLETION="completion"
-    readonly GITHUB_COMMENT_TEMPLATE_ERROR="error"
+    readonly GITHUB_COMMENT_TEMPLATE_TASK_START="task_start"; export GITHUB_COMMENT_TEMPLATE_TASK_START
+    readonly GITHUB_COMMENT_TEMPLATE_PROGRESS="progress"; export GITHUB_COMMENT_TEMPLATE_PROGRESS
+    readonly GITHUB_COMMENT_TEMPLATE_COMPLETION="completion"; export GITHUB_COMMENT_TEMPLATE_COMPLETION
+    readonly GITHUB_COMMENT_TEMPLATE_ERROR="error"; export GITHUB_COMMENT_TEMPLATE_ERROR
 fi
 
 # Module initialization flag
@@ -739,7 +739,7 @@ get_cached_github_data() {
         else
             log_debug "Cache expired for key: $cache_key"
             # Entferne abgelaufenen Cache-Eintrag
-            unset GITHUB_API_CACHE["$cache_key"]
+            unset "GITHUB_API_CACHE[$cache_key]"
             return 1
         fi
     fi
@@ -758,8 +758,8 @@ invalidate_github_cache() {
     local invalidated_count=0
     local cache_key
     for cache_key in "${!GITHUB_API_CACHE[@]}"; do
-        if [[ "$cache_key" == $cache_pattern ]]; then
-            unset GITHUB_API_CACHE["$cache_key"]
+        if [[ "$cache_key" == "$cache_pattern" ]]; then
+            unset "GITHUB_API_CACHE[$cache_key]"
             ((invalidated_count++))
             log_debug "Invalidated cache entry: $cache_key"
         fi
@@ -787,7 +787,7 @@ cleanup_expired_cache() {
         expiry_time=$((cached_at + ttl))
         
         if [[ $current_time -ge $expiry_time ]]; then
-            unset GITHUB_API_CACHE["$cache_key"]
+            unset "GITHUB_API_CACHE[$cache_key]"
             ((cleaned_count++))
             log_debug "Cleaned expired cache entry: $cache_key"
         fi

@@ -47,12 +47,12 @@ LOG_PID=$$
 # Konvertiert Log-Level-String zu numerischem Wert
 get_log_level_numeric() {
     case "$(echo "$1" | tr '[:lower:]' '[:upper:]')" in
-        "DEBUG") echo $LOG_LEVEL_DEBUG ;;
-        "INFO")  echo $LOG_LEVEL_INFO ;;
-        "SUCCESS") echo $LOG_LEVEL_INFO ;;  # Same level as INFO
-        "WARN")  echo $LOG_LEVEL_WARN ;;
-        "ERROR") echo $LOG_LEVEL_ERROR ;;
-        *) echo $LOG_LEVEL_INFO ;;
+        "DEBUG") echo "$LOG_LEVEL_DEBUG" ;;
+        "INFO")  echo "$LOG_LEVEL_INFO" ;;
+        "SUCCESS") echo "$LOG_LEVEL_INFO" ;;  # Same level as INFO
+        "WARN")  echo "$LOG_LEVEL_WARN" ;;
+        "ERROR") echo "$LOG_LEVEL_ERROR" ;;
+        *) echo "$LOG_LEVEL_INFO" ;;
     esac
 }
 
@@ -170,7 +170,7 @@ get_caller_info() {
     local frame="${1:-2}"
     local caller_info
     
-    if caller_info=$(caller $frame 2>/dev/null); then
+    if caller_info=$(caller "$frame" 2>/dev/null); then
         local line_number=$(echo "$caller_info" | cut -d' ' -f1)
         local function_name=$(echo "$caller_info" | cut -d' ' -f2)
         local source_file=$(echo "$caller_info" | cut -d' ' -f3)
@@ -407,7 +407,7 @@ cleanup_logs() {
     
     log_info "Cleaning up log files older than $days days in $log_dir"
     
-    find "$log_dir" -name "*.log*" -type f -mtime +$days -delete 2>/dev/null || {
+    find "$log_dir" -name "*.log*" -type f -mtime +"$days" -delete 2>/dev/null || {
         log_warn "Failed to cleanup some log files"
     }
 }
@@ -481,8 +481,8 @@ log_lock_error() {
     local lock_diagnostics=""
     
     if [[ -n "$lock_file" ]] && [[ -e "$lock_file" || -d "$lock_file" ]]; then
-        local lock_permissions=$(ls -ld "$lock_file" 2>/dev/null | awk '{print $1}' || echo "unknown")
-        local lock_owner=$(ls -ld "$lock_file" 2>/dev/null | awk '{print $3":"$4}' || echo "unknown")
+        local lock_permissions=$(stat -c "%A" "$lock_file" 2>/dev/null || stat -f "%Sp" "$lock_file" 2>/dev/null || echo "unknown")
+        local lock_owner=$(stat -c "%U:%G" "$lock_file" 2>/dev/null || stat -f "%Su:%Sg" "$lock_file" 2>/dev/null || echo "unknown")
         local lock_size=$(du -sh "$lock_file" 2>/dev/null | cut -f1 || echo "unknown")
         
         lock_diagnostics="permissions=$lock_permissions,owner=$lock_owner,size=$lock_size"
@@ -569,7 +569,7 @@ generate_system_diagnostics() {
         
         if [[ -n "${PROJECT_ROOT:-}" ]] && [[ -d "$PROJECT_ROOT" ]]; then
             echo "Project Directory Contents:"
-            ls -la "$PROJECT_ROOT" 2>/dev/null | head -20 || echo 'N/A'
+            find "$PROJECT_ROOT" -maxdepth 1 -ls 2>/dev/null | head -20 || echo 'N/A'
             echo ""
             
             if [[ -n "${TASK_QUEUE_DIR:-}" ]] && [[ -d "$PROJECT_ROOT/$TASK_QUEUE_DIR" ]]; then

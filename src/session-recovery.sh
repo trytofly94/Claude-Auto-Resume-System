@@ -497,7 +497,7 @@ stop_session_health_monitoring() {
             kill -TERM "$monitor_pid" 2>/dev/null || true
             log_debug "Session health monitor stopped for task $task_id (PID: $monitor_pid)"
         fi
-        unset SESSION_HEALTH_MONITORS["$task_id"]
+        unset "SESSION_HEALTH_MONITORS[$task_id]"
     fi
     
     return 0
