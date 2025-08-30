@@ -739,7 +739,7 @@ get_cached_github_data() {
         else
             log_debug "Cache expired for key: $cache_key"
             # Entferne abgelaufenen Cache-Eintrag
-            unset GITHUB_API_CACHE["$cache_key"]
+            unset "GITHUB_API_CACHE[$cache_key]"
             return 1
         fi
     fi
@@ -759,7 +759,7 @@ invalidate_github_cache() {
     local cache_key
     for cache_key in "${!GITHUB_API_CACHE[@]}"; do
         if [[ "$cache_key" == $cache_pattern ]]; then
-            unset GITHUB_API_CACHE["$cache_key"]
+            unset "GITHUB_API_CACHE[$cache_key]"
             ((invalidated_count++))
             log_debug "Invalidated cache entry: $cache_key"
         fi
@@ -787,7 +787,7 @@ cleanup_expired_cache() {
         expiry_time=$((cached_at + ttl))
         
         if [[ $current_time -ge $expiry_time ]]; then
-            unset GITHUB_API_CACHE["$cache_key"]
+            unset "GITHUB_API_CACHE[$cache_key]"
             ((cleaned_count++))
             log_debug "Cleaned expired cache entry: $cache_key"
         fi

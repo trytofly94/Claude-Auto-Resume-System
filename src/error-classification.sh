@@ -219,11 +219,11 @@ determine_recovery_strategy() {
     
     # Determine strategy based on severity and retry count
     case "$error_severity" in
-        $ERROR_SEVERITY_CRITICAL)
+        "$ERROR_SEVERITY_CRITICAL")
             log_error "Critical error detected - initiating emergency protocols"
             echo "$RECOVERY_STRATEGY_EMERGENCY"
             ;;
-        $ERROR_SEVERITY_WARNING)
+        "$ERROR_SEVERITY_WARNING")
             if [[ $retry_count -lt $ERROR_MAX_RETRIES ]]; then
                 if [[ "$ERROR_AUTO_RECOVERY" == "true" ]]; then
                     log_warn "Warning level error - attempting automatic recovery"
@@ -237,7 +237,7 @@ determine_recovery_strategy() {
                 echo "$RECOVERY_STRATEGY_MANUAL"
             fi
             ;;
-        $ERROR_SEVERITY_INFO)
+        "$ERROR_SEVERITY_INFO")
             if [[ $retry_count -lt $ERROR_MAX_RETRIES ]]; then
                 log_info "Info level error - attempting simple retry"
                 echo "$RECOVERY_STRATEGY_RETRY"
@@ -593,13 +593,13 @@ get_error_statistics() {
         total_count=$((total_count + count))
         
         case "${key%%_*}" in
-            $ERROR_SEVERITY_CRITICAL)
+            "$ERROR_SEVERITY_CRITICAL")
                 critical_count=$((critical_count + count))
                 ;;
-            $ERROR_SEVERITY_WARNING)
+            "$ERROR_SEVERITY_WARNING")
                 warning_count=$((warning_count + count))
                 ;;
-            $ERROR_SEVERITY_INFO)
+            "$ERROR_SEVERITY_INFO")
                 info_count=$((info_count + count))
                 ;;
             *)
@@ -651,7 +651,7 @@ cleanup_error_tracking() {
     for key in "${!ERROR_HISTORY[@]}"; do
         local timestamp="${key%%_*}"
         if [[ $timestamp -lt $cutoff_time ]]; then
-            unset ERROR_HISTORY["$key"]
+            unset "ERROR_HISTORY[$key]"
             ((cleanup_count++))
         fi
     done
