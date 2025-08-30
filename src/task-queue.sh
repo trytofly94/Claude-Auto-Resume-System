@@ -621,7 +621,8 @@ acquire_queue_lock_with_aggressive_recovery() {
         fi
         
         # Exponential backoff with jitter
-        local wait_time=$(echo "scale=2; 0.1 * (1.5 ^ $attempts) + ($RANDOM % 1000) / 10000" | bc -l 2>/dev/null || echo "1")
+        local wait_time
+        wait_time=$(echo "scale=2; 0.1 * (1.5 ^ $attempts) + ($RANDOM % 1000) / 10000" | bc -l 2>/dev/null || echo "1")
         wait_time=$(echo "if ($wait_time > 5.0) 5.0 else $wait_time" | bc -l 2>/dev/null || echo "2")
         
         log_debug "Lock attempt $((attempts + 1))/$max_attempts failed, waiting ${wait_time}s"
@@ -674,11 +675,16 @@ get_lock_info() {
         return 1
     fi
     
-    local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
-    local lock_timestamp=$(cat "$lock_dir/timestamp" 2>/dev/null || echo "unknown")
-    local lock_hostname=$(cat "$lock_dir/hostname" 2>/dev/null || echo "unknown")
-    local lock_user=$(cat "$lock_dir/user" 2>/dev/null || echo "unknown")
-    local lock_operation=$(cat "$lock_dir/operation" 2>/dev/null || echo "unknown")
+    local lock_pid
+    lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
+    local lock_timestamp
+    lock_timestamp=$(cat "$lock_dir/timestamp" 2>/dev/null || echo "unknown")
+    local lock_hostname
+    lock_hostname=$(cat "$lock_dir/hostname" 2>/dev/null || echo "unknown")
+    local lock_user
+    lock_user=$(cat "$lock_dir/user" 2>/dev/null || echo "unknown")
+    local lock_operation
+    lock_operation=$(cat "$lock_dir/operation" 2>/dev/null || echo "unknown")
     
     echo "PID: $lock_pid"
     if [[ "$lock_pid" != "unknown" ]]; then
@@ -769,8 +775,10 @@ handle_lock_acquisition_failure() {
     
     # Analyze failure reason
     if [[ -d "$lock_dir" ]]; then
-        local lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
-        local lock_timestamp=$(cat "$lock_dir/timestamp" 2>/dev/null || echo "unknown")
+        local lock_pid
+        lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
+        local lock_timestamp
+        lock_timestamp=$(cat "$lock_dir/timestamp" 2>/dev/null || echo "unknown")
         
         echo "🔒 ACTIVE LOCK DETECTED"
         echo "   Process ID: $lock_pid"
