@@ -47,12 +47,12 @@ LOG_PID=$$
 # Konvertiert Log-Level-String zu numerischem Wert
 get_log_level_numeric() {
     case "$(echo "$1" | tr '[:lower:]' '[:upper:]')" in
-        "DEBUG") echo $LOG_LEVEL_DEBUG ;;
-        "INFO")  echo $LOG_LEVEL_INFO ;;
-        "SUCCESS") echo $LOG_LEVEL_INFO ;;  # Same level as INFO
-        "WARN")  echo $LOG_LEVEL_WARN ;;
-        "ERROR") echo $LOG_LEVEL_ERROR ;;
-        *) echo $LOG_LEVEL_INFO ;;
+        "DEBUG") echo "$LOG_LEVEL_DEBUG" ;;
+        "INFO")  echo "$LOG_LEVEL_INFO" ;;
+        "SUCCESS") echo "$LOG_LEVEL_INFO" ;;  # Same level as INFO
+        "WARN")  echo "$LOG_LEVEL_WARN" ;;
+        "ERROR") echo "$LOG_LEVEL_ERROR" ;;
+        *) echo "$LOG_LEVEL_INFO" ;;
     esac
 }
 
@@ -170,7 +170,7 @@ get_caller_info() {
     local frame="${1:-2}"
     local caller_info
     
-    if caller_info=$(caller $frame 2>/dev/null); then
+    if caller_info=$(caller "$frame" 2>/dev/null); then
         local line_number=$(echo "$caller_info" | cut -d' ' -f1)
         local function_name=$(echo "$caller_info" | cut -d' ' -f2)
         local source_file=$(echo "$caller_info" | cut -d' ' -f3)
@@ -407,7 +407,7 @@ cleanup_logs() {
     
     log_info "Cleaning up log files older than $days days in $log_dir"
     
-    find "$log_dir" -name "*.log*" -type f -mtime +$days -delete 2>/dev/null || {
+    find "$log_dir" -name "*.log*" -type f -mtime +"$days" -delete 2>/dev/null || {
         log_warn "Failed to cleanup some log files"
     }
 }
