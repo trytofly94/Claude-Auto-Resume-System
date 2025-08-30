@@ -503,7 +503,7 @@ check_usage_limits() {
     # Test-Modus für Entwicklung
     if [[ "$TEST_MODE" == "true" ]]; then
         log_info "[TEST MODE] Simulating usage limit with ${TEST_WAIT_SECONDS}s wait"
-        resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+${TEST_WAIT_SECONDS}S +%s 2>/dev/null || echo $(($(date +%s) + ${TEST_WAIT_SECONDS})))
+        resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+"${TEST_WAIT_SECONDS}"S +%s 2>/dev/null || echo $(($(date +%s) + "${TEST_WAIT_SECONDS}")))
         limit_detected=true
     else
         # Echte Limit-Prüfung

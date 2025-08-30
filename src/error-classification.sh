@@ -73,7 +73,7 @@ classify_error_severity() {
     
     if [[ -z "$error_message" ]]; then
         log_debug "Empty error message - returning unknown severity"
-        return $ERROR_SEVERITY_UNKNOWN
+        return "$ERROR_SEVERITY_UNKNOWN"
     fi
     
     log_debug "Classifying error severity for context '$error_context': '$error_message'"
@@ -147,31 +147,31 @@ classify_error_severity() {
     for pattern in "${critical_patterns[@]}"; do
         if echo "$error_message" | grep -qi "$pattern"; then
             log_error "CRITICAL error detected: pattern '$pattern' matched"
-            record_error_occurrence "$error_message" $ERROR_SEVERITY_CRITICAL "$error_context" "$task_id"
-            return $ERROR_SEVERITY_CRITICAL
+            record_error_occurrence "$error_message" "$ERROR_SEVERITY_CRITICAL" "$error_context" "$task_id"
+            return "$ERROR_SEVERITY_CRITICAL"
         fi
     done
     
     for pattern in "${warning_patterns[@]}"; do
         if echo "$error_message" | grep -qi "$pattern"; then
             log_warn "WARNING level error detected: pattern '$pattern' matched"
-            record_error_occurrence "$error_message" $ERROR_SEVERITY_WARNING "$error_context" "$task_id"
-            return $ERROR_SEVERITY_WARNING
+            record_error_occurrence "$error_message" "$ERROR_SEVERITY_WARNING" "$error_context" "$task_id"
+            return "$ERROR_SEVERITY_WARNING"
         fi
     done
     
     for pattern in "${info_patterns[@]}"; do
         if echo "$error_message" | grep -qi "$pattern"; then
             log_info "INFO level error detected: pattern '$pattern' matched"
-            record_error_occurrence "$error_message" $ERROR_SEVERITY_INFO "$error_context" "$task_id"
-            return $ERROR_SEVERITY_INFO
+            record_error_occurrence "$error_message" "$ERROR_SEVERITY_INFO" "$error_context" "$task_id"
+            return "$ERROR_SEVERITY_INFO"
         fi
     done
     
     # Unknown error pattern
     log_debug "Unknown error pattern detected: '$error_message'"
-    record_error_occurrence "$error_message" $ERROR_SEVERITY_UNKNOWN "$error_context" "$task_id"
-    return $ERROR_SEVERITY_UNKNOWN
+    record_error_occurrence "$error_message" "$ERROR_SEVERITY_UNKNOWN" "$error_context" "$task_id"
+    return "$ERROR_SEVERITY_UNKNOWN"
 }
 
 # Record error occurrence for tracking and analysis
@@ -219,11 +219,11 @@ determine_recovery_strategy() {
     
     # Determine strategy based on severity and retry count
     case "$error_severity" in
-        $ERROR_SEVERITY_CRITICAL)
+        "$ERROR_SEVERITY_CRITICAL")
             log_error "Critical error detected - initiating emergency protocols"
             echo "$RECOVERY_STRATEGY_EMERGENCY"
             ;;
-        $ERROR_SEVERITY_WARNING)
+        "$ERROR_SEVERITY_WARNING")
             if [[ $retry_count -lt $ERROR_MAX_RETRIES ]]; then
                 if [[ "$ERROR_AUTO_RECOVERY" == "true" ]]; then
                     log_warn "Warning level error - attempting automatic recovery"
@@ -237,7 +237,7 @@ determine_recovery_strategy() {
                 echo "$RECOVERY_STRATEGY_MANUAL"
             fi
             ;;
-        $ERROR_SEVERITY_INFO)
+        "$ERROR_SEVERITY_INFO")
             if [[ $retry_count -lt $ERROR_MAX_RETRIES ]]; then
                 log_info "Info level error - attempting simple retry"
                 echo "$RECOVERY_STRATEGY_RETRY"
@@ -593,13 +593,13 @@ get_error_statistics() {
         total_count=$((total_count + count))
         
         case "${key%%_*}" in
-            $ERROR_SEVERITY_CRITICAL)
+            "$ERROR_SEVERITY_CRITICAL")
                 critical_count=$((critical_count + count))
                 ;;
-            $ERROR_SEVERITY_WARNING)
+            "$ERROR_SEVERITY_WARNING")
                 warning_count=$((warning_count + count))
                 ;;
-            $ERROR_SEVERITY_INFO)
+            "$ERROR_SEVERITY_INFO")
                 info_count=$((info_count + count))
                 ;;
             *)
@@ -651,7 +651,7 @@ cleanup_error_tracking() {
     for key in "${!ERROR_HISTORY[@]}"; do
         local timestamp="${key%%_*}"
         if [[ $timestamp -lt $cutoff_time ]]; then
-            unset ERROR_HISTORY["$key"]
+            unset "ERROR_HISTORY[$key]"
             ((cleanup_count++))
         fi
     done

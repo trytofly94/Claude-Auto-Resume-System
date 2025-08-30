@@ -308,8 +308,6 @@ detect_project() {
 
 # Erkenne bestehende Session
 detect_existing_session() {
-    local project_dir="${1:-$(pwd)}"
-    
     log_debug "Detecting existing claunch session for project"
     
     # Session-Datei-Pfad

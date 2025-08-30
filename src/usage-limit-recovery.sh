@@ -529,7 +529,7 @@ cleanup_usage_limit_tracking() {
     local cleanup_count=0
     for timestamp in "${!USAGE_LIMIT_HISTORY[@]}"; do
         if [[ $timestamp -lt $cutoff_time ]]; then
-            unset USAGE_LIMIT_HISTORY["$timestamp"]
+            unset "USAGE_LIMIT_HISTORY[$timestamp]"
             ((cleanup_count++))
         fi
     done
