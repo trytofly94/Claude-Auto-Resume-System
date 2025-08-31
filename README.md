@@ -532,6 +532,153 @@ QUEUE_LOCK_TIMEOUT=30            # File-Locking-Timeout (30 Sek)
 - **Custom Tasks**: Benutzerdefinierte Aufgaben mit flexiblen Metadaten
 - **Priority Management**: 1-10 Priority-Scale (1 = höchste Priorität)
 - **Status Tracking**: pending → in_progress → completed/failed/timeout
+- **Issue-Merge Workflows**: Automatisierte Entwicklungszyklen (develop → clear → review → merge)
+
+## 🔄 Issue-Merge Workflow System
+
+### Automatisierte Entwicklungszyklen
+
+Das Issue-Merge Workflow System automatisiert den kompletten Entwicklungslebenszyklus von GitHub Issues durch sequenzielle Ausführung der Phasen develop, clear, review und merge.
+
+#### Workflow-Funktionen
+
+```bash
+# Issue-Merge Workflow erstellen
+./src/task-queue.sh create-issue-merge 94
+
+# Workflow-Status überwachen  
+./src/task-queue.sh workflow status workflow-issue-94-20250831
+
+# Workflow fortsetzen nach Unterbrechung
+./src/task-queue.sh workflow resume workflow-issue-94-20250831
+
+# Alle Workflows auflisten
+./src/task-queue.sh workflow list in_progress
+```
+
+#### Workflow-Phasen
+
+**1. Develop Phase**
+- Führt `/dev {issue-id}` aus
+- Wartet auf PR-Erstellung oder Feature-Implementierung
+- Überwacht Completion-Patterns für erfolgreiche Entwicklung
+
+**2. Clear Phase**  
+- Führt `/clear` aus für sauberen Kontext
+- Bereitet das System für objektive Review vor
+- Minimale Wartezeit (30 Sekunden)
+
+**3. Review Phase**
+- Führt `/review PR-{issue-id}` aus  
+- Analysiert die implementierten Änderungen
+- Wartet auf Review-Completion oder Recommendations
+
+**4. Merge Phase**
+- Führt `/dev merge-pr {issue-id} --focus-main` aus
+- Integriert Änderungen in den Hauptbranch
+- Bestätigt erfolgreichen Merge-Abschluss
+
+#### Erweiterte Features
+
+**Automatic Recovery:**
+- Intelligente Fehlerklassifizierung (network, session, auth, syntax, usage_limit)
+- Exponential Backoff-Strategien für Wiederholungsversuche  
+- Checkpoint-System für Workflow-Wiederaufnahme
+
+**Progress Monitoring:**
+- Real-time Status-Tracking mit Fortschrittsanzeige
+- Detaillierte Timing-Informationen und ETA-Berechnung
+- Session-Health-Monitoring während Ausführung
+
+**Error Handling:**
+- Pausieren und Fortsetzen von Workflows
+- Resume von spezifischen Workflow-Schritten
+- Automatische Bereinigung nach Usage-Limits
+
+#### Completion Detection
+
+Das System verwendet sophistizierte Pattern-Matching für zuverlässige Command-Completion-Detection:
+
+```bash
+# Development Phase Patterns
+"pull request.*created|pr.*created|committed.*changes"
+
+# Review Phase Patterns  
+"review.*complete|analysis.*complete|summary|recommendation"
+
+# Merge Phase Patterns
+"merge.*successful|merged.*successfully|main.*updated"
+```
+
+#### Workflow-Konfiguration
+
+```bash
+# Phase-spezifische Timeouts
+DEVELOP_TIMEOUT=600    # 10 Minuten für Entwicklungsarbeit
+CLEAR_TIMEOUT=30       # 30 Sekunden für Context-Clearing  
+REVIEW_TIMEOUT=480     # 8 Minuten für Review-Arbeit
+MERGE_TIMEOUT=300      # 5 Minuten für Merge-Operationen
+
+# Error Recovery Settings
+MAX_WORKFLOW_RETRIES=5      # Maximale Workflow-Wiederholungen
+STEP_RETRY_DELAY=5         # Basis-Delay zwischen Step-Retries  
+USAGE_LIMIT_COOLDOWN=300   # Wartezeit nach Usage-Limits
+
+# Session Integration
+USE_CLAUNCH=true           # Integration mit claunch Session-Management
+CLAUNCH_MODE="tmux"        # tmux-basierte Session-Persistenz
+```
+
+#### Beispiel: Vollständiger Workflow
+
+```bash
+# 1. Issue-Merge Workflow für Issue #94 erstellen
+workflow_id=$(./src/task-queue.sh create-issue-merge 94)
+echo "Created workflow: $workflow_id"
+
+# 2. Workflow-Ausführung starten
+./src/task-queue.sh execute "$workflow_id"
+
+# 3. Live-Monitoring in separatem Terminal
+watch -n 10 './src/task-queue.sh workflow status '"$workflow_id"' | jq'
+
+# 4. Bei Bedarf manuell fortsetzen
+./src/task-queue.sh workflow resume "$workflow_id"
+
+# 5. Detaillierte Statusinformationen
+./src/task-queue.sh workflow detailed-status "$workflow_id"
+```
+
+#### Status-Reporting Beispiel
+
+```json
+{
+  "workflow_id": "workflow-issue-94-20250831",
+  "workflow_type": "issue-merge", 
+  "status": "in_progress",
+  "progress": {
+    "current_step": 2,
+    "total_steps": 4,
+    "percentage": 50.0,
+    "current_step_info": {
+      "phase": "review",
+      "status": "in_progress",
+      "command": "/review PR-94"
+    }
+  },
+  "timing": {
+    "elapsed_seconds": 847,
+    "estimated_completion": "2025-08-31T14:23:00Z"
+  },
+  "errors": {
+    "count": 1,
+    "last_error": {
+      "type": "network_error",
+      "timestamp": "2025-08-31T13:45:00Z"
+    }
+  }
+}
+```
 
 ## 🚀 Erweiterte Nutzung
 
@@ -649,6 +796,166 @@ bats tests/simple-task-engine-test.bats
 - 📦 **Packaged Assets** - Tar.gz und Zip-Archive für jede Version
 - 📝 **Changelog Generation** - Automatische Generierung aus Commit-History
 - 🔄 **Continuous Integration** - Automatische Tests bei jedem PR und Push
+
+## 🛠️ Issue-Merge Workflow Troubleshooting
+
+### Workflow-spezifische Probleme
+
+#### Workflow hängt in einer Phase fest
+
+**Problem**: Workflow bleibt in einer bestimmten Phase stehen ohne fortzufahren.
+
+**Diagnose**:
+```bash
+# Workflow-Status prüfen
+./src/task-queue.sh workflow detailed-status workflow-issue-X-YYYYMMDD
+
+# Pattern-Detection debuggen
+export DEBUG=1
+./src/task-queue.sh workflow resume workflow-issue-X-YYYYMMDD
+```
+
+**Lösungsansätze**:
+```bash
+# 1. Completion-Patterns anpassen
+export DEVELOP_COMPLETION_PATTERNS="pull request.*created|pr.*created|feature.*complete"
+export REVIEW_COMPLETION_PATTERNS="review.*complete|analysis.*finished|recommendations"
+
+# 2. Timeouts erhöhen
+export DEVELOP_TIMEOUT=900    # 15 Minuten für komplexe Features
+export REVIEW_TIMEOUT=600     # 10 Minuten für ausführliche Reviews
+
+# 3. Workflow von spezifischem Schritt fortsetzen
+./src/task-queue.sh workflow resume-from-step workflow-id 2
+```
+
+#### Pattern-Detection versagt
+
+**Problem**: Workflow erkennt nicht, wann Claude-Befehle abgeschlossen sind.
+
+**Symptome**:
+- Timeouts trotz erfolgreichem Abschluss
+- Workflow hängt endlos in Monitoring-Phase
+
+**Debugging**:
+```bash
+# 1. Claude-Session-Output prüfen
+tmux capture-pane -t claude-session -p | tail -20
+
+# 2. Pattern-Matching testen
+echo "Your Claude output here" | grep -E "pull request.*created|pr.*created"
+
+# 3. Debug-Modus aktivieren
+export DEBUG=1
+DEVELOP_COMPLETION_PATTERNS="your_custom_pattern" ./src/task-queue.sh workflow resume workflow-id
+```
+
+**Lösungen**:
+```bash
+# Benutzerdefinierte Patterns definieren
+export DEVELOP_COMPLETION_PATTERNS="successfully.*created|implementation.*complete|pr.*#[0-9]+"
+export CLEAR_COMPLETION_PATTERNS="context.*cleared|ready.*for.*next"
+export REVIEW_COMPLETION_PATTERNS="review.*complete|summary.*provided|assessment.*finished"
+export MERGE_COMPLETION_PATTERNS="merged.*successfully|main.*branch.*updated|closed.*issue"
+
+# Fallback auf längere Timeouts
+export GENERIC_TIMEOUT=300  # 5 Minuten
+export DEVELOP_TIMEOUT=1200 # 20 Minuten für große Features
+```
+
+#### Resource-Warnungen und Performance-Probleme
+
+**Problem**: Workflows verlangsamen das System oder lösen Resource-Warnungen aus.
+
+**Resource-Monitoring**:
+```bash
+# Resource-Monitoring konfigurieren
+export MAX_CPU_PERCENT=60        # CPU-Schwelle reduzieren
+export MAX_MEMORY_MB=256         # Memory-Limit anpassen
+export RESOURCE_CHECK_INTERVAL=30 # Häufigere Checks
+
+# Resource-Monitoring deaktivieren
+export ENABLE_RESOURCE_MONITORING=false
+```
+
+**Performance-Optimierung**:
+```bash
+# Polling-Intervalle reduzieren
+export RESOURCE_CHECK_INTERVAL=120  # Alle 2 Minuten statt 1 Minute
+
+# Backoff-Parameter anpassen
+export BACKOFF_BASE_DELAY=10       # Längere Base-Delays
+export BACKOFF_MAX_DELAY=600       # Maximale Wartezeit: 10 Minuten
+export BACKOFF_JITTER_RANGE=5      # Mehr Jitter gegen Synchronisation
+```
+
+#### Error-Recovery und Retry-Logik
+
+**Problem**: Workflows schlagen mit nicht-wiederherstellbaren Fehlern fehl.
+
+**Error-Klassifizierung**:
+- `network_error`: Wiederherstellbar mit Backoff
+- `session_error`: Wiederherstellbar durch Session-Neustart  
+- `auth_error`: Nicht wiederherstellbar - Authentifizierung erforderlich
+- `syntax_error`: Nicht wiederherstellbar - Command-Fix erforderlich
+- `usage_limit_error`: Wiederherstellbar nach Cooldown (5 Min)
+- `timeout_error`: Wiederherstellbar mit längerem Timeout
+
+**Recovery-Strategien**:
+```bash
+# 1. Workflow-Status und Error-History prüfen
+./src/task-queue.sh workflow detailed-status workflow-id | jq '.errors'
+
+# 2. Manuelle Wiederaufnahme
+./src/task-queue.sh workflow resume workflow-id
+
+# 3. Von spezifischem Schritt fortsetzen
+./src/task-queue.sh workflow resume-from-step workflow-id 1
+
+# 4. Workflow pausieren/abbrechen
+./src/task-queue.sh workflow pause workflow-id
+./src/task-queue.sh workflow cancel workflow-id
+```
+
+### Konfiguration Best Practices
+
+#### Optimale Timeout-Werte
+
+```bash
+# Für kleine Issues/Bugfixes
+export DEVELOP_TIMEOUT=300    # 5 Minuten
+export REVIEW_TIMEOUT=180     # 3 Minuten  
+export MERGE_TIMEOUT=120      # 2 Minuten
+
+# Für große/komplexe Features  
+export DEVELOP_TIMEOUT=1200   # 20 Minuten
+export REVIEW_TIMEOUT=600     # 10 Minuten
+export MERGE_TIMEOUT=300      # 5 Minuten
+```
+
+#### Completion-Pattern-Templates
+
+```bash
+# Entwicklungsphase - PR-Erstellung
+export DEVELOP_COMPLETION_PATTERNS="pull request.*created|pr.*#[0-9]+|feature.*implemented|issue.*complete"
+
+# Review-Phase - Analyse abgeschlossen  
+export REVIEW_COMPLETION_PATTERNS="review.*complete|analysis.*finished|summary|assessment.*complete"
+
+# Merge-Phase - Integration erfolgreich
+export MERGE_COMPLETION_PATTERNS="merged.*successfully|main.*updated|issue.*closed|merge.*complete"
+```
+
+### Häufige Fehlertypen
+
+| Fehlertyp | Lösung |
+|-----------|--------|
+| `Command timeout` | Timeout erhöhen oder Pattern anpassen |
+| `Session not found` | Session neu starten: `claunch start` |
+| `Pattern not matched` | Custom Patterns definieren |
+| `Resource warning` | Limits anpassen oder Monitoring reduzieren |
+| `Auth error` | `claude auth login` ausführen |
+| `Syntax error` | Workflow-Definition überprüfen |
 
 ## 🆘 Support
 
