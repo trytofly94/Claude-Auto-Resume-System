@@ -28,8 +28,14 @@ readonly HEALTH_CRITICAL="critical"
 start_monitoring_daemon() {
     local duration="${1:-0}"  # 0 = infinite
     local update_interval="${2:-$MONITOR_UPDATE_INTERVAL}"
+    local debug_mode="${3:-false}"
     
     log_info "Starting monitoring daemon (duration: ${duration}s, interval: ${update_interval}s)"
+    
+    if [[ "$debug_mode" == "true" ]]; then
+        log_info "DEBUG: Starting monitoring daemon with debug mode enabled"
+        log_info "DEBUG: Duration: ${duration}s, Interval: ${update_interval}s"
+    fi
     
     # Ensure monitor log directory exists
     ensure_monitor_log_directory
@@ -52,7 +58,11 @@ start_monitoring_daemon() {
         fi
         
         # Perform monitoring update
-        perform_monitoring_update "$update_count"
+        if [[ "$debug_mode" == "true" ]]; then
+            log_info "DEBUG: Starting update #$update_count"
+        fi
+        
+        perform_monitoring_update "$update_count" "$debug_mode"
         
         # Sleep until next update
         sleep "$update_interval"
@@ -64,6 +74,7 @@ start_monitoring_daemon() {
 # Perform single monitoring update
 perform_monitoring_update() {
     local update_number="$1"
+    local debug_mode="${2:-false}"
     
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
@@ -100,8 +111,15 @@ perform_monitoring_update() {
     check_monitoring_alerts "$monitoring_data"
     
     # Display monitoring update (if running in foreground)
-    if [[ -t 1 ]]; then  # Check if stdout is a terminal
-        display_monitoring_update "$monitoring_data"
+    if [[ "$debug_mode" == "true" ]]; then
+        log_info "DEBUG: About to check terminal and display update"
+    fi
+    
+    # Use safe terminal detection with fallback
+    if terminal_is_interactive_safe; then
+        display_monitoring_update_safe "$monitoring_data" "$debug_mode"
+    elif [[ "$debug_mode" == "true" ]]; then
+        log_info "DEBUG: Terminal not interactive, skipping display"
     fi
 }
 
@@ -311,6 +329,151 @@ get_queue_process_count() {
 }
 
 # ===============================================================================
+# SAFE TERMINAL DETECTION AND DISPLAY
+# ===============================================================================
+
+# Safe terminal detection that won't hang
+terminal_is_interactive_safe() {
+    # Use timeout to prevent hanging on terminal detection
+    if timeout 2s bash -c '[[ -t 1 ]]' 2>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Safe display function with error handling and fallbacks
+display_monitoring_update_safe() {
+    local monitoring_data="$1"
+    local debug_mode="${2:-false}"
+    
+    if [[ "$debug_mode" == "true" ]]; then
+        log_info "DEBUG: Attempting safe display update"
+    fi
+    
+    # Try full display with error handling
+    if ! display_monitoring_update_with_fallback "$monitoring_data" "$debug_mode" 2>/dev/null; then
+        # Fall back to simple display if complex display fails
+        if [[ "$debug_mode" == "true" ]]; then
+            log_info "DEBUG: Full display failed, trying simple display"
+        fi
+        
+        display_monitoring_update_simple "$monitoring_data" "$debug_mode"
+    fi
+}
+
+# Display with fallback - tries complex display but handles errors
+display_monitoring_update_with_fallback() {
+    local monitoring_data="$1"
+    local debug_mode="${2:-false}"
+    
+    # Use timeout to prevent hanging on terminal operations
+    if timeout 5s bash -c "
+        # Clear screen only if we can do it safely
+        if command -v tput >/dev/null 2>&1; then
+            tput clear 2>/dev/null || printf '\n\n=== Monitoring Update ===\n'
+        else
+            printf '\033[2J\033[H' 2>/dev/null || printf '\n\n=== Monitoring Update ===\n'
+        fi
+    " 2>/dev/null; then
+        # Terminal clearing worked, proceed with full display
+        display_monitoring_update_content "$monitoring_data"
+        return 0
+    else
+        # Terminal clearing failed or timed out
+        if [[ "$debug_mode" == "true" ]]; then
+            log_info "DEBUG: Terminal clearing failed or timed out"
+        fi
+        return 1
+    fi
+}
+
+# Simple display that works in all environments
+display_monitoring_update_simple() {
+    local monitoring_data="$1"
+    local debug_mode="${2:-false}"
+    
+    local timestamp
+    timestamp=$(echo "$monitoring_data" | jq -r '.timestamp')
+    
+    local update_number
+    update_number=$(echo "$monitoring_data" | jq -r '.update_number')
+    
+    local health_level
+    health_level=$(echo "$monitoring_data" | jq -r '.health_status.level')
+    
+    local queue_stats
+    queue_stats=$(echo "$monitoring_data" | jq -r '.queue_stats')
+    
+    # Simple text-based display
+    echo ""
+    echo "=== Task Queue Monitoring Update #$update_number ==="
+    echo "Time: $timestamp"
+    echo "Health: $health_level"
+    echo "Queue - Total: $(echo "$queue_stats" | jq -r '.total'), Pending: $(echo "$queue_stats" | jq -r '.pending'), Completed: $(echo "$queue_stats" | jq -r '.completed'), Failed: $(echo "$queue_stats" | jq -r '.failed')"
+    
+    if [[ "$health_level" != "$HEALTH_GOOD" ]]; then
+        local health_message
+        health_message=$(echo "$monitoring_data" | jq -r '.health_status.message')
+        echo "Issues: $health_message"
+    fi
+    
+    echo "Press Ctrl+C to stop monitoring"
+}
+
+# Display monitoring update content (used by fallback display)
+display_monitoring_update_content() {
+    local monitoring_data="$1"
+    
+    local timestamp
+    timestamp=$(echo "$monitoring_data" | jq -r '.timestamp')
+    
+    local update_number
+    update_number=$(echo "$monitoring_data" | jq -r '.update_number')
+    
+    local health_level
+    health_level=$(echo "$monitoring_data" | jq -r '.health_status.level')
+    
+    local queue_stats
+    queue_stats=$(echo "$monitoring_data" | jq -r '.queue_stats')
+    
+    echo "==============================================================================="
+    echo "Task Queue Real-Time Monitoring - Update #$update_number"
+    echo "Time: $timestamp"
+    echo "Health: $(colorize_health_status "$health_level")"
+    echo "==============================================================================="
+    echo
+    
+    # Display queue statistics
+    printf "Queue Statistics:\n"
+    printf "  Total:        %s\n" "$(echo "$queue_stats" | jq -r '.total')"
+    printf "  Pending:      %s\n" "$(echo "$queue_stats" | jq -r '.pending')"
+    printf "  In Progress:  %s\n" "$(echo "$queue_stats" | jq -r '.in_progress')"
+    printf "  Completed:    %s\n" "$(echo "$queue_stats" | jq -r '.completed')"
+    printf "  Failed:       %s\n" "$(echo "$queue_stats" | jq -r '.failed')"
+    printf "  Timeout:      %s\n" "$(echo "$queue_stats" | jq -r '.timeout')"
+    echo
+    
+    # Display system metrics
+    printf "System Metrics:\n"
+    printf "  Disk Usage:   %s%%\n" "$(echo "$monitoring_data" | jq -r '.system_metrics.disk_usage_percent')"
+    printf "  Memory Usage: %s%%\n" "$(echo "$monitoring_data" | jq -r '.system_metrics.memory_usage_percent')"
+    printf "  CPU Load:     %s\n" "$(echo "$monitoring_data" | jq -r '.system_metrics.cpu_load_average')"
+    printf "  Processes:    %s\n" "$(echo "$monitoring_data" | jq -r '.system_metrics.queue_process_count')"
+    echo
+    
+    # Display health message if not good
+    if [[ "$health_level" != "$HEALTH_GOOD" ]]; then
+        local health_message
+        health_message=$(echo "$monitoring_data" | jq -r '.health_status.message')
+        echo "Health Issues:"
+        echo "  $health_message"
+        echo
+    fi
+    
+    echo "Press Ctrl+C to stop monitoring"
+}
+
 # MONITORING DISPLAY AND LOGGING
 # ===============================================================================
 
