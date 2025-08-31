@@ -4,10 +4,13 @@
 # LOG FILES AND RUNTIME DATA
 # ===============================================================================
 
-# Log-Verzeichnis und alle Log-Dateien
+# Log-Verzeichnis und alle Log-Dateien (auch mit besonderen Zeichen)
 logs/
 *.log
 *.log.*
+"logs/"*
+"\"logs/"*
+logs/hybrid-monitor*.log
 
 # Session-Daten und temporäre Dateien
 *.session
@@ -151,6 +154,9 @@ tmux-client-*.log
 queue/backups/
 queue/backups/*.json
 queue/*.backup
+
+# Task Queue Runtime File (should not be committed)
+queue/task-queue.json
 
 # Task Queue Lock Files (temporary)
 queue/.queue.lock.*

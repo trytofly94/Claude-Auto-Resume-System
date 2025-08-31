@@ -1,14 +1,172 @@
 {
-  "version": "1.0",
-  "created": "2025-08-29T09:52:10+02:00",
-  "last_updated": "2025-08-29T09:52:10+02:00",
-  "total_tasks": 0,
-  "pending_tasks": 0,
-  "active_tasks": 0,
-  "completed_tasks": 0,
-  "failed_tasks": 0,
-  "timeout_tasks": 0,
+  "version": "2.0.0",
+  "timestamp": "2025-08-31T17:51:57+02:00",
   "tasks": [
-
+    {
+      "id": "custom-1756647048",
+      "type": "custom",
+      "priority": "3",
+      "status": "pending",
+      "created_at": "2025-08-31T15:30:51+02:00",
+      "updated_at": "2025-08-31T15:30:51+02:00",
+      "timeout": 3600,
+      "retry_count": 0,
+      "max_retries": 3,
+      "description": "echo 'Start Test'; sleep 3; echo 'Mitte Test'; sleep 3; echo 'Ende Test'"
+    },
+    {
+      "id": "workflow-1756655447-2513",
+      "type": "workflow",
+      "workflow_type": "issue-merge",
+      "status": "pending",
+      "created_at": "2025-08-31T17:50:47+02:00",
+      "updated_at": "2025-08-31T17:50:47+02:00",
+      "config": {
+        "issue_id": "106"
+      },
+      "current_step": 0,
+      "steps": [
+        {
+          "phase": "develop",
+          "status": "pending",
+          "command": "/dev 106",
+          "description": "Develop feature for issue 106"
+        },
+        {
+          "phase": "clear",
+          "status": "pending",
+          "command": "/clear",
+          "description": "Clear context for clean review"
+        },
+        {
+          "phase": "review",
+          "status": "pending",
+          "command": "/review PR-106",
+          "description": "Review PR for issue 106"
+        },
+        {
+          "phase": "merge",
+          "status": "pending",
+          "command": "/dev merge-pr 106 --focus-main",
+          "description": "Merge PR with main functionality focus"
+        }
+      ],
+      "results": {},
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "manual-workflow-123",
+      "type": "workflow",
+      "workflow_type": "issue-merge",
+      "status": "pending",
+      "created_at": "2025-08-31T17:48:30+02:00",
+      "updated_at": "2025-08-31T17:48:30+02:00",
+      "config": {
+        "issue_id": "123"
+      },
+      "current_step": 0,
+      "steps": [],
+      "results": {},
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "workflow-1756655516-1216",
+      "type": "workflow",
+      "workflow_type": "issue-merge",
+      "status": "pending",
+      "created_at": "2025-08-31T17:51:56+02:00",
+      "updated_at": "2025-08-31T17:51:56+02:00",
+      "config": {
+        "issue_id": "107"
+      },
+      "current_step": 0,
+      "steps": [
+        {
+          "phase": "develop",
+          "status": "pending",
+          "command": "/dev 107",
+          "description": "Develop feature for issue 107"
+        },
+        {
+          "phase": "clear",
+          "status": "pending",
+          "command": "/clear",
+          "description": "Clear context for clean review"
+        },
+        {
+          "phase": "review",
+          "status": "pending",
+          "command": "/review PR-107",
+          "description": "Review PR for issue 107"
+        },
+        {
+          "phase": "merge",
+          "status": "pending",
+          "command": "/dev merge-pr 107 --focus-main",
+          "description": "Merge PR with main functionality focus"
+        }
+      ],
+      "results": {},
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "workflow-1756655467-3810",
+      "type": "workflow",
+      "workflow_type": "issue-merge",
+      "status": "pending",
+      "created_at": "2025-08-31T17:51:07+02:00",
+      "updated_at": "2025-08-31T17:51:07+02:00",
+      "config": {
+        "issue_id": "94"
+      },
+      "current_step": 0,
+      "steps": [
+        {
+          "phase": "develop",
+          "status": "pending",
+          "command": "/dev 94",
+          "description": "Develop feature for issue 94"
+        },
+        {
+          "phase": "clear",
+          "status": "pending",
+          "command": "/clear",
+          "description": "Clear context for clean review"
+        },
+        {
+          "phase": "review",
+          "status": "pending",
+          "command": "/review PR-94",
+          "description": "Review PR for issue 94"
+        },
+        {
+          "phase": "merge",
+          "status": "pending",
+          "command": "/dev merge-pr 94 --focus-main",
+          "description": "Merge PR with main functionality focus"
+        }
+      ],
+      "results": {},
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "workflow-test",
+      "type": "workflow",
+      "workflow_type": "issue-merge",
+      "status": "pending",
+      "created_at": "2025-08-31T17:32:45+02:00",
+      "config": {
+        "issue_id": "98"
+      },
+      "current_step": 0,
+      "steps": [],
+      "results": {},
+      "retry_count": 0,
+      "priority": "normal"
+    }
   ]
 }

@@ -80,6 +80,19 @@ Claude-Auto-Resume/
 ```
 
 ### Entwicklung & Testing
+
+#### Standardisierte Make-Befehle (Empfohlen)
+```bash
+make test                                  # Vollständige Test-Suite
+make test-unit                             # Nur Unit-Tests  
+make test-integration                      # Nur Integration-Tests
+make lint                                  # ShellCheck-Analyse
+make validate                              # Syntax-Validierung
+make debug                                 # Environment-Diagnose
+make clean                                 # Temporäre Dateien aufräumen
+```
+
+#### Legacy-Befehle (Weiterhin verfügbar)
 ```bash
 ./scripts/run-tests.sh                     # Vollständige Test-Suite
 ./scripts/run-tests.sh unit                # Nur Unit-Tests
@@ -87,11 +100,30 @@ Claude-Auto-Resume/
 shellcheck src/**/*.sh                     # Statische Code-Analyse
 ```
 
+#### Diagnose & Debug
+```bash
+make debug                                 # Comprehensive environment check
+./scripts/debug-environment.sh            # Environment diagnostics
+make wizard-test                           # Test wizard architecture
+./scripts/test-wizard-modules.sh          # Modular architecture testing
+```
+
 ### Monitoring & Debugging
 ```bash
 tail -f logs/hybrid-monitor.log            # Live-Logs
-./scripts/show-stats.sh                    # Statistiken anzeigen
+./scripts/show-stats.sh                    # Statistiken anzeigen  
 tmux list-sessions | grep claude           # Aktive Sessions
+make monitor                               # Start hybrid monitoring
+make monitor-test                          # Test monitoring (30s)
+make status                                # System status check
+```
+
+### Git & Maintenance
+```bash
+make git-clean                             # Clean working directory
+make git-unstage-logs                      # Unstage log files
+make pre-commit                            # Pre-commit validation
+make dev-cycle                             # Full development cycle
 ```
 
 ### Task Queue Backup Management
@@ -194,7 +226,55 @@ test: add unit tests for usage limit detection
 - Erstelle Migration-Guide vom v4-Skript zum neuen System
 - Tagge Releases mit semantischer Versionierung
 
-## 8. Technische Besonderheiten
+## 8. Troubleshooting & Development Environment
+
+### Häufige Entwicklungsprobleme
+
+#### Tests schlagen fehl
+```bash
+make debug                                 # Umfassende Diagnose
+make validate                              # Syntax-Prüfung aller Scripts
+make lint                                  # ShellCheck-Analyse
+```
+
+#### Git-Probleme mit Log-Dateien  
+```bash
+make git-unstage-logs                      # Log-Dateien aus Staging entfernen
+make git-clean                             # Working Directory bereinigen
+git status --porcelain | grep logs        # Problem-Dateien identifizieren
+```
+
+#### Umgebungsprobleme
+```bash
+make debug                                 # Vollständige Environment-Diagnose  
+./scripts/debug-environment.sh            # Detaillierte Systemprüfung
+```
+
+#### Setup-Wizard-Probleme
+```bash
+make wizard-test                           # Wizard-Architektur testen
+bash -n src/setup-wizard.sh               # Syntax-Validierung
+src/setup-wizard.sh --help                # Verfügbare Optionen
+```
+
+### Development Best Practices
+
+#### Vor jeder Code-Änderung
+```bash
+make pre-commit                            # Validierung + Tests
+```
+
+#### Nach größeren Änderungen
+```bash
+make dev-cycle                             # Vollständiger Entwicklungszyklus
+```
+
+#### Bei Performance-Problemen
+```bash
+make monitor-test                          # Test-Monitoring (30s)
+```
+
+## 9. Technische Besonderheiten
 
 ### Session-Management-Strategie
 - **Primary**: claunch für projektbasierte Session-Verwaltung
@@ -247,8 +327,66 @@ test: add unit tests for usage limit detection
 - Cachete Terminal-App-Detection
 - Optimierte Session-Recovery-Zeiten
 
+## 11. Development Tools & Utilities
+
+### Neue Standardisierte Befehle (seit v1.1.0)
+
+Das Projekt verfügt über ein **Makefile** mit standardisierten Entwicklungsbefehlen für konsistente Workflows:
+
+#### Core-Entwicklung
+- `make help` - Vollständige Befehlsübersicht
+- `make dev-cycle` - Vollständiger Entwicklungszyklus (Clean → Validate → Lint → Test)
+- `make pre-commit` - Pre-Commit-Validierung
+
+#### Testing & Qualitätssicherung  
+- `make test` - Alle Tests ausführen
+- `make validate` - Syntax-Validierung aller Scripts
+- `make lint` - ShellCheck-Analyse
+
+#### Diagnose & Debugging
+- `make debug` - Umfassende Environment-Diagnose  
+- `make wizard-test` - Setup-Wizard-Architektur testen
+
+#### Wartung & Cleanup
+- `make clean` - Temporäre Dateien bereinigen
+- `make git-clean` - Git Working Directory bereinigen
+- `make git-unstage-logs` - Log-Dateien aus Git-Staging entfernen
+
+### Environment Diagnostics
+
+Der neue **Environment Debug Script** (`scripts/debug-environment.sh`) bietet umfassende Systemdiagnose:
+
+- ✅ **Dependency-Checking**: Alle erforderlichen Tools validieren
+- 🔍 **Git-Status**: Repository-Zustand und problematische Dateien erkennen  
+- 🏗️ **Projekt-Struktur**: Vollständigkeit der Verzeichnisse prüfen
+- 🧪 **Testing-Environment**: Test-Infrastruktur validieren
+- 🌐 **Netzwerk**: Anthropic-API-Erreichbarkeit testen
+- 📊 **System-Info**: Umfassende Systemstatistiken
+
+### Modular Architecture Support
+
+Das Setup-Wizard-System unterstützt jetzt **optionale modulare Architektur**:
+
+- **Monolithisch**: Alles in einer Datei (Standard, Backward Compatible)
+- **Modular**: Aufgeteilt in `src/wizard/{config,validation,detection}.sh`
+- **Automatic Fallback**: Graceful Degradation bei fehlenden Modulen
+
 ---
 
-**Letzte Aktualisierung**: 2025-08-05
-**Version**: 1.0.0-alpha
+**Letzte Aktualisierung**: 2025-08-31
+**Version**: 1.1.0-stable
 **Kompatibilität**: macOS 10.14+, Linux (Ubuntu 18.04+, CentOS 7+)
+
+## 12. Scratchpad-Verwaltung
+
+### Automatische Scratchpad-Organisation
+Das System organisiert Scratchpads automatisch in `active/` und `completed/` Verzeichnisse:
+
+- **Active Scratchpads**: Laufende Projekte und Features in Entwicklung
+- **Completed Scratchpads**: Abgeschlossene Projekte, automatisch archiviert nach PR-Erstellung
+- **Naming Convention**: `YYYY-MM-DD_task-description.md` für bessere Chronologie
+
+### Cleanup-Richtlinien
+- Scratchpads werden automatisch von `active/` nach `completed/` verschoben
+- Legacy-Dateien und nicht-konforme Naming werden bereinigt
+- Verwaiste Review-Dateien werden in korrekte Verzeichnisse verschoben oder entfernt

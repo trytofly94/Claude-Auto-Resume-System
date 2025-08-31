@@ -343,8 +343,28 @@ cmd_create_issue_merge_workflow() {
 cmd_start_monitoring() {
     local duration="${1:-30}"  # Default 30 seconds
     local interval="${2:-5}"   # Default 5 second intervals
+    local debug_mode="false"
     
-    start_monitoring_daemon "$duration" "$interval"
+    # Check for debug flag in arguments
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            "--debug"|"--verbose"|"debug")
+                debug_mode="true"
+                shift || true
+                ;;
+        esac
+    done
+    
+    # Reparse arguments after removing debug flags
+    duration="${1:-30}"
+    interval="${2:-5}"
+    
+    if [[ "$debug_mode" == "true" ]]; then
+        log_info "Starting monitoring in debug mode (duration: ${duration}s, interval: ${interval}s)"
+    fi
+    
+    start_monitoring_daemon "$duration" "$interval" "$debug_mode"
 }
 
 # Check health command
@@ -490,7 +510,7 @@ INTERACTIVE MODE:
     shell                        Alias for interactive
 
 MONITORING:
-    monitor [duration] [interval]        Start real-time monitoring
+    monitor [duration] [interval] [--debug] Start real-time monitoring (add --debug for verbose output)
     health                              Check queue health status
 
 MAINTENANCE:
@@ -535,6 +555,14 @@ show_version() {
 initialize_system() {
     # Load logging first
     load_logging
+    
+    # Load core queue modules (needed for monitoring functions)
+    if [[ -f "$SCRIPT_DIR/queue/core.sh" ]]; then
+        source "$SCRIPT_DIR/queue/core.sh"
+    fi
+    if [[ -f "$SCRIPT_DIR/queue/monitoring.sh" ]]; then
+        source "$SCRIPT_DIR/queue/monitoring.sh"
+    fi
     
     # Load configuration
     load_configuration
@@ -584,6 +612,15 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 else
     # Script is being sourced, only load modules
     load_logging
+    
+    # Load core queue modules
+    if [[ -f "$SCRIPT_DIR/queue/core.sh" ]]; then
+        source "$SCRIPT_DIR/queue/core.sh"
+    fi
+    if [[ -f "$SCRIPT_DIR/queue/monitoring.sh" ]]; then
+        source "$SCRIPT_DIR/queue/monitoring.sh"
+    fi
+    
     load_configuration
     load_queue_modules
 fi
