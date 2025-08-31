@@ -4,6 +4,10 @@
 # Real-time monitoring and health checking for task queue
 # Version: 2.0.0-refactored
 
+# Guard against multiple sourcing
+[[ -n "${MONITORING_MODULE_LOADED:-}" ]] && return 0
+readonly MONITORING_MODULE_LOADED=1
+
 set -euo pipefail
 
 # ===============================================================================
@@ -110,16 +114,11 @@ perform_monitoring_update() {
     # Check for alerts
     check_monitoring_alerts "$monitoring_data"
     
-    # Display monitoring update (if running in foreground)
+    # Simple display for testing (avoiding complex terminal detection)
     if [[ "$debug_mode" == "true" ]]; then
-        log_info "DEBUG: About to check terminal and display update"
-    fi
-    
-    # Use safe terminal detection with fallback
-    if terminal_is_interactive_safe; then
-        display_monitoring_update_safe "$monitoring_data" "$debug_mode"
-    elif [[ "$debug_mode" == "true" ]]; then
-        log_info "DEBUG: Terminal not interactive, skipping display"
+        log_info "DEBUG: Monitoring update #$update_number completed"
+        local total_tasks=$(echo "$monitoring_data" | jq -r '.queue_stats.total // 0')
+        echo "[$(date '+%H:%M:%S')] Queue Status: $total_tasks tasks total" >&2
     fi
 }
 

@@ -556,6 +556,14 @@ initialize_system() {
     # Load logging first
     load_logging
     
+    # Load core queue modules (needed for monitoring functions)
+    if [[ -f "$SCRIPT_DIR/queue/core.sh" ]]; then
+        source "$SCRIPT_DIR/queue/core.sh"
+    fi
+    if [[ -f "$SCRIPT_DIR/queue/monitoring.sh" ]]; then
+        source "$SCRIPT_DIR/queue/monitoring.sh"
+    fi
+    
     # Load configuration
     load_configuration
     
@@ -604,6 +612,15 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 else
     # Script is being sourced, only load modules
     load_logging
+    
+    # Load core queue modules
+    if [[ -f "$SCRIPT_DIR/queue/core.sh" ]]; then
+        source "$SCRIPT_DIR/queue/core.sh"
+    fi
+    if [[ -f "$SCRIPT_DIR/queue/monitoring.sh" ]]; then
+        source "$SCRIPT_DIR/queue/monitoring.sh"
+    fi
+    
     load_configuration
     load_queue_modules
 fi
