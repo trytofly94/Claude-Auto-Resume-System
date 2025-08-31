@@ -90,6 +90,10 @@ LIST_SESSIONS=false
 SHOW_SESSION_ID=false
 SYSTEM_STATUS=false
 
+# Setup Wizard Argumente
+FORCE_WIZARD=false
+SKIP_WIZARD=false
+
 # ===============================================================================
 # UTILITY-FUNKTIONEN (früh definiert für Validierung)
 # ===============================================================================
@@ -914,6 +918,10 @@ SESSION MANAGEMENT OPTIONS:
     --show-session-id        Display current session ID
     --system-status          Show system status and diagnostics
 
+SETUP OPTIONS:
+    --setup-wizard           Force run setup wizard even if session detected
+    --skip-wizard           Skip automatic wizard trigger
+
 CLAUDE_ARGS:
     Any arguments to pass to the Claude CLI (e.g., "continue", --model opus)
     If no arguments provided, defaults to "continue"
@@ -1096,6 +1104,14 @@ parse_arguments() {
                 SYSTEM_STATUS=true
                 shift
                 ;;
+            --setup-wizard)
+                FORCE_WIZARD=true
+                shift
+                ;;
+            --skip-wizard)
+                SKIP_WIZARD=true
+                shift
+                ;;
             --version)
                 show_version
                 exit 0
@@ -1212,6 +1228,65 @@ main() {
     if ! validate_system_requirements; then
         log_error "System requirements not met - exiting"
         exit 1
+    fi
+    
+    # Setup Wizard Integration - prüfe ob Wizard ausgeführt werden soll
+    if [[ "$FORCE_WIZARD" == "true" ]] || [[ "$CONTINUOUS_MODE" == "true" && "$SKIP_WIZARD" != "true" ]]; then
+        log_debug "Checking if setup wizard should be triggered"
+        
+        # Lade Setup Wizard Modul falls verfügbar
+        if [[ -f "$SCRIPT_DIR/setup-wizard.sh" ]]; then
+            if ! source "$SCRIPT_DIR/setup-wizard.sh"; then
+                log_error "Failed to load setup wizard module"
+                if [[ "$FORCE_WIZARD" == "true" ]]; then
+                    exit 1
+                fi
+            fi
+        else
+            log_error "Setup wizard module not found at: $SCRIPT_DIR/setup-wizard.sh"
+            if [[ "$FORCE_WIZARD" == "true" ]]; then
+                exit 1
+            fi
+        fi
+        
+        # Entscheide ob Wizard ausgeführt werden soll
+        local should_run_wizard=false
+        
+        if [[ "$FORCE_WIZARD" == "true" ]]; then
+            log_info "Forcing setup wizard execution as requested"
+            should_run_wizard=true
+        elif declare -f detect_existing_claude_session >/dev/null 2>&1; then
+            if ! detect_existing_claude_session; then
+                log_info "No existing Claude session detected - starting setup wizard"
+                should_run_wizard=true
+            else
+                log_info "Existing Claude session detected - skipping wizard"
+            fi
+        else
+            log_warn "Session detection not available - skipping wizard"
+        fi
+        
+        # Führe Setup Wizard aus falls erforderlich
+        if [[ "$should_run_wizard" == "true" ]]; then
+            if declare -f setup_wizard_main >/dev/null 2>&1; then
+                log_info "Starting Setup Wizard"
+                
+                if setup_wizard_main; then
+                    log_info "Setup wizard completed successfully"
+                    
+                    # Nach erfolgreichem Setup, setze Wizard-flags zurück
+                    FORCE_WIZARD=false
+                else
+                    log_error "Setup wizard failed"
+                    exit 1
+                fi
+            else
+                log_error "Setup wizard function not available"
+                if [[ "$FORCE_WIZARD" == "true" ]]; then
+                    exit 1
+                fi
+            fi
+        fi
     fi
     
     # Hauptfunktionalität ausführen

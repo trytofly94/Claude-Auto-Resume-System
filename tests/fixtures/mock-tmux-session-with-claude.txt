@@ -1,0 +1,13 @@
+$ claude continue
+
+Connecting to Claude...
+
+Claude 3 Sonnet (claude-3-sonnet-20240229)
+
+Hello! I'm Claude, an AI assistant.
+
+Session ID: sess-test1234567890abcdef
+
+I'm ready to help you. How can I assist you today?
+
+$ 
