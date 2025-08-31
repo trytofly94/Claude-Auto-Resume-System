@@ -243,6 +243,10 @@ MAX_RESTARTS=50                 # Maximale Überwachungszyklen
 USE_CLAUNCH=true               # claunch-Integration aktivieren
 CLAUNCH_MODE="tmux"            # "tmux" oder "direct"
 USAGE_LIMIT_COOLDOWN=300       # Wartezeit nach Usage-Limit (Sekunden)
+
+# Context Clearing (NEU in v1.2)
+QUEUE_SESSION_CLEAR_BETWEEN_TASKS=true  # Automatisches Context Clearing zwischen Tasks
+QUEUE_CONTEXT_CLEAR_WAIT=2             # Wartezeit nach /clear-Befehl (Sekunden)
 ```
 
 ### Erweiterte Optionen
@@ -533,6 +537,36 @@ QUEUE_LOCK_TIMEOUT=30            # File-Locking-Timeout (30 Sek)
 - **Priority Management**: 1-10 Priority-Scale (1 = höchste Priorität)
 - **Status Tracking**: pending → in_progress → completed/failed/timeout
 - **Issue-Merge Workflows**: Automatisierte Entwicklungszyklen (develop → clear → review → merge)
+
+### 🧹 Context Clearing zwischen Tasks (NEU in v1.2)
+
+Das System bietet automatisches Context Clearing zwischen Tasks für saubere Task-Trennung:
+
+#### Standard-Verhalten (Empfohlen)
+```bash
+# Jede Task startet automatisch mit frischem Context
+claude-auto-resume --add-custom "Fix login bug"      # Wird abgeschlossen → /clear gesendet
+claude-auto-resume --add-custom "Add dark mode"      # Startet mit sauberem Context
+```
+
+#### Verwandte Tasks (Context-Erhaltung)
+```bash
+# Für zusammenhängende Aufgaben Context beibehalten
+claude-auto-resume --add-custom "Design user model" --no-clear-context
+claude-auto-resume --add-custom "Implement user model" --no-clear-context
+claude-auto-resume --add-custom "Test user model" --clear-context
+# → Context fließt durch erste zwei, wird nach der dritten gelöscht
+```
+
+#### Verfügbare CLI-Optionen
+- `--clear-context`: Context nach Task explizit löschen (überschreibt globale Einstellung)
+- `--no-clear-context`: Context nach Task beibehalten (überschreibt globale Einstellung)
+- Ohne Flags: Globale Einstellung `QUEUE_SESSION_CLEAR_BETWEEN_TASKS` verwenden
+
+#### Intelligente Recovery-Logik
+- **Usage Limit Recovery**: Context wird automatisch beibehalten für Task-Fortsetzung
+- **Normale Completion**: Context wird standardmäßig gelöscht für saubere Trennung
+- **Explizite Übersteuerung**: Task-Level-Flags haben höchste Priorität
 
 ## 🔄 Issue-Merge Workflow System
 
