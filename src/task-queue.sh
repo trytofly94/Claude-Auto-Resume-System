@@ -266,13 +266,18 @@ cmd_workflow() {
             ;;
         "status")
             local workflow_id="${1:-}"
+            local detailed="${2:-}"
             
             if [[ -z "$workflow_id" ]]; then
-                echo "Usage: $0 workflow status <workflow_id>"
+                echo "Usage: $0 workflow status <workflow_id> [detailed]"
                 return 1
             fi
             
-            get_workflow_status "$workflow_id"
+            if [[ "$detailed" == "detailed" ]] || [[ "$detailed" == "-d" ]]; then
+                get_workflow_detailed_status "$workflow_id"
+            else
+                get_workflow_status "$workflow_id"
+            fi
             ;;
         "list")
             list_workflows "${1:-all}"
@@ -289,13 +294,18 @@ cmd_workflow() {
             ;;
         "resume")
             local workflow_id="${1:-}"
+            local resume_step="${2:-}"
             
             if [[ -z "$workflow_id" ]]; then
-                echo "Usage: $0 workflow resume <workflow_id>"
+                echo "Usage: $0 workflow resume <workflow_id> [step_index]"
                 return 1
             fi
             
-            resume_workflow "$workflow_id"
+            if [[ -n "$resume_step" ]] && [[ "$resume_step" =~ ^[0-9]+$ ]]; then
+                resume_workflow_from_step "$workflow_id" "$resume_step"
+            else
+                resume_workflow "$workflow_id"
+            fi
             ;;
         "cancel")
             local workflow_id="${1:-}"
@@ -307,9 +317,20 @@ cmd_workflow() {
             
             cancel_workflow "$workflow_id"
             ;;
+        "checkpoint")
+            local workflow_id="${1:-}"
+            local reason="${2:-manual_checkpoint}"
+            
+            if [[ -z "$workflow_id" ]]; then
+                echo "Usage: $0 workflow checkpoint <workflow_id> [reason]"
+                return 1
+            fi
+            
+            create_workflow_checkpoint "$workflow_id" "$reason"
+            ;;
         *)
             echo "Unknown workflow subcommand: $subcommand" >&2
-            echo "Available: create, execute, status, list, pause, resume, cancel" >&2
+            echo "Available: create, execute, status, list, pause, resume, cancel, checkpoint" >&2
             return 1
             ;;
     esac
@@ -497,11 +518,12 @@ CORE COMMANDS:
 WORKFLOW COMMANDS:
     workflow create <type> [config]      Create new workflow
     workflow execute <workflow_id>       Execute workflow
-    workflow status <workflow_id>        Get workflow status
+    workflow status <workflow_id> [detailed] Get workflow status (add 'detailed' for full info)
     workflow list [status]               List workflows
     workflow pause <workflow_id>         Pause workflow
-    workflow resume <workflow_id>        Resume workflow
+    workflow resume <workflow_id> [step] Resume workflow (optionally from specific step)
     workflow cancel <workflow_id>        Cancel workflow
+    workflow checkpoint <workflow_id> [reason] Create workflow checkpoint
     
     create-issue-merge <issue_id>        Create issue-merge workflow (shortcut)
 
