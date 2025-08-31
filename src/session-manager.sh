@@ -771,6 +771,256 @@ stop_managed_session() {
 }
 
 # ===============================================================================
+# ENHANCED SESSION DETECTION FUNCTIONS (für Setup Wizard)
+# ===============================================================================
+
+# Übergreifende Claude Session Detection für Setup Wizard
+detect_existing_claude_session() {
+    log_debug "Starting comprehensive Claude session detection"
+    
+    local detection_methods=(
+        "check_tmux_sessions"
+        "check_session_files"
+        "check_process_tree"
+        "check_socket_connections"
+    )
+    
+    for method in "${detection_methods[@]}"; do
+        log_debug "Trying detection method: $method"
+        
+        if "$method"; then
+            log_info "Claude session detected via $method"
+            return 0
+        fi
+    done
+    
+    log_info "No existing Claude session detected"
+    return 1
+}
+
+# Prüfe tmux-Sessions auf Claude-bezogene Sessions
+check_tmux_sessions() {
+    local project_name=$(basename "$(pwd)")
+    local session_pattern="${TMUX_SESSION_PREFIX:-claude-auto-resume}-${project_name}"
+    
+    # Prüfe exakte Übereinstimmung
+    if tmux has-session -t "$session_pattern" 2>/dev/null; then
+        DETECTED_SESSION_NAME="$session_pattern"
+        log_info "Found exact tmux session match: $session_pattern"
+        return 0
+    fi
+    
+    # Prüfe auf Pattern-Matches für Claude-bezogene Sessions
+    local matching_sessions
+    matching_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E "claude|auto-resume|sess-" || true)
+    
+    if [[ -n "$matching_sessions" ]]; then
+        log_info "Found potential Claude tmux sessions: $matching_sessions"
+        DETECTED_SESSION_NAME=$(echo "$matching_sessions" | head -1)
+        
+        # Prüfe ob die Session tatsächlich Claude enthält
+        for session in $matching_sessions; do
+            local session_output
+            session_output=$(tmux capture-pane -t "$session" -p 2>/dev/null || echo "")
+            
+            if echo "$session_output" | grep -q "claude\|Claude\|session\|sess-"; then
+                DETECTED_SESSION_NAME="$session"
+                log_info "Confirmed Claude activity in session: $session"
+                return 0
+            fi
+        done
+    fi
+    
+    return 1
+}
+
+# Prüfe Session-Dateien auf persistierte Session-IDs
+check_session_files() {
+    local project_name=$(basename "$(pwd)")
+    local session_files=(
+        "$HOME/.claude_session_${project_name}"
+        "$HOME/.claude_auto_resume_${project_name}"
+        "$(pwd)/.claude_session"
+        "$HOME/.claude_session"
+    )
+    
+    for file in "${session_files[@]}"; do
+        if [[ -f "$file" && -s "$file" ]]; then
+            local session_id
+            session_id=$(cat "$file" 2>/dev/null | head -1 | tr -d '\n\r' | sed 's/[[:space:]]*$//')
+            
+            if [[ -n "$session_id" ]]; then
+                log_info "Found session file: $file with ID: $session_id"
+                
+                # Validiere Session ID Format
+                if [[ "$session_id" =~ ^sess- ]] && [[ ${#session_id} -ge 10 ]]; then
+                    DETECTED_SESSION_ID="$session_id"
+                    
+                    # Prüfe ob Session noch aktiv ist (optional)
+                    if validate_session_id_active "$session_id"; then
+                        log_info "Confirmed active session from file: $session_id"
+                        return 0
+                    else
+                        log_warn "Session file found but session may be inactive: $session_id"
+                        return 0  # Trotzdem als gefunden markieren
+                    fi
+                else
+                    log_warn "Invalid session ID format in file $file: $session_id"
+                fi
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Prüfe Prozess-Baum auf Claude-Instanzen
+check_process_tree() {
+    log_debug "Checking process tree for Claude instances"
+    
+    # Finde Claude-Prozesse
+    local claude_processes
+    claude_processes=$(pgrep -f "claude" 2>/dev/null || true)
+    
+    if [[ -n "$claude_processes" ]]; then
+        log_info "Found running Claude processes: $claude_processes"
+        
+        # Prüfe ob Claude-Prozesse in tmux laufen
+        for pid in $claude_processes; do
+            # Prüfe ob der Prozess in einer tmux-Session läuft
+            if tmux list-panes -a -F '#{pane_pid} #{session_name}' 2>/dev/null | grep -q "^$pid "; then
+                local session_name
+                session_name=$(tmux list-panes -a -F '#{pane_pid} #{session_name}' 2>/dev/null | grep "^$pid " | head -1 | cut -d' ' -f2)
+                log_info "Found Claude process $pid running in tmux session: $session_name"
+                DETECTED_SESSION_NAME="$session_name"
+                return 0
+            fi
+        done
+        
+        # Auch wenn nicht in tmux, könnte es eine direkte Claude-Instanz sein
+        log_info "Found Claude processes but not in tmux sessions"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Prüfe Socket-Verbindungen (erweiterte Detection)
+check_socket_connections() {
+    log_debug "Checking socket connections for Claude activity"
+    
+    # Prüfe auf offene Netzwerkverbindungen zu Claude-Servern
+    # Dies ist eine heuristische Methode, die nach typischen Claude-Verbindungen sucht
+    if has_command "netstat"; then
+        local claude_connections
+        claude_connections=$(netstat -an 2>/dev/null | grep -E "anthropic|claude|443" | grep ESTABLISHED || true)
+        
+        if [[ -n "$claude_connections" ]]; then
+            log_debug "Found potential Claude network connections"
+            return 0
+        fi
+    elif has_command "lsof"; then
+        local claude_network
+        claude_network=$(lsof -i -n 2>/dev/null | grep -E "claude|anthropic" || true)
+        
+        if [[ -n "$claude_network" ]]; then
+            log_debug "Found Claude network activity via lsof"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# Validiere ob eine Session-ID noch aktiv ist
+validate_session_id_active() {
+    local session_id="$1"
+    
+    # Basis-Validierung der Session-ID-Format
+    if [[ ! "$session_id" =~ ^sess- ]] || [[ ${#session_id} -lt 10 ]]; then
+        log_debug "Invalid session ID format: $session_id"
+        return 1
+    fi
+    
+    # Prüfe ob tmux-Sessions mit dieser Session-ID in Verbindung stehen
+    local tmux_sessions
+    tmux_sessions=$(tmux list-sessions 2>/dev/null || true)
+    
+    if [[ -n "$tmux_sessions" ]]; then
+        # Durchsuche Session-Outputs nach der Session-ID
+        while IFS= read -r session_line; do
+            if [[ -n "$session_line" ]]; then
+                local session_name
+                session_name=$(echo "$session_line" | cut -d':' -f1)
+                
+                local session_output
+                session_output=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
+                
+                if echo "$session_output" | grep -q "$session_id"; then
+                    log_debug "Session ID $session_id found in tmux session: $session_name"
+                    return 0
+                fi
+            fi
+        done <<< "$tmux_sessions"
+    fi
+    
+    # Session-ID nicht in aktiven Sessions gefunden
+    return 1
+}
+
+# Erweiterte Session-Information sammeln
+get_session_info() {
+    local session_identifier="$1"
+    
+    echo "Session Information:"
+    echo "=================="
+    
+    # Falls es eine tmux-Session ist
+    if tmux has-session -t "$session_identifier" 2>/dev/null; then
+        echo "Type: tmux session"
+        echo "Name: $session_identifier"
+        echo "Created: $(tmux list-sessions -F '#{session_created} #{session_name}' | grep "$session_identifier" | cut -d' ' -f1)"
+        echo "Windows: $(tmux list-windows -t "$session_identifier" | wc -l)"
+        echo ""
+        echo "Recent output:"
+        tmux capture-pane -t "$session_identifier" -p | tail -5
+    # Falls es eine Session-ID ist
+    elif [[ "$session_identifier" =~ ^sess- ]]; then
+        echo "Type: Claude session ID"
+        echo "Session ID: $session_identifier"
+        echo "Format: $(if [[ ${#session_identifier} -ge 20 ]]; then echo "Valid"; else echo "Short/Invalid"; fi)"
+        
+        # Suche zugehörige tmux-Session
+        local found_session=""
+        local tmux_sessions
+        tmux_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+        
+        if [[ -n "$tmux_sessions" ]]; then
+            while IFS= read -r session_name; do
+                if [[ -n "$session_name" ]]; then
+                    local session_output
+                    session_output=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
+                    
+                    if echo "$session_output" | grep -q "$session_identifier"; then
+                        found_session="$session_name"
+                        break
+                    fi
+                fi
+            done <<< "$tmux_sessions"
+        fi
+        
+        if [[ -n "$found_session" ]]; then
+            echo "Associated tmux session: $found_session"
+        else
+            echo "Associated tmux session: Not found"
+        fi
+    else
+        echo "Type: Unknown"
+        echo "Identifier: $session_identifier"
+    fi
+}
+
+# ===============================================================================
 # MAIN ENTRY POINT (für Testing)
 # ===============================================================================
 
