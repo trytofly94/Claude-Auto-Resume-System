@@ -775,14 +775,28 @@ stop_managed_session() {
 # ===============================================================================
 
 # Übergreifende Claude Session Detection für Setup Wizard
+# 
+# Diese Funktion implementiert eine mehrstufige Erkennungsstrategie für bestehende Claude-Sessions:
+# 1. tmux-Sessions: Sucht nach aktiven tmux-Sessions mit Claude-bezogenen Namen
+# 2. Session-Dateien: Prüft persistierte Session-IDs in bekannten Dateipfaden
+# 3. Prozess-Baum: Analysiert laufende Prozesse auf Claude-Instanzen
+# 4. Socket-Verbindungen: Heuristische Netzwerk-Analyse (experimentell)
+#
+# Die Methoden werden sequenziell ausgeführt und die erste erfolgreiche Detection
+# bestimmt das Ergebnis. Dies ermöglicht robuste Erkennung auch bei partiellen
+# System-Zuständen (z.B. tmux läuft aber Session-Datei fehlt).
+#
+# Rückgabe: 0 wenn Session gefunden, 1 wenn keine Session erkannt
 detect_existing_claude_session() {
     log_debug "Starting comprehensive Claude session detection"
     
+    # Definiere Detection-Methoden in Prioritätsreihenfolge
+    # (von spezifischsten zu allgemeinsten)
     local detection_methods=(
-        "check_tmux_sessions"
-        "check_session_files"
-        "check_process_tree"
-        "check_socket_connections"
+        "check_tmux_sessions"        # Spezifisch: aktive tmux-Sessions
+        "check_session_files"        # Spezifisch: persistierte Session-IDs
+        "check_process_tree"         # Allgemein: laufende Claude-Prozesse
+        "check_socket_connections"   # Heuristisch: Netzwerk-Verbindungen
     )
     
     for method in "${detection_methods[@]}"; do
@@ -799,18 +813,28 @@ detect_existing_claude_session() {
 }
 
 # Prüfe tmux-Sessions auf Claude-bezogene Sessions
+#
+# Implementiert eine zweistufige tmux-Session-Erkennung:
+# 1. Exakte Übereinstimmung: Sucht nach dem erwarteten Session-Namen für das aktuelle Projekt
+# 2. Pattern-Matching: Sucht nach Sessions mit Claude-relevanten Namensmustern
+# 3. Content-Validation: Analysiert Session-Inhalte auf Claude-spezifische Ausgaben
+#
+# Die Funktion verwendet tmux's session formatting (#{session_name}) für zuverlässige
+# Namensextraktion und grep mit erweiterten Regex für flexible Pattern-Erkennung.
 check_tmux_sessions() {
     local project_name=$(basename "$(pwd)")
     local session_pattern="${TMUX_SESSION_PREFIX:-claude-auto-resume}-${project_name}"
     
-    # Prüfe exakte Übereinstimmung
+    # Stufe 1: Exakte Übereinstimmung mit erwartetem Session-Namen
+    # Dies ist der optimale Fall - die Session wurde von unserem System erstellt
     if tmux has-session -t "$session_pattern" 2>/dev/null; then
         DETECTED_SESSION_NAME="$session_pattern"
         log_info "Found exact tmux session match: $session_pattern"
         return 0
     fi
     
-    # Prüfe auf Pattern-Matches für Claude-bezogene Sessions
+    # Stufe 2: Pattern-basierte Suche nach Claude-relevanten Session-Namen
+    # Regex erklärt: "claude" (case-insensitive), "auto-resume", oder "sess-" (Session-ID Präfix)
     local matching_sessions
     matching_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E "claude|auto-resume|sess-" || true)
     
@@ -818,11 +842,16 @@ check_tmux_sessions() {
         log_info "Found potential Claude tmux sessions: $matching_sessions"
         DETECTED_SESSION_NAME=$(echo "$matching_sessions" | head -1)
         
-        # Prüfe ob die Session tatsächlich Claude enthält
+        # Stufe 3: Content-Validation - verifiziere Claude-Aktivität in gefundenen Sessions
+        # Verwende tmux capture-pane um den aktuellen Session-Inhalt zu analysieren
+        # Dies verhindert False-Positives von unrelated Sessions mit ähnlichen Namen
         for session in $matching_sessions; do
             local session_output
             session_output=$(tmux capture-pane -t "$session" -p 2>/dev/null || echo "")
             
+            # Suche nach Claude-spezifischen Ausgabeindikatoren:
+            # - "claude"/"Claude": Kommandozeilen-Tool oder Begrüßung
+            # - "session"/"sess-": Session-ID-Referenzen in Claude-Ausgaben
             if echo "$session_output" | grep -q "claude\|Claude\|session\|sess-"; then
                 DETECTED_SESSION_NAME="$session"
                 log_info "Confirmed Claude activity in session: $session"
@@ -835,12 +864,22 @@ check_tmux_sessions() {
 }
 
 # Prüfe Session-Dateien auf persistierte Session-IDs
+#
+# Durchsucht bekannte Dateipfade nach gespeicherten Claude Session-IDs.
+# Diese Dateien werden vom System erstellt um Session-Persistenz über
+# Terminal-Neustarts hinweg zu ermöglichen.
+# 
+# Priorität der Dateipfade (wichtigste zuerst):
+# 1. Projektspezifische Session-Datei im Home-Verzeichnis
+# 2. Legacy Auto-Resume Session-Datei (Backwards-Kompatibilität) 
+# 3. Lokale Session-Datei im Projektverzeichnis
+# 4. Globale Session-Datei (fallback für nicht-projekt-spezifische Usage)
 check_session_files() {
     local project_name=$(basename "$(pwd)")
     local session_files=(
-        "$HOME/.claude_session_${project_name}"
-        "$HOME/.claude_auto_resume_${project_name}"
-        "$(pwd)/.claude_session"
+        "$HOME/.claude_session_${project_name}"     # Projekt-spezifisch
+        "$HOME/.claude_auto_resume_${project_name}" # Legacy-Format
+        "$(pwd)/.claude_session"                    # Lokal im Projekt
         "$HOME/.claude_session"
     )
     

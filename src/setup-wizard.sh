@@ -7,25 +7,184 @@
 
 set -euo pipefail
 
+# Script directory detection (needed for module loading)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ===============================================================================
-# GLOBALE VARIABLEN UND KONSTANTEN
+# MODULAR ARCHITECTURE - LOAD WIZARD MODULES
 # ===============================================================================
 
-# Wizard-spezifische Konfiguration
-WIZARD_VERSION="1.0.0"
-TMUX_SESSION_PREFIX="${TMUX_SESSION_PREFIX:-claude-auto-resume}"
+# Versuche modulare Architektur zu laden, fallback zu monolithischem Ansatz
+WIZARD_MODULES_DIR="$SCRIPT_DIR/wizard"
 
-# Session-Tracking-Variablen (werden während des Setups gesetzt)
-TMUX_SESSION_NAME=""
-SESSION_ID=""
-DETECTED_SESSION_NAME=""
-DETECTED_SESSION_ID=""
+if [[ -d "$WIZARD_MODULES_DIR" ]]; then
+    # Lade Wizard-Module wenn verfügbar
+    for module in config validation detection; do
+        module_path="$WIZARD_MODULES_DIR/${module}.sh"
+        if [[ -f "$module_path" ]]; then
+            source "$module_path"
+            log_debug "Loaded wizard module: $module"
+        fi
+    done
+    USING_MODULAR_ARCHITECTURE=true
+else
+    USING_MODULAR_ARCHITECTURE=false
+    log_debug "Using monolithic wizard architecture"
+fi
+
+# ===============================================================================
+# GLOBALE VARIABLEN UND KONSTANTEN (Fallback für monolithischen Ansatz)
+# ===============================================================================
+
+# Nur definieren falls nicht bereits durch Module geladen
+if [[ "${USING_MODULAR_ARCHITECTURE:-false}" != "true" ]]; then
+    # Wizard-spezifische Konfiguration
+    WIZARD_VERSION="1.0.0"
+    TMUX_SESSION_PREFIX="${TMUX_SESSION_PREFIX:-claude-auto-resume}"
+    
+    # Session-Tracking-Variablen (werden während des Setups gesetzt)
+    TMUX_SESSION_NAME=""
+    SESSION_ID=""
+    DETECTED_SESSION_NAME=""
+    DETECTED_SESSION_ID=""
+    
+    # Timeout-Konfiguration für bessere Zuverlässigkeit
+    SETUP_SESSION_INIT_WAIT=5       # Warten nach Session-Erstellung
+    SETUP_CLAUDE_STARTUP_WAIT=45    # Warten auf Claude-Initialisierung  
+    SETUP_VALIDATION_WAIT=3         # Warten zwischen Validierungsschritten
+    SETUP_CHECK_INTERVAL=3          # Intervall für Status-Checks
+fi
 
 # ===============================================================================
 # HILFSFUNKTIONEN UND DEPENDENCIES
 # ===============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Timeout-Konfiguration für bessere Zuverlässigkeit
+SETUP_SESSION_INIT_WAIT=5       # Warten nach Session-Erstellung
+SETUP_CLAUDE_STARTUP_WAIT=45    # Warten auf Claude-Initialisierung  
+SETUP_VALIDATION_WAIT=3         # Warten zwischen Validierungsschritten
+SETUP_CHECK_INTERVAL=3          # Intervall für Status-Checks
+
+# ===============================================================================
+# INPUT VALIDATION FUNKTIONEN (Fallback für monolithischen Ansatz)
+# ===============================================================================
+
+# Nur definieren falls nicht bereits durch Module geladen
+if [[ "${USING_MODULAR_ARCHITECTURE:-false}" != "true" ]]; then
+
+# Validiert tmux session names gegen tmux naming rules
+validate_tmux_session_name() {
+    local session_name="$1"
+    
+    # Prüfe auf leeren Input
+    if [[ -z "$session_name" ]]; then
+        return 1
+    fi
+    
+    # tmux session names dürfen nicht enthalten:
+    # - Doppelpunkte (:) - werden für window/pane targeting verwendet
+    # - Punkte (.) am Anfang - hidden sessions
+    # - Whitespace am Anfang/Ende
+    # - Sonderzeichen die Shell-Probleme verursachen können
+    if [[ "$session_name" =~ ^[[:space:]]*$ ]]; then
+        echo "Session name cannot be empty or only whitespace"
+        return 1
+    fi
+    
+    if [[ "$session_name" =~ : ]]; then
+        echo "Session name cannot contain colons (:)"
+        return 1
+    fi
+    
+    if [[ "$session_name" =~ ^[.] ]]; then
+        echo "Session name cannot start with a dot (.)"
+        return 1
+    fi
+    
+    if [[ "$session_name" =~ [[:space:]] ]]; then
+        echo "Session name cannot contain spaces"
+        return 1
+    fi
+    
+    # Prüfe auf gefährliche Zeichen für Shell-Injection
+    if [[ "$session_name" =~ [\$\`\;\|\&\>\<] ]]; then
+        echo "Session name contains invalid characters (\$\`\;\|\&\>\<)"
+        return 1
+    fi
+    
+    # Längen-Validierung (tmux limit ist typischerweise ~200 chars)
+    if [[ ${#session_name} -gt 100 ]]; then
+        echo "Session name too long (max 100 characters)"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Validiert Claude session ID format
+validate_claude_session_id() {
+    local session_id="$1"
+    
+    # Prüfe auf leeren Input
+    if [[ -z "$session_id" ]]; then
+        echo "Session ID cannot be empty"
+        return 1
+    fi
+    
+    # Entferne Whitespace
+    session_id=$(echo "$session_id" | tr -d '[:space:]')
+    
+    # Auto-add sess- prefix falls nicht vorhanden (aber validiere das Format)
+    if [[ ! "$session_id" =~ ^sess- ]]; then
+        session_id="sess-$session_id"
+    fi
+    
+    # Claude session IDs sollten dem Format sess-XXXX entsprechen
+    # Typische Länge: sess- (5) + mindestens 8 Zeichen = mindestens 13 total
+    if [[ ${#session_id} -lt 13 ]]; then
+        echo "Session ID too short (minimum format: sess-XXXXXXXX)"
+        return 1
+    fi
+    
+    # Prüfe auf gültiges Format: sess- gefolgt von alphanumerischen Zeichen/Bindestriche
+    if [[ ! "$session_id" =~ ^sess-[a-zA-Z0-9_-]+$ ]]; then
+        echo "Invalid session ID format (must be sess-XXXX with alphanumeric characters)"
+        return 1
+    fi
+    
+    # Setze validierte Session ID zurück
+    echo "$session_id"
+    return 0
+}
+
+# Validiert Benutzer-Auswahlen für Multiple-Choice-Prompts
+validate_choice() {
+    local input="$1"
+    local min_choice="$2"
+    local max_choice="$3"
+    
+    # Prüfe auf leeren Input
+    if [[ -z "$input" ]]; then
+        echo "Please make a selection"
+        return 1
+    fi
+    
+    # Prüfe auf numerischen Input
+    if [[ ! "$input" =~ ^[0-9]+$ ]]; then
+        echo "Please enter a number"
+        return 1
+    fi
+    
+    # Prüfe Range
+    if [[ $input -lt $min_choice ]] || [[ $input -gt $max_choice ]]; then
+        echo "Please choose between $min_choice and $max_choice"
+        return 1
+    fi
+    
+    return 0
+}
+
+fi  # Ende der monolithischen Input-Validation-Funktionen
 
 # Lade Utility-Module
 if [[ -f "$SCRIPT_DIR/utils/logging.sh" ]]; then
@@ -366,6 +525,12 @@ create_tmux_session() {
         
         while true; do
             read -r -p "Choose option (1-3): " choice
+            
+            # Validiere Benutzer-Eingabe
+            if ! validate_choice "$choice" 1 3; then
+                continue
+            fi
+            
             case $choice in
                 1)
                     TMUX_SESSION_NAME="$session_name"
@@ -378,15 +543,19 @@ create_tmux_session() {
                     break
                     ;;
                 3)
-                    read -r -p "Enter new session name: " custom_name
-                    if [[ -n "$custom_name" ]]; then
-                        session_name="$custom_name"
-                        echo "Using custom session name: $session_name"
-                        break
-                    fi
-                    ;;
-                *)
-                    echo "Please enter 1, 2, or 3"
+                    while true; do
+                        read -r -p "Enter new session name: " custom_name
+                        
+                        # Validiere Session-Name
+                        if validation_msg=$(validate_tmux_session_name "$custom_name"); then
+                            session_name="$custom_name"
+                            echo "✓ Using custom session name: $session_name"
+                            break 2  # Verlasse beide while-loops
+                        else
+                            echo "Invalid session name: $validation_msg"
+                            echo "Please try again."
+                        fi
+                    done
                     ;;
             esac
         done
@@ -399,8 +568,9 @@ create_tmux_session() {
         echo "✓ tmux session created successfully"
         TMUX_SESSION_NAME="$session_name"
         
-        # Kurz warten bis Session initialisiert ist
-        sleep 2
+        # Warten bis Session vollständig initialisiert ist (erhöht für bessere Zuverlässigkeit)
+        log_debug "Waiting ${SETUP_SESSION_INIT_WAIT}s for session initialization"
+        sleep $SETUP_SESSION_INIT_WAIT
         
         # Session-Verifizierung
         if tmux has-session -t "$session_name" 2>/dev/null; then
@@ -445,15 +615,15 @@ start_claude_in_session() {
     
     echo ""
     echo "Claude is starting up..."
-    echo "This may take 10-30 seconds depending on your connection."
+    echo "This may take up to ${SETUP_CLAUDE_STARTUP_WAIT} seconds depending on your connection."
     echo ""
     
-    # Warte auf Claude-Initialisierung
-    local wait_time=30
-    local check_interval=2
+    # Warte auf Claude-Initialisierung mit erhöhten Timeouts für bessere Zuverlässigkeit
+    local wait_time=$SETUP_CLAUDE_STARTUP_WAIT
+    local check_interval=$SETUP_CHECK_INTERVAL
     local elapsed=0
     
-    echo "Waiting for Claude to initialize..."
+    echo "Waiting for Claude to initialize (timeout: ${wait_time}s)..."
     while [[ $elapsed -lt $wait_time ]]; do
         printf "."
         sleep $check_interval
@@ -564,25 +734,21 @@ configure_session_id() {
         while true; do
             read -r -p "Enter session ID (with or without 'sess-' prefix): " input_session_id
             
-            # Validiere Session ID Format
-            if [[ -z "$input_session_id" ]]; then
-                echo "Session ID cannot be empty. Please try again."
-                continue
-            fi
-            
-            # Auto-add sess- prefix falls nicht vorhanden
-            if [[ "$input_session_id" =~ ^sess- ]]; then
-                SESSION_ID="$input_session_id"
-            else
-                SESSION_ID="sess-$input_session_id"
-            fi
-            
-            # Basis-Validierung
-            if [[ ${#SESSION_ID} -ge 10 ]]; then
-                echo "✓ Session ID set: $SESSION_ID"
+            # Validiere Session ID mit umfassender Validierung
+            if validated_session_id=$(validate_claude_session_id "$input_session_id"); then
+                SESSION_ID="$validated_session_id"
+                echo "✓ Session ID validated: $SESSION_ID"
                 break
             else
-                echo "Session ID seems too short. Please check and try again."
+                echo "Invalid session ID: $validated_session_id"
+                echo "Please try again."
+                echo ""
+                echo "Session ID format help:"
+                echo "  • Should be at least 8 characters (without sess- prefix)"
+                echo "  • Can contain letters, numbers, underscores, and hyphens"
+                echo "  • Examples: sess-abc123, abc123-def456, my_session_123"
+                echo ""
+                continue
             fi
         done
     fi
