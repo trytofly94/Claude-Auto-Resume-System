@@ -230,7 +230,8 @@ execute_issue_merge_workflow() {
             
             # Mark step as completed
             workflow_data=$(echo "$workflow_data" | jq \
-                '.steps[' "$step_index" '].status = "completed" | .steps[' "$step_index" '].completed_at = "' "$(date -Iseconds)" '"')
+                --arg completed_at "$(date -Iseconds)" \
+                '.steps['"$step_index"'].status = "completed" | .steps['"$step_index"'].completed_at = $completed_at')
             
             log_info "Workflow step completed: $phase"
         else
@@ -238,7 +239,8 @@ execute_issue_merge_workflow() {
             
             # Mark step as failed
             workflow_data=$(echo "$workflow_data" | jq \
-                '.steps[' "$step_index" '].status = "failed" | .steps[' "$step_index" '].failed_at = "' "$(date -Iseconds)" '"')
+                --arg failed_at "$(date -Iseconds)" \
+                '.steps['"$step_index"'].status = "failed" | .steps['"$step_index"'].failed_at = $failed_at')
             
             log_error "Workflow step failed: $phase"
             
@@ -268,7 +270,9 @@ execute_issue_merge_workflow() {
     done
     
     # Mark workflow as completed
-    workflow_data=$(echo "$workflow_data" | jq '.completed_at = "' "$(date -Iseconds)" '"')
+    workflow_data=$(echo "$workflow_data" | jq \
+        --arg completed_at "$(date -Iseconds)" \
+        '.completed_at = $completed_at')
     update_task_status "$workflow_id" "$WORKFLOW_STATUS_COMPLETED"
     update_workflow_data "$workflow_id" "$workflow_data"
     
