@@ -523,6 +523,88 @@ recover_from_usage_limit() {
     return 1
 }
 
+# ===============================================================================
+# CONTEXT CLEARING FUNCTIONS (Issue #93)
+# ===============================================================================
+
+# Send context clear command to a session
+# This function sends the /clear command to Claude via tmux send-keys
+send_context_clear_command() {
+    local session_name="$1"
+    local wait_seconds="${2:-${QUEUE_CONTEXT_CLEAR_WAIT:-2}}"
+    
+    if [[ -z "$session_name" ]]; then
+        log_error "send_context_clear_command: session_name parameter required"
+        return 1
+    fi
+    
+    log_info "Clearing context for session: $session_name"
+    
+    # Check if this is a tmux session or session ID  
+    if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
+        local tmux_session_name
+        
+        # If it looks like a session ID, convert to tmux session name
+        if [[ "$session_name" =~ ^sess- ]]; then
+            # Extract project name from session data
+            local project_and_dir="${SESSIONS[$session_name]:-}"
+            if [[ -n "$project_and_dir" ]]; then
+                local project_name="${project_and_dir%%:*}"
+                tmux_session_name="${TMUX_SESSION_PREFIX}-${project_name}"
+            else
+                log_error "Cannot find project name for session ID: $session_name"
+                return 1
+            fi
+        else
+            # Assume it's already a tmux session name
+            tmux_session_name="$session_name"
+        fi
+        
+        if tmux has-session -t "$tmux_session_name" 2>/dev/null; then
+            log_debug "Sending /clear command to tmux session: $tmux_session_name"
+            
+            # Send the /clear command
+            if tmux send-keys -t "$tmux_session_name" '/clear' C-m 2>/dev/null; then
+                log_debug "Context clear command sent, waiting ${wait_seconds}s for completion"
+                sleep "$wait_seconds"
+                log_info "Context cleared for session: $session_name"
+                return 0
+            else
+                log_error "Failed to send context clear command to session: $tmux_session_name"
+                return 1
+            fi
+        else
+            log_warn "tmux session not found, cannot clear context: $tmux_session_name"
+            return 1
+        fi
+    else
+        log_warn "Context clearing only supported in tmux mode, current mode: ${CLAUNCH_MODE:-direct}"
+        return 1
+    fi
+}
+
+# Check if context clearing is supported for the current session
+is_context_clearing_supported() {
+    local session_id="$1"
+    
+    # Context clearing requires tmux mode
+    if [[ "$CLAUNCH_MODE" != "tmux" ]]; then
+        return 1
+    fi
+    
+    # Session must exist and be active
+    if [[ -z "${SESSIONS[$session_id]:-}" ]]; then
+        return 1
+    fi
+    
+    # Extract tmux session name and check if it exists
+    local project_and_dir="${SESSIONS[$session_id]}"
+    local project_name="${project_and_dir%%:*}"
+    local tmux_session_name="${TMUX_SESSION_PREFIX}-${project_name}"
+    
+    tmux has-session -t "$tmux_session_name" 2>/dev/null
+}
+
 # Recovery gestoppter Session
 recover_stopped_session() {
     local session_id="$1"

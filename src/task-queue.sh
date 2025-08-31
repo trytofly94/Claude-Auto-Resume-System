@@ -77,6 +77,16 @@ load_logging() {
     fi
 }
 
+# Load CLI parser utilities (Issue #93)
+load_cli_parser() {
+    if [[ -f "$SCRIPT_DIR/utils/cli-parser.sh" ]]; then
+        source "$SCRIPT_DIR/utils/cli-parser.sh"
+        log_debug "CLI parser loaded for context clearing support"
+    else
+        log_warn "CLI parser not found, context clearing flags unavailable"
+    fi
+}
+
 # ===============================================================================
 # MAIN COMMAND INTERFACE
 # ===============================================================================
@@ -96,6 +106,14 @@ main() {
             ;;
         "list"|"ls")
             cmd_list_tasks "$@"
+            ;;
+        
+        # Enhanced commands with context clearing support (Issue #93)
+        "add-custom")
+            cmd_add_custom_with_context "$@"
+            ;;
+        "add-issue")
+            cmd_add_github_issue_with_context "$@"
             ;;
         "status")
             cmd_show_status "$@"
@@ -588,6 +606,9 @@ initialize_system() {
     
     # Load configuration
     load_configuration
+    
+    # Load CLI parser (Issue #93)
+    load_cli_parser
     
     # Check if task queue is enabled
     if [[ "$TASK_QUEUE_ENABLED" != "true" ]]; then

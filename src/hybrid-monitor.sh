@@ -485,11 +485,133 @@ process_task_queue() {
     
     log_info "Found pending task for processing: $next_task_id"
     
+    # Get task data for context clearing decisions
+    local task_data
+    task_data=$("${TASK_QUEUE_SCRIPT}" show "$next_task_id" 2>/dev/null)
+    
     # Placeholder für Phase 2 - aktuell nur logging
     # TODO: Implement execute_single_task function in Phase 2
     log_info "Task processing will be implemented in Phase 2: $next_task_id"
     
+    # NOTE: When task execution is implemented, add context clearing here:
+    # if task_completed_successfully; then
+    #     execute_context_clearing "$task_data" "normal" "${MAIN_SESSION_ID:-}"
+    # elif usage_limit_hit; then
+    #     # Don't clear context for usage limit recovery
+    #     log_debug "Usage limit hit, preserving context for recovery"
+    # fi
+    
     return 0
+}
+
+# ===============================================================================
+# CONTEXT CLEARING DECISION LOGIC (Issue #93)
+# ===============================================================================
+
+# Decide whether context should be cleared after task completion
+# Arguments:
+#   $1: task_json - JSON data of the task
+#   $2: completion_reason - "normal", "usage_limit_recovery", "error", etc.
+should_clear_context() {
+    local task_json="$1"
+    local completion_reason="${2:-normal}"
+    
+    # Validate input
+    if [[ -z "$task_json" ]]; then
+        log_error "should_clear_context: task_json parameter required"
+        return 1
+    fi
+    
+    log_debug "Evaluating context clearing for completion reason: $completion_reason"
+    
+    # Usage limit recovery: never clear context (preserve for continuation)
+    if [[ "$completion_reason" == "usage_limit_recovery" ]]; then
+        log_debug "Usage limit recovery detected - preserving context"
+        return 1  # Don't clear
+    fi
+    
+    # Error scenarios: preserve context for debugging
+    if [[ "$completion_reason" == "error" || "$completion_reason" == "timeout" ]]; then
+        log_debug "Error/timeout completion - preserving context for debugging"
+        return 1  # Don't clear
+    fi
+    
+    # Check task-level override (takes priority over global config)
+    local task_clear_preference
+    task_clear_preference=$(echo "$task_json" | jq -r '.clear_context // null')
+    
+    if [[ "$task_clear_preference" != "null" ]]; then
+        log_debug "Task-level clear_context preference found: $task_clear_preference"
+        if [[ "$task_clear_preference" == "true" ]]; then
+            log_debug "Task explicitly requests context clearing"
+            return 0  # Clear
+        else
+            log_debug "Task explicitly requests context preservation"
+            return 1  # Don't clear
+        fi
+    fi
+    
+    # Fall back to global configuration
+    local global_clear_setting="${QUEUE_SESSION_CLEAR_BETWEEN_TASKS:-true}"
+    log_debug "Using global configuration QUEUE_SESSION_CLEAR_BETWEEN_TASKS: $global_clear_setting"
+    
+    if [[ "$global_clear_setting" == "true" ]]; then
+        log_debug "Global config enables context clearing between tasks"
+        return 0  # Clear
+    else
+        log_debug "Global config disables context clearing between tasks"
+        return 1  # Don't clear
+    fi
+}
+
+# Execute context clearing for a completed task
+execute_context_clearing() {
+    local task_json="$1"
+    local completion_reason="${2:-normal}"
+    local session_id="${3:-}"
+    
+    # Validate required parameters
+    if [[ -z "$task_json" ]]; then
+        log_error "execute_context_clearing: task_json parameter required"
+        return 1
+    fi
+    
+    # Check if we should clear context
+    if ! should_clear_context "$task_json" "$completion_reason"; then
+        log_info "Skipping context clearing per configuration/task preference"
+        return 0
+    fi
+    
+    # If no specific session ID provided, try to find the active one
+    if [[ -z "$session_id" ]]; then
+        # Try to find an active session (this logic might need refinement)
+        if [[ -n "${MAIN_SESSION_ID:-}" ]] && is_context_clearing_supported "${MAIN_SESSION_ID}"; then
+            session_id="$MAIN_SESSION_ID"
+            log_debug "Using main session for context clearing: $session_id"
+        else
+            log_warn "No suitable session found for context clearing"
+            return 1
+        fi
+    fi
+    
+    # Verify context clearing is supported for this session
+    if ! is_context_clearing_supported "$session_id"; then
+        log_warn "Context clearing not supported for session: $session_id"
+        return 1
+    fi
+    
+    # Execute the context clear
+    local task_id
+    task_id=$(echo "$task_json" | jq -r '.id // "unknown"')
+    
+    log_info "Executing context clearing after task completion: $task_id"
+    if send_context_clear_command "$session_id"; then
+        log_info "Context successfully cleared after task: $task_id"
+        return 0
+    else
+        log_error "Failed to clear context after task: $task_id"
+        return 1
+    fi
 }
 
 # ===============================================================================

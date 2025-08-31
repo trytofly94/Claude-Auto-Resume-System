@@ -158,6 +158,15 @@ validate_task_structure() {
         fi
     done
     
+    # Validate optional clear_context field if present (Issue #93)
+    if echo "$task_json" | jq -e ".clear_context" >/dev/null 2>&1; then
+        local clear_context_value=$(echo "$task_json" | jq -r '.clear_context')
+        if [[ "$clear_context_value" != "true" && "$clear_context_value" != "false" ]]; then
+            log_error "clear_context field must be true or false, got: $clear_context_value"
+            return 1
+        fi
+    fi
+    
     return 0
 }
 
