@@ -337,6 +337,28 @@ FORCE_TERMINAL=iterm ./src/hybrid-monitor.sh --new-terminal
 
 ## 🔧 Troubleshooting
 
+## 📂 Scratchpad-Verwaltung
+
+Das System verwaltet Entwicklungs-Scratchpads automatisch:
+
+### Verzeichnisstruktur
+```
+scratchpads/
+├── active/           # Aktuelle Arbeitspakete (6 aktive)
+│   ├── 2025-08-24_task-queue-system-implementation.md
+│   ├── 2025-08-26_fix-task-queue-state-persistence-bug.md
+│   └── ...
+└── completed/        # Abgeschlossene Projekte (36+ archivierte)
+    ├── 2025-08-24_test-environment-fixes.md
+    ├── 2025-08-25_hybrid-monitor-task-execution-engine.md
+    └── ...
+```
+
+### Automatische Organisation
+- **Aktive Scratchpads**: Laufende Features und Bugfixes
+- **Archivierung**: Automatische Verschiebung nach PR-Erstellung durch deployer-Agent
+- **Cleanup**: Regelmäßige Bereinigung verwaister und Legacy-Dateien
+
 ### Kürzlich Behobene Kritische Probleme ✅
 
 Das System hat alle kritischen Stabilitätsprobleme gelöst. Falls Sie auf ältere Versionen oder ähnliche Probleme stoßen:
