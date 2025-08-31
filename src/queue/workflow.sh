@@ -141,6 +141,11 @@ execute_workflow_task() {
     # Update status to in_progress
     update_task_status "$workflow_id" "$WORKFLOW_STATUS_IN_PROGRESS"
     
+    # Start resource monitoring if enabled
+    if [[ "$ENABLE_RESOURCE_MONITORING" == "true" ]]; then
+        check_system_resources "$workflow_id"
+    fi
+    
     # Log system environment for debugging
     log_debug "[WORKFLOW] System environment:"
     log_debug "[WORKFLOW]   USE_CLAUNCH: ${USE_CLAUNCH:-not_set}"
@@ -547,6 +552,189 @@ execute_generic_command() {
 }
 
 # ===============================================================================
+# CONFIGURABLE COMPLETION PATTERNS
+# ===============================================================================
+
+# Configurable completion patterns for better reliability
+# Users can override these by setting environment variables
+readonly DEVELOP_COMPLETION_PATTERNS="${DEVELOP_COMPLETION_PATTERNS:-"pull request.*created|pr.*created|created pull request|committed.*changes|created.*branch|pushed.*to|issue.*complete|implemented|development.*finished"}"
+readonly CLEAR_COMPLETION_PATTERNS="${CLEAR_COMPLETION_PATTERNS:-"context.*cleared|clear.*complete|conversation.*reset|claude>|>|❯"}"
+readonly REVIEW_COMPLETION_PATTERNS="${REVIEW_COMPLETION_PATTERNS:-"review.*complete|analysis.*complete|review.*finished|summary|recommendation|conclusion|overall"}"
+readonly MERGE_COMPLETION_PATTERNS="${MERGE_COMPLETION_PATTERNS:-"merge.*successful|merged.*successfully|merge.*complete|main.*updated|merged.*into.*main|main.*branch|issue.*closed"}"
+readonly GENERIC_COMPLETION_PATTERNS="${GENERIC_COMPLETION_PATTERNS:-"complete|finished|done|success|claude>|>|❯"}"
+
+# Configurable timeouts for each phase (in seconds)
+readonly DEVELOP_TIMEOUT="${DEVELOP_TIMEOUT:-600}"    # 10 minutes for development
+readonly CLEAR_TIMEOUT="${CLEAR_TIMEOUT:-30}"         # 30 seconds for clearing
+readonly REVIEW_TIMEOUT="${REVIEW_TIMEOUT:-480}"      # 8 minutes for review
+readonly MERGE_TIMEOUT="${MERGE_TIMEOUT:-300}"        # 5 minutes for merge
+readonly GENERIC_TIMEOUT="${GENERIC_TIMEOUT:-180}"    # 3 minutes for generic commands
+
+# Resource monitoring configuration
+readonly RESOURCE_CHECK_INTERVAL="${RESOURCE_CHECK_INTERVAL:-60}"    # Check every 60 seconds
+readonly MAX_CPU_PERCENT="${MAX_CPU_PERCENT:-80}"                    # Maximum CPU usage threshold
+readonly MAX_MEMORY_MB="${MAX_MEMORY_MB:-512}"                       # Maximum memory usage in MB
+readonly ENABLE_RESOURCE_MONITORING="${ENABLE_RESOURCE_MONITORING:-true}"  # Enable resource monitoring
+
+# Backoff and jitter configuration
+readonly BACKOFF_BASE_DELAY="${BACKOFF_BASE_DELAY:-5}"               # Base delay in seconds
+readonly BACKOFF_MAX_DELAY="${BACKOFF_MAX_DELAY:-300}"               # Maximum backoff delay (5 minutes)
+readonly BACKOFF_JITTER_RANGE="${BACKOFF_JITTER_RANGE:-3}"           # +/- jitter range in seconds
+
+# Resource monitoring functions
+check_system_resources() {
+    local workflow_id="${1:-system}"
+    
+    # Skip if monitoring is disabled
+    if [[ "$ENABLE_RESOURCE_MONITORING" != "true" ]]; then
+        return 0
+    fi
+    
+    local cpu_usage=0
+    local memory_usage=0
+    local warnings=()
+    
+    # Get CPU usage (cross-platform)
+    if command -v top >/dev/null 2>&1; then
+        if [[ "$(uname)" == "Darwin" ]]; then
+            # macOS
+            cpu_usage=$(top -l1 -n0 | grep "CPU usage" | awk '{print $3}' | sed 's/%//' 2>/dev/null || echo "0")
+        else
+            # Linux
+            cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | sed 's/%us,//' 2>/dev/null || echo "0")
+        fi
+    fi
+    
+    # Get memory usage of current process and its children
+    if command -v ps >/dev/null 2>&1; then
+        local pid=$$
+        memory_usage=$(ps -o pid,ppid,rss,vsz,comm -e | grep -E "($$|tmux|claude)" | awk '{sum+=$3} END {print sum/1024}' 2>/dev/null || echo "0")
+    fi
+    
+    # Check CPU threshold
+    if (( $(echo "$cpu_usage > $MAX_CPU_PERCENT" | bc -l 2>/dev/null || echo "0") )); then
+        warnings+=("CPU usage high: ${cpu_usage}% (threshold: ${MAX_CPU_PERCENT}%)")
+    fi
+    
+    # Check memory threshold
+    if (( $(echo "$memory_usage > $MAX_MEMORY_MB" | bc -l 2>/dev/null || echo "0") )); then
+        warnings+=("Memory usage high: ${memory_usage}MB (threshold: ${MAX_MEMORY_MB}MB)")
+    fi
+    
+    # Log warnings if any
+    if [[ ${#warnings[@]} -gt 0 ]]; then
+        for warning in "${warnings[@]}"; do
+            log_warn "[$workflow_id] RESOURCE WARNING: $warning"
+        done
+        log_info "[$workflow_id] HINT: Consider reducing concurrent workflows or increasing resource limits"
+    fi
+    
+    # Return warning status
+    if [[ ${#warnings[@]} -gt 0 ]]; then
+        return 1  # Warnings present
+    else
+        return 0  # All good
+    fi
+}
+
+# Monitor resources during workflow execution
+monitor_workflow_resources() {
+    local workflow_id="$1"
+    local monitoring_duration="${2:-300}"  # 5 minutes default
+    
+    if [[ "$ENABLE_RESOURCE_MONITORING" != "true" ]]; then
+        log_debug "[$workflow_id] Resource monitoring disabled"
+        return 0
+    fi
+    
+    log_debug "[$workflow_id] Starting resource monitoring for ${monitoring_duration}s"
+    
+    local start_time=$(date +%s)
+    local last_check=0
+    
+    while true; do
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - start_time))
+        
+        # Exit if monitoring duration exceeded
+        if (( elapsed > monitoring_duration )); then
+            break
+        fi
+        
+        # Check resources at intervals with jitter
+        local check_interval_with_jitter
+        check_interval_with_jitter=$((RESOURCE_CHECK_INTERVAL + (RANDOM % 20) - 10))  # +/- 10 seconds jitter
+        
+        if (( current_time - last_check >= check_interval_with_jitter )); then
+            if ! check_system_resources "$workflow_id"; then
+                log_info "[$workflow_id] Resource usage is elevated, monitoring more closely"
+            fi
+            last_check=$current_time
+        fi
+        
+        # Sleep for a short interval with minor jitter
+        local sleep_interval
+        sleep_interval=$((10 + (RANDOM % 6) - 3))  # 7-13 seconds with jitter
+        sleep "$sleep_interval"
+    done
+    
+    log_debug "[$workflow_id] Resource monitoring completed"
+}
+
+# Get current resource usage statistics
+get_resource_stats() {
+    local workflow_id="${1:-system}"
+    
+    local cpu_usage=0
+    local memory_usage=0
+    local load_average="unknown"
+    local disk_usage="unknown"
+    
+    # CPU usage
+    if command -v top >/dev/null 2>&1; then
+        if [[ "$(uname)" == "Darwin" ]]; then
+            cpu_usage=$(top -l1 -n0 | grep "CPU usage" | awk '{print $3}' | sed 's/%//' 2>/dev/null || echo "0")
+        else
+            cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | sed 's/%us,//' 2>/dev/null || echo "0")
+        fi
+    fi
+    
+    # Memory usage
+    if command -v ps >/dev/null 2>&1; then
+        memory_usage=$(ps -o pid,ppid,rss,vsz,comm -e | grep -E "($$|tmux|claude)" | awk '{sum+=$3} END {print sum/1024}' 2>/dev/null || echo "0")
+    fi
+    
+    # Load average
+    if command -v uptime >/dev/null 2>&1; then
+        load_average=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//' 2>/dev/null || echo "unknown")
+    fi
+    
+    # Disk usage (current directory)
+    if command -v df >/dev/null 2>&1; then
+        disk_usage=$(df -h . | tail -1 | awk '{print $5}' 2>/dev/null || echo "unknown")
+    fi
+    
+    # Return JSON formatted stats
+    jq -n \
+        --arg cpu_percent "$cpu_usage" \
+        --arg memory_mb "$memory_usage" \
+        --arg load_avg "$load_average" \
+        --arg disk_percent "$disk_usage" \
+        --arg timestamp "$(date -Iseconds)" \
+        '{
+            cpu_usage_percent: $cpu_percent,
+            memory_usage_mb: $memory_mb,
+            load_average: $load_avg,
+            disk_usage_percent: $disk_percent,
+            timestamp: $timestamp,
+            thresholds: {
+                max_cpu_percent: env.MAX_CPU_PERCENT // "80",
+                max_memory_mb: env.MAX_MEMORY_MB // "512"
+            }
+        }'
+}
+
+# ===============================================================================
 # COMMAND COMPLETION DETECTION
 # ===============================================================================
 
@@ -564,22 +752,22 @@ monitor_command_completion() {
     local pattern_checks=0
     local max_pattern_checks=12  # 1 minute of pattern checking
     
-    # Phase-specific timeout adjustments
+    # Phase-specific timeout adjustments using configurable values
     case "$phase" in
         "develop")
-            timeout=600  # 10 minutes for development work
+            timeout="$DEVELOP_TIMEOUT"
             ;;
         "clear") 
-            timeout=30   # 30 seconds for context clearing
+            timeout="$CLEAR_TIMEOUT"
             ;;
         "review")
-            timeout=480  # 8 minutes for review work
+            timeout="$REVIEW_TIMEOUT"
             ;;
         "merge")
-            timeout=300  # 5 minutes for merge operations
+            timeout="$MERGE_TIMEOUT"
             ;;
         "generic")
-            timeout=180  # 3 minutes for generic commands
+            timeout="$GENERIC_TIMEOUT"
             ;;
     esac
     
@@ -592,6 +780,7 @@ monitor_command_completion() {
         # Check for timeout first
         if (( elapsed > timeout )); then
             log_error "Command timeout after ${elapsed}s (limit: ${timeout}s): $command"
+            log_info "HINT: Consider increasing ${phase^^}_TIMEOUT environment variable for longer operations"
             return 1
         fi
         
@@ -671,14 +860,10 @@ check_develop_completion_patterns() {
     local output="$1"
     local issue_id="$2"
     
-    # Look for PR creation success patterns
-    if echo "$output" | grep -q -i "pull request.*created\|pr.*created\|created pull request"; then
-        log_debug "Found PR creation pattern in output"
-        return 0
-    fi
+    log_debug "Checking development patterns: $DEVELOP_COMPLETION_PATTERNS"
     
-    # Look for branch creation and commit patterns
-    if echo "$output" | grep -q -i "committed.*changes\|created.*branch\|pushed.*to"; then
+    # Use configurable patterns for primary detection
+    if echo "$output" | grep -q -i -E "$DEVELOP_COMPLETION_PATTERNS"; then
         log_debug "Found development completion pattern in output"
         return 0
     fi
@@ -689,18 +874,6 @@ check_develop_completion_patterns() {
         return 0
     fi
     
-    # Look for general completion indicators
-    if echo "$output" | grep -q -i "implementation.*complete\|feature.*complete\|development.*finished"; then
-        log_debug "Found general completion pattern in output"
-        return 0
-    fi
-    
-    # Look for Claude prompt readiness (fallback)
-    if echo "$output" | tail -5 | grep -q -E "claude>|>|❯|$"; then
-        log_debug "Found prompt readiness in output"
-        return 0
-    fi
-    
     return 1
 }
 
@@ -708,15 +881,11 @@ check_develop_completion_patterns() {
 check_clear_completion_patterns() {
     local output="$1"
     
-    # Clear is usually immediate, look for context cleared messages
-    if echo "$output" | grep -q -i "context.*cleared\|clear.*complete\|conversation.*reset"; then
-        log_debug "Found clear completion pattern in output"
-        return 0
-    fi
+    log_debug "Checking clear patterns: $CLEAR_COMPLETION_PATTERNS"
     
-    # Look for prompt readiness (clear is fast)
-    if echo "$output" | tail -3 | grep -q -E "claude>|>|❯|$"; then
-        log_debug "Found prompt readiness after clear in output"
+    # Use configurable patterns for detection
+    if echo "$output" | grep -q -i -E "$CLEAR_COMPLETION_PATTERNS"; then
+        log_debug "Found clear completion pattern in output"
         return 0
     fi
     
@@ -728,8 +897,10 @@ check_review_completion_patterns() {
     local output="$1"
     local pr_ref="$2"
     
-    # Look for review completion patterns
-    if echo "$output" | grep -q -i "review.*complete\|analysis.*complete\|review.*finished"; then
+    log_debug "Checking review patterns: $REVIEW_COMPLETION_PATTERNS"
+    
+    # Use configurable patterns for primary detection
+    if echo "$output" | grep -q -i -E "$REVIEW_COMPLETION_PATTERNS"; then
         log_debug "Found review completion pattern in output"
         return 0
     fi
@@ -737,12 +908,6 @@ check_review_completion_patterns() {
     # Look for PR-specific review completion
     if [[ -n "$pr_ref" ]] && echo "$output" | grep -q -i "$pr_ref.*review\|reviewed.*$pr_ref"; then
         log_debug "Found PR-specific review completion pattern in output"
-        return 0
-    fi
-    
-    # Look for summary or recommendations (indicates review completion)
-    if echo "$output" | grep -q -i "summary\|recommendation\|conclusion\|overall"; then
-        log_debug "Found review summary pattern in output"
         return 0
     fi
     
@@ -754,15 +919,11 @@ check_merge_completion_patterns() {
     local output="$1"
     local issue_id="$2"
     
-    # Look for merge success patterns
-    if echo "$output" | grep -q -i "merge.*successful\|merged.*successfully\|merge.*complete"; then
-        log_debug "Found merge completion pattern in output"
-        return 0
-    fi
+    log_debug "Checking merge patterns: $MERGE_COMPLETION_PATTERNS"
     
-    # Look for main branch update patterns
-    if echo "$output" | grep -q -i "main.*updated\|merged.*into.*main\|main.*branch"; then
-        log_debug "Found main branch update pattern in output"
+    # Use configurable patterns for primary detection
+    if echo "$output" | grep -q -i -E "$MERGE_COMPLETION_PATTERNS"; then
+        log_debug "Found merge completion pattern in output"
         return 0
     fi
     
@@ -779,15 +940,11 @@ check_merge_completion_patterns() {
 check_generic_completion_patterns() {
     local output="$1"
     
-    # Look for general completion indicators
-    if echo "$output" | grep -q -i "complete\|finished\|done\|success"; then
-        log_debug "Found generic completion pattern in output"
-        return 0
-    fi
+    log_debug "Checking generic patterns: $GENERIC_COMPLETION_PATTERNS"
     
-    # Look for prompt readiness
-    if echo "$output" | tail -3 | grep -q -E "claude>|>|❯|$"; then
-        log_debug "Found prompt readiness in output"
+    # Use configurable patterns for detection
+    if echo "$output" | grep -q -i -E "$GENERIC_COMPLETION_PATTERNS"; then
+        log_debug "Found generic completion pattern in output"
         return 0
     fi
     
@@ -797,6 +954,64 @@ check_generic_completion_patterns() {
 # ===============================================================================
 # ERROR HANDLING AND RECOVERY
 # ===============================================================================
+
+# Enhanced error logging with context and troubleshooting hints
+log_workflow_error() {
+    local workflow_id="$1"
+    local phase="$2"
+    local error_type="$3"
+    local error_output="$4"
+    local command="${5:-}"
+    
+    # Base error message with context
+    log_error "[$workflow_id] Phase '$phase' failed: $error_type"
+    
+    # Add command context if available
+    if [[ -n "$command" ]]; then
+        log_error "[$workflow_id] Failed command: $command"
+    fi
+    
+    # Add error output snippet if available
+    if [[ -n "$error_output" ]] && [[ ${#error_output} -gt 0 ]]; then
+        local error_snippet
+        error_snippet=$(echo "$error_output" | head -3 | tail -1 | cut -c1-100)
+        if [[ -n "$error_snippet" ]]; then
+            log_error "[$workflow_id] Error details: $error_snippet"
+        fi
+    fi
+    
+    # Add troubleshooting hints based on error type
+    case "$error_type" in
+        "network_error")
+            log_info "[$workflow_id] HINT: Check internet connection and try again"
+            log_info "[$workflow_id] HINT: Network errors usually resolve automatically after retry"
+            ;;
+        "session_error")
+            log_info "[$workflow_id] HINT: Try restarting Claude session with 'claunch start'"
+            log_info "[$workflow_id] HINT: Check if tmux session exists: 'tmux list-sessions'"
+            ;;
+        "auth_error")
+            log_info "[$workflow_id] HINT: Check Claude CLI authentication: 'claude auth status'"
+            log_info "[$workflow_id] HINT: Re-authenticate if needed: 'claude auth login'"
+            ;;
+        "syntax_error")
+            log_info "[$workflow_id] HINT: Check command syntax in workflow configuration"
+            log_info "[$workflow_id] HINT: Verify all required parameters are present"
+            ;;
+        "usage_limit_error")
+            log_info "[$workflow_id] HINT: Usage limit reached, workflow will auto-resume after cooldown"
+            log_info "[$workflow_id] HINT: Check current usage: 'claude usage'"
+            ;;
+        "timeout_error")
+            log_info "[$workflow_id] HINT: Command exceeded timeout (${DEVELOP_TIMEOUT:-600}s for $phase)"
+            log_info "[$workflow_id] HINT: Consider increasing timeout with ${phase^^}_TIMEOUT environment variable"
+            ;;
+        *)
+            log_info "[$workflow_id] HINT: Generic error - check Claude CLI logs for details"
+            log_info "[$workflow_id] HINT: Try running the command manually to diagnose the issue"
+            ;;
+    esac
+}
 
 # Classify error type for appropriate recovery strategy
 classify_workflow_error() {
@@ -834,6 +1049,12 @@ classify_workflow_error() {
         return 0
     fi
     
+    # Timeout errors (recoverable)
+    if echo "$error_output" | grep -q -i "timeout\|timed.*out"; then
+        echo "timeout_error"
+        return 0
+    fi
+    
     # Generic error (recoverable)
     echo "generic_error"
     return 0
@@ -847,13 +1068,12 @@ handle_workflow_step_error() {
     local phase="$4"
     local error_output="${5:-}"
     
-    log_error "Workflow step failed: $command (phase: $phase)"
-    
     # Classify error type
     local error_type
     error_type=$(classify_workflow_error "$error_output" "$command" "$phase")
     
-    log_info "Error classified as: $error_type"
+    # Log enhanced error with context and troubleshooting hints
+    log_workflow_error "$workflow_id" "$phase" "$error_type" "$error_output" "$command"
     
     # Get current workflow data
     local workflow_data
@@ -884,33 +1104,57 @@ handle_workflow_step_error() {
     
     # Decide recovery strategy based on error type
     case "$error_type" in
-        "network_error"|"session_error"|"generic_error")
+        "network_error"|"session_error"|"generic_error"|"timeout_error")
             if (( step_retry_count < max_retries )); then
-                log_info "Attempting recovery for $error_type (retry $((step_retry_count + 1))/$max_retries)"
+                log_info "[$workflow_id] Attempting recovery for $error_type (retry $((step_retry_count + 1))/$max_retries)"
                 
                 # Increment retry count
                 workflow_data=$(echo "$workflow_data" | jq \
                     --arg step_index "$step_index" \
                     '.steps['"$step_index"'].retry_count = ((.steps['"$step_index"'].retry_count // 0) + 1)')
                 
-                # Add backoff delay
-                local backoff_delay=$((5 * (step_retry_count + 1)))
-                log_info "Waiting ${backoff_delay}s before retry..."
+                # Calculate backoff delay with jitter to prevent thundering herd
+                local backoff_delay
+                
+                if [[ "$error_type" == "timeout_error" ]]; then
+                    # Longer delay for timeout errors (exponential backoff with factor 3)
+                    backoff_delay=$((BACKOFF_BASE_DELAY * (step_retry_count + 1) * 3))
+                else
+                    # Standard exponential backoff
+                    backoff_delay=$((BACKOFF_BASE_DELAY * (step_retry_count + 1)))
+                fi
+                
+                # Cap at maximum delay
+                if [[ $backoff_delay -gt $BACKOFF_MAX_DELAY ]]; then
+                    backoff_delay=$BACKOFF_MAX_DELAY
+                fi
+                
+                # Add jitter: random value between -BACKOFF_JITTER_RANGE and +BACKOFF_JITTER_RANGE
+                local jitter
+                jitter=$(( (RANDOM % (2 * BACKOFF_JITTER_RANGE + 1)) - BACKOFF_JITTER_RANGE ))
+                backoff_delay=$((backoff_delay + jitter))
+                
+                # Ensure minimum delay of 1 second
+                if [[ $backoff_delay -lt 1 ]]; then
+                    backoff_delay=1
+                fi
+                
+                log_info "[$workflow_id] Waiting ${backoff_delay}s before retry..."
                 sleep "$backoff_delay"
                 
                 # Update workflow data and return recoverable status
                 update_workflow_data "$workflow_id" "$workflow_data"
                 return 2  # Recoverable error
             else
-                log_error "Max retries exceeded for $error_type"
+                log_error "[$workflow_id] Max retries exceeded for $error_type"
                 update_workflow_data "$workflow_id" "$workflow_data"
                 return 1  # Non-recoverable after max retries
             fi
             ;;
         "usage_limit_error")
-            log_info "Usage limit encountered, implementing cooldown period"
+            log_info "[$workflow_id] Usage limit encountered, implementing cooldown period"
             local cooldown_delay=300  # 5 minutes
-            log_info "Waiting ${cooldown_delay}s for usage limit cooldown..."
+            log_info "[$workflow_id] Waiting ${cooldown_delay}s for usage limit cooldown..."
             sleep "$cooldown_delay"
             
             # Don't count usage limits against retry count
@@ -918,12 +1162,12 @@ handle_workflow_step_error() {
             return 2  # Recoverable after cooldown
             ;;
         "auth_error"|"syntax_error")
-            log_error "Non-recoverable error type: $error_type"
+            log_error "[$workflow_id] Non-recoverable error type: $error_type"
             update_workflow_data "$workflow_id" "$workflow_data"
             return 1  # Non-recoverable
             ;;
         *)
-            log_warn "Unknown error type: $error_type, treating as recoverable"
+            log_warn "[$workflow_id] Unknown error type: $error_type, treating as recoverable"
             update_workflow_data "$workflow_id" "$workflow_data"
             return 2  # Assume recoverable for unknown errors
             ;;
@@ -1228,7 +1472,8 @@ get_workflow_detailed_status() {
         estimated_completion=$(date -d "@$completion_epoch" -Iseconds 2>/dev/null || echo "null")
     fi
     
-    jq -n \
+    local detailed_status
+    detailed_status=$(jq -n \
         --arg workflow_id "$workflow_id" \
         --arg workflow_type "$workflow_type" \
         --arg status "$status" \
@@ -1265,8 +1510,18 @@ get_workflow_detailed_status() {
                 count: $error_count,
                 last_error: $last_error
             },
-            session_health: (if ($status == "in_progress") then "monitoring" else "idle" end)
-        }'
+            session_health: (if ($status == "in_progress") then "monitoring" else "idle" end),
+            system_resources: null
+        }')
+    
+    # Add resource statistics if monitoring is enabled
+    if [[ "$ENABLE_RESOURCE_MONITORING" == "true" ]]; then
+        local resource_stats
+        resource_stats=$(get_resource_stats "$workflow_id")
+        echo "$detailed_status" | jq --argjson resources "$resource_stats" '.system_resources = $resources'
+    else
+        echo "$detailed_status"
+    fi
 }
 
 # Pause workflow execution
