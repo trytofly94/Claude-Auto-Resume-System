@@ -90,7 +90,10 @@ discover_tests() {
     
     # Discover unit tests efficiently using mapfile
     if [[ -d "$PROJECT_ROOT/tests/unit" ]]; then
-        mapfile -t unit_files < <(find "$PROJECT_ROOT/tests/unit" -name "*.bats" -type f 2>/dev/null)
+        if ! mapfile -t unit_files < <(find "$PROJECT_ROOT/tests/unit" -name "*.bats" -type f 2>/dev/null); then
+            log_error "Failed to discover unit test files"
+            return 1
+        fi
         if [[ ${#unit_files[@]} -gt 0 ]]; then
             test_dirs+=("unit")
             test_files+=("${unit_files[@]}")
@@ -99,7 +102,10 @@ discover_tests() {
     
     # Discover integration tests efficiently using mapfile
     if [[ -d "$PROJECT_ROOT/tests/integration" ]]; then
-        mapfile -t integration_files < <(find "$PROJECT_ROOT/tests/integration" -name "*.bats" -type f 2>/dev/null)
+        if ! mapfile -t integration_files < <(find "$PROJECT_ROOT/tests/integration" -name "*.bats" -type f 2>/dev/null); then
+            log_error "Failed to discover integration test files"
+            return 1
+        fi
         if [[ ${#integration_files[@]} -gt 0 ]]; then
             test_dirs+=("integration")
             test_files+=("${integration_files[@]}")
@@ -365,7 +371,10 @@ run_unit_tests() {
     fi
     
     local unit_test_files=()
-    mapfile -t unit_test_files < <(find "$unit_test_dir" -name "*.bats" -type f 2>/dev/null)
+    if ! mapfile -t unit_test_files < <(find "$unit_test_dir" -name "*.bats" -type f 2>/dev/null); then
+        log_error "Failed to discover unit test files in $unit_test_dir"
+        return 1
+    fi
     
     if [[ ${#unit_test_files[@]} -eq 0 ]]; then
         log_warn "No unit test files found"
@@ -458,7 +467,10 @@ run_integration_tests() {
     fi
     
     local integration_test_files=()
-    mapfile -t integration_test_files < <(find "$integration_test_dir" -name "*.bats" -type f 2>/dev/null)
+    if ! mapfile -t integration_test_files < <(find "$integration_test_dir" -name "*.bats" -type f 2>/dev/null); then
+        log_error "Failed to discover integration test files in $integration_test_dir"
+        return 1
+    fi
     
     if [[ ${#integration_test_files[@]} -eq 0 ]]; then
         log_warn "No integration test files found"
@@ -716,7 +728,10 @@ run_security_tests() {
     fi
     
     local security_test_files=()
-    mapfile -t security_test_files < <(find "$security_test_dir" -name "*.bats" -type f 2>/dev/null | sort)
+    if ! mapfile -t security_test_files < <(find "$security_test_dir" -name "*.bats" -type f 2>/dev/null | sort); then
+        log_error "Failed to discover security test files in $security_test_dir"
+        return 1
+    fi
     
     if [[ ${#security_test_files[@]} -eq 0 ]]; then
         log_warn "No security test files found in $security_test_dir"

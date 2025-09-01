@@ -104,7 +104,10 @@ integration_tests_timeout=0
 if [[ -d "$PROJECT_ROOT/tests/integration" ]]; then
     # Test only first 3 integration tests to avoid long runtime
     test_files=()
-    mapfile -t test_files < <(find "$PROJECT_ROOT/tests/integration" -name "*.bats" | head -3)
+    if ! mapfile -t test_files < <(find "$PROJECT_ROOT/tests/integration" -name "*.bats" | head -3); then
+        echo "ERROR: Failed to discover integration test files"
+        return 1
+    fi
     for test_file in "${test_files[@]}"; do
         if [[ -f "$test_file" ]]; then
             if test_individual_file "$test_file"; then

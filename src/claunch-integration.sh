@@ -592,7 +592,10 @@ list_active_sessions() {
     local session_files=()
     
     # Find all project-specific session files efficiently
-    mapfile -t session_files < <(find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | sort)
+    if ! mapfile -t session_files < <(find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | sort); then
+        log_error "Failed to discover Claude session files"
+        return 1
+    fi
     
     for session_file in "${session_files[@]}"; do
         local project_id
@@ -633,7 +636,11 @@ list_active_sessions() {
         local tmux_sessions_found=0
         local session_lines=()
         
-        mapfile -t session_lines < <(tmux list-sessions -F "#{session_name} #{session_created}" 2>/dev/null | grep "^$TMUX_SESSION_PREFIX")
+        if ! mapfile -t session_lines < <(tmux list-sessions -F "#{session_name} #{session_created}" 2>/dev/null | grep "^$TMUX_SESSION_PREFIX"); then
+            log_warn "Failed to discover active tmux sessions"
+            # Continue with empty array rather than failing completely
+            session_lines=()
+        fi
         
         for session_line in "${session_lines[@]}"; do
             local session_name created_time
