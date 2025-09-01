@@ -589,9 +589,12 @@ list_active_sessions() {
     echo ""
     echo "=== Project Session Files ==="
     local found_sessions=0
+    local session_files=()
     
-    # Find all project-specific session files
-    find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | sort | while read -r session_file; do
+    # Find all project-specific session files efficiently
+    mapfile -t session_files < <(find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | sort)
+    
+    for session_file in "${session_files[@]}"; do
         local project_id
         project_id=$(basename "$session_file" | sed 's/^\.claude_session_//')
         
@@ -628,8 +631,11 @@ list_active_sessions() {
         echo ""
         echo "=== Active Project tmux Sessions ==="
         local tmux_sessions_found=0
+        local session_lines=()
         
-        tmux list-sessions -F "#{session_name} #{session_created}" 2>/dev/null | grep "^$TMUX_SESSION_PREFIX" | while read -r session_line; do
+        mapfile -t session_lines < <(tmux list-sessions -F "#{session_name} #{session_created}" 2>/dev/null | grep "^$TMUX_SESSION_PREFIX")
+        
+        for session_line in "${session_lines[@]}"; do
             local session_name created_time
             session_name=$(echo "$session_line" | cut -d' ' -f1)
             created_time=$(echo "$session_line" | cut -d' ' -f2-)

@@ -103,7 +103,9 @@ integration_tests_timeout=0
 
 if [[ -d "$PROJECT_ROOT/tests/integration" ]]; then
     # Test only first 3 integration tests to avoid long runtime
-    for test_file in $(find "$PROJECT_ROOT/tests/integration" -name "*.bats" | head -3); do
+    test_files=()
+    mapfile -t test_files < <(find "$PROJECT_ROOT/tests/integration" -name "*.bats" | head -3)
+    for test_file in "${test_files[@]}"; do
         if [[ -f "$test_file" ]]; then
             if test_individual_file "$test_file"; then
                 ((integration_tests_passed++))

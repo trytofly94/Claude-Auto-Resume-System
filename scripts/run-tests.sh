@@ -85,28 +85,24 @@ discover_tests() {
     
     local test_dirs=()
     local test_files=()
+    local unit_files=()
+    local integration_files=()
     
-    # Unit-Tests
+    # Discover unit tests efficiently using mapfile
     if [[ -d "$PROJECT_ROOT/tests/unit" ]]; then
-        local unit_tests
-        unit_tests=$(find "$PROJECT_ROOT/tests/unit" -name "*.bats" -type f 2>/dev/null || true)
-        if [[ -n "$unit_tests" ]]; then
+        mapfile -t unit_files < <(find "$PROJECT_ROOT/tests/unit" -name "*.bats" -type f 2>/dev/null)
+        if [[ ${#unit_files[@]} -gt 0 ]]; then
             test_dirs+=("unit")
-            while IFS= read -r test_file; do
-                test_files+=("$test_file")
-            done <<< "$unit_tests"
+            test_files+=("${unit_files[@]}")
         fi
     fi
     
-    # Integration-Tests
+    # Discover integration tests efficiently using mapfile
     if [[ -d "$PROJECT_ROOT/tests/integration" ]]; then
-        local integration_tests
-        integration_tests=$(find "$PROJECT_ROOT/tests/integration" -name "*.bats" -type f 2>/dev/null || true)
-        if [[ -n "$integration_tests" ]]; then
+        mapfile -t integration_files < <(find "$PROJECT_ROOT/tests/integration" -name "*.bats" -type f 2>/dev/null)
+        if [[ ${#integration_files[@]} -gt 0 ]]; then
             test_dirs+=("integration")
-            while IFS= read -r test_file; do
-                test_files+=("$test_file")
-            done <<< "$integration_tests"
+            test_files+=("${integration_files[@]}")
         fi
     fi
     
@@ -368,10 +364,10 @@ run_unit_tests() {
         return 0
     fi
     
-    local unit_tests
-    unit_tests=$(find "$unit_test_dir" -name "*.bats" -type f 2>/dev/null || true)
+    local unit_test_files=()
+    mapfile -t unit_test_files < <(find "$unit_test_dir" -name "*.bats" -type f 2>/dev/null)
     
-    if [[ -z "$unit_tests" ]]; then
+    if [[ ${#unit_test_files[@]} -eq 0 ]]; then
         log_warn "No unit test files found"
         return 0
     fi
@@ -383,7 +379,7 @@ run_unit_tests() {
     local unit_result=0
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would run unit tests: $unit_tests"
+        log_info "[DRY RUN] Would run unit tests: ${unit_test_files[*]}"
         return 0
     fi
     
@@ -412,7 +408,7 @@ run_unit_tests() {
         timeout_progress_pid=$(provide_timeout_progress "unit tests" "$TOTAL_SUITE_TIMEOUT")
     fi
     
-    if timeout --preserve-status "$TOTAL_SUITE_TIMEOUT" bats "${bats_options[@]}" "$unit_test_dir"/*.bats; then
+    if timeout --preserve-status "$TOTAL_SUITE_TIMEOUT" bats "${bats_options[@]}" "${unit_test_files[@]}"; then
         unit_result=0
     else
         unit_result=$?
@@ -461,10 +457,10 @@ run_integration_tests() {
         return 0
     fi
     
-    local integration_tests
-    integration_tests=$(find "$integration_test_dir" -name "*.bats" -type f 2>/dev/null || true)
+    local integration_test_files=()
+    mapfile -t integration_test_files < <(find "$integration_test_dir" -name "*.bats" -type f 2>/dev/null)
     
-    if [[ -z "$integration_tests" ]]; then
+    if [[ ${#integration_test_files[@]} -eq 0 ]]; then
         log_warn "No integration test files found"
         return 0
     fi
@@ -475,7 +471,7 @@ run_integration_tests() {
     local integration_result=0
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would run integration tests: $integration_tests"
+        log_info "[DRY RUN] Would run integration tests: ${integration_test_files[*]}"
         return 0
     fi
     
@@ -501,7 +497,7 @@ run_integration_tests() {
         timeout_progress_pid=$(provide_timeout_progress "integration tests" "$total_timeout")
     fi
     
-    if timeout --preserve-status "$total_timeout" bats "${bats_options[@]}" "$integration_test_dir"/*.bats; then
+    if timeout --preserve-status "$total_timeout" bats "${bats_options[@]}" "${integration_test_files[@]}"; then
         integration_result=0
     else
         integration_result=$?
@@ -719,10 +715,10 @@ run_security_tests() {
         return 0
     fi
     
-    local security_tests
-    security_tests=$(find "$security_test_dir" -name "*.bats" -type f 2>/dev/null | sort)
+    local security_test_files=()
+    mapfile -t security_test_files < <(find "$security_test_dir" -name "*.bats" -type f 2>/dev/null | sort)
     
-    if [[ -z "$security_tests" ]]; then
+    if [[ ${#security_test_files[@]} -eq 0 ]]; then
         log_warn "No security test files found in $security_test_dir"
         return 0
     fi
@@ -732,7 +728,7 @@ run_security_tests() {
     local overall_result=0
     local test_count=0
     
-    while IFS= read -r test_file; do
+    for test_file in "${security_test_files[@]}"; do
         if [[ -n "$test_file" ]]; then
             log_info "Running security test: $(basename "$test_file")"
             
@@ -754,7 +750,7 @@ run_security_tests() {
             ((test_count++))
             ((TOTAL_TESTS++))
         fi
-    done <<< "$security_tests"
+    done
     
     if [[ $test_count -gt 0 ]]; then
         if [[ $overall_result -eq 0 ]]; then
