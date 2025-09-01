@@ -26,6 +26,13 @@ MAX_RECOVERY_ATTEMPTS="${MAX_RECOVERY_ATTEMPTS:-3}"
 # This prevents issues with sourcing contexts and scope problems
 SESSIONS_INITIALIZED=false
 
+# Per-Project Session Management (Issue #89)
+# Additional associative arrays for project-aware session tracking
+PROJECT_SESSIONS_INITIALIZED=false
+
+# Project context cache to avoid repeated computation
+declare -A PROJECT_CONTEXT_CACHE
+
 # Session-Status-Konstanten
 # Protect against re-sourcing - only declare readonly if not already set
 if [[ -z "${SESSION_STATE_UNKNOWN:-}" ]]; then
@@ -67,11 +74,127 @@ has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Generiere Session-ID
+# ===============================================================================
+# PROJECT DETECTION AND UNIQUE NAMING (Issue #89)
+# ===============================================================================
+
+# Generate unique project identifier from working directory
+# Uses sanitized directory components plus collision-resistant hash
+generate_project_identifier() {
+    local project_path="${1:-$(pwd)}"
+    
+    log_debug "Generating project identifier for: $project_path"
+    
+    # Validate that the project path exists
+    if [[ ! -d "$project_path" && ! -f "$project_path" ]]; then
+        log_warn "Project path does not exist: $project_path"
+        # Continue anyway but warn - path might be created later
+    fi
+    
+    # Resolve symlinks and get canonical path
+    local resolved_path
+    if resolved_path=$(realpath "$project_path" 2>/dev/null); then
+        log_debug "Resolved path: $resolved_path"
+    else
+        # Fallback for systems without realpath
+        resolved_path="$project_path"
+        log_warn "realpath not available, using original path: $project_path"
+    fi
+    
+    # Sanitize path components for session naming
+    # Remove leading slash, replace remaining slashes with hyphens
+    # Remove special characters, normalize multiple hyphens
+    local sanitized
+    sanitized=$(echo "$resolved_path" | sed 's|^/||; s|/|-|g; s/[^a-zA-Z0-9-]//g; s/--*/-/g')
+    
+    # Handle edge cases: empty sanitized name
+    if [[ -z "$sanitized" ]]; then
+        sanitized="root"
+    fi
+    
+    # Truncate if too long (keep reasonable session name length)
+    if [[ ${#sanitized} -gt 30 ]]; then
+        sanitized="${sanitized:0:30}"
+    fi
+    
+    # Generate collision-resistant hash from full resolved path
+    local path_hash
+    if command -v shasum >/dev/null 2>&1; then
+        path_hash=$(echo "$resolved_path" | shasum -a 256 | cut -c1-6)
+    elif command -v sha256sum >/dev/null 2>&1; then
+        path_hash=$(echo "$resolved_path" | sha256sum | cut -c1-6)
+    elif command -v md5sum >/dev/null 2>&1; then
+        path_hash=$(echo "$resolved_path" | md5sum | cut -c1-6)
+    else
+        # Final fallback: use cksum (less ideal but universally available)
+        path_hash=$(echo "$resolved_path" | cksum | cut -d' ' -f1 | cut -c1-6)
+    fi
+    
+    # Combine sanitized name with hash for uniqueness
+    local project_id="${sanitized}-${path_hash}"
+    
+    log_debug "Generated project identifier: $project_id"
+    echo "$project_id"
+}
+
+# Get current project context with caching
+get_current_project_context() {
+    local working_dir="${1:-$(pwd)}"
+    local MAX_CACHE_SIZE=100  # Maximum cache entries to prevent memory bloat
+    
+    # Check cache first
+    if [[ -n "${PROJECT_CONTEXT_CACHE[$working_dir]:-}" ]]; then
+        log_debug "Using cached project context for: $working_dir"
+        echo "${PROJECT_CONTEXT_CACHE[$working_dir]}"
+        return 0
+    fi
+    
+    # Check cache size and evict oldest entries if needed
+    local cache_size=${#PROJECT_CONTEXT_CACHE[@]}
+    if [[ $cache_size -ge $MAX_CACHE_SIZE ]]; then
+        log_debug "Cache size limit reached ($cache_size >= $MAX_CACHE_SIZE), evicting oldest entries"
+        # Clear half of the cache (simple eviction strategy)
+        local count=0
+        for key in "${!PROJECT_CONTEXT_CACHE[@]}"; do
+            unset PROJECT_CONTEXT_CACHE["$key"]
+            ((count++))
+            if [[ $count -ge $((MAX_CACHE_SIZE / 2)) ]]; then
+                break
+            fi
+        done
+        log_debug "Evicted $count cache entries"
+    fi
+    
+    # Generate new project context
+    local project_id
+    project_id=$(generate_project_identifier "$working_dir")
+    
+    # Cache the result
+    PROJECT_CONTEXT_CACHE["$working_dir"]="$project_id"
+    
+    log_debug "Cached project context: $working_dir -> $project_id (cache size: $((cache_size + 1)))"
+    echo "$project_id"
+}
+
+# Generate project-aware session ID
 generate_session_id() {
     local project_name="$1"
+    local project_id="${2:-$(get_current_project_context)}"
     local timestamp=$(date +%s)
-    echo "${project_name}-${timestamp}-$$"
+    
+    # Create session ID that includes project context
+    local session_id="sess-${project_id}-${timestamp}-$$"
+    
+    log_debug "Generated project-aware session ID: $session_id"
+    echo "$session_id"
+}
+
+# Get session file path for project-specific session storage
+get_session_file_path() {
+    local project_id="${1:-$(get_current_project_context)}"
+    
+    # Project-specific session file pattern
+    echo "$HOME/.claude_session_${project_id}"
 }
 
 # ===============================================================================
@@ -89,6 +212,12 @@ init_session_arrays() {
     declare -gA SESSION_RESTART_COUNTS 2>/dev/null || true
     declare -gA SESSION_RECOVERY_COUNTS 2>/dev/null || true
     declare -gA SESSION_LAST_SEEN 2>/dev/null || true
+    
+    # Per-Project Session Management Arrays (Issue #89)
+    declare -gA PROJECT_SESSIONS 2>/dev/null || true    # project_id -> session_id
+    declare -gA SESSION_PROJECTS 2>/dev/null || true    # session_id -> project_id
+    declare -gA PROJECT_CONTEXTS 2>/dev/null || true    # project_id -> working_dir
+    declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true  # working_dir -> project_id
     
     # Verify successful initialization  
     if ! declare -p SESSIONS >/dev/null 2>&1; then
@@ -119,8 +248,10 @@ init_session_arrays() {
 validate_session_arrays() {
     local errors=0
     
-    # Check each required array
-    for array_name in SESSIONS SESSION_STATES SESSION_RESTART_COUNTS SESSION_RECOVERY_COUNTS SESSION_LAST_SEEN; do
+    # Check each required array including per-project arrays
+    local required_arrays=("SESSIONS" "SESSION_STATES" "SESSION_RESTART_COUNTS" "SESSION_RECOVERY_COUNTS" "SESSION_LAST_SEEN" "PROJECT_SESSIONS" "SESSION_PROJECTS" "PROJECT_CONTEXTS")
+    
+    for array_name in "${required_arrays[@]}"; do
         if ! declare -p "$array_name" >/dev/null 2>&1; then
             log_error "Array $array_name is not declared"
             ((errors++))
@@ -168,13 +299,14 @@ ensure_arrays_initialized() {
 # SESSION-STATE-MANAGEMENT
 # ===============================================================================
 
-# Registriere neue Session
+# Registriere neue Session mit Project-Context (Issue #89 - Enhanced)
 register_session() {
     local session_id="$1"
     local project_name="$2"
     local working_dir="$3"
+    local project_id="${4:-$(get_current_project_context "$working_dir")}"
     
-    log_info "Registering new session: $session_id"
+    log_info "Registering new session: $session_id (project: $project_id)"
     
     # CRITICAL FIX: Ensure arrays are initialized before access
     if ! declare -p SESSIONS >/dev/null 2>&1; then
@@ -191,8 +323,11 @@ register_session() {
         return 1
     fi
     
+    # Enhanced session data with project context
+    local session_data="$project_name:$working_dir:$project_id"
+    
     # Defensive array access with error handling
-    SESSIONS["$session_id"]="$project_name:$working_dir" || {
+    SESSIONS["$session_id"]="$session_data" || {
         log_error "Failed to register session in SESSIONS array"
         return 1
     }
@@ -206,7 +341,24 @@ register_session() {
     SESSION_RECOVERY_COUNTS["$session_id"]=0
     SESSION_LAST_SEEN["$session_id"]=$(date +%s)
     
-    log_debug "Session registered: $session_id -> ${SESSIONS[$session_id]}"
+    # Per-Project tracking (Issue #89)
+    PROJECT_SESSIONS["$project_id"]="$session_id" || {
+        log_error "Failed to register session in PROJECT_SESSIONS array"
+        return 1
+    }
+    
+    SESSION_PROJECTS["$session_id"]="$project_id" || {
+        log_error "Failed to register session in SESSION_PROJECTS array" 
+        return 1
+    }
+    
+    PROJECT_CONTEXTS["$project_id"]="$working_dir" || {
+        log_error "Failed to register project context"
+        return 1
+    }
+    
+    log_debug "Session registered with project context: $session_id -> $session_data"
+    log_debug "Project mapping: $project_id -> $session_id"
     return 0
 }
 
@@ -235,7 +387,7 @@ update_session_state() {
     fi
 }
 
-# Hole Session-Informationen
+# Hole Session-Informationen (Enhanced with Project Context - Issue #89)
 get_session_info() {
     local session_id="$1"
     
@@ -246,9 +398,23 @@ get_session_info() {
         return 1
     fi
     
-    local project_and_dir="${SESSIONS[$session_id]}"
-    local project_name="${project_and_dir%%:*}"
-    local working_dir="${project_and_dir#*:}"
+    local session_data="${SESSIONS[$session_id]}"
+    local project_name project_id working_dir
+    
+    # Parse enhanced session data (backward compatible)
+    if [[ "$session_data" == *":"*":"* ]]; then
+        # New format: project_name:working_dir:project_id
+        project_name="${session_data%%:*}"
+        local temp="${session_data#*:}"
+        working_dir="${temp%%:*}"
+        project_id="${session_data##*:}"
+    else
+        # Legacy format: project_name:working_dir
+        project_name="${session_data%%:*}"
+        working_dir="${session_data#*:}"
+        project_id="$(get_current_project_context "$working_dir")"
+    fi
+    
     local state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
     local restart_count="${SESSION_RESTART_COUNTS[$session_id]:-0}"
     local recovery_count="${SESSION_RECOVERY_COUNTS[$session_id]:-0}"
@@ -256,6 +422,7 @@ get_session_info() {
     
     echo "SESSION_ID=$session_id"
     echo "PROJECT_NAME=$project_name"
+    echo "PROJECT_ID=$project_id"
     echo "WORKING_DIR=$working_dir"
     echo "STATE=$state"
     echo "RESTART_COUNT=$restart_count"
@@ -263,9 +430,159 @@ get_session_info() {
     echo "LAST_SEEN=$last_seen"
 }
 
-# Liste alle Sessions
+# ===============================================================================
+# PER-PROJECT SESSION MANAGEMENT FUNCTIONS (Issue #89)
+# ===============================================================================
+
+# List sessions by project
+list_project_sessions() {
+    local target_project_id="${1:-$(get_current_project_context)}"
+    
+    echo "=== Sessions for Project: $target_project_id ==="
+    
+    # Ensure arrays are initialized
+    ensure_arrays_initialized || return 1
+    
+    local found_sessions=0
+    
+    for session_id in "${!SESSIONS[@]}"; do
+        local session_project_id="${SESSION_PROJECTS[$session_id]:-}"
+        
+        # Handle legacy sessions without project context
+        if [[ -z "$session_project_id" ]]; then
+            local session_data="${SESSIONS[$session_id]}"
+            if [[ "$session_data" == *":"*":"* ]]; then
+                session_project_id="${session_data##*:}"
+            else
+                local working_dir="${session_data#*:}"
+                session_project_id="$(get_current_project_context "$working_dir")"
+            fi
+        fi
+        
+        if [[ "$session_project_id" == "$target_project_id" ]]; then
+            local session_data="${SESSIONS[$session_id]}"
+            local project_name="${session_data%%:*}"
+            local state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
+            local restart_count="${SESSION_RESTART_COUNTS[$session_id]:-0}"
+            local last_seen="${SESSION_LAST_SEEN[$session_id]:-0}"
+            local age=$(($(date +%s) - last_seen))
+            
+            printf "  %-20s %-15s %-10s %3d restarts %3ds ago\n" \
+                   "$session_id" "$project_name" "$state" "$restart_count" "$age"
+            ((found_sessions++))
+        fi
+    done
+    
+    if [[ $found_sessions -eq 0 ]]; then
+        echo "  No active sessions for this project"
+    fi
+    
+    echo ""
+}
+
+# List all sessions grouped by project
+list_sessions_by_project() {
+    echo "=== All Active Sessions (Grouped by Project) ==="
+    
+    # Ensure arrays are initialized
+    ensure_arrays_initialized || return 1
+    
+    # Use safer array length check
+    local session_count=0
+    set +u
+    if declare -p SESSIONS >/dev/null 2>&1; then
+        session_count=${#SESSIONS[@]}
+    fi
+    set -u
+    
+    if [[ $session_count -eq 0 ]]; then
+        echo "No sessions registered"
+        return 0
+    fi
+    
+    # Collect unique project IDs
+    local -A projects_found
+    for session_id in "${!SESSIONS[@]}"; do
+        local session_project_id="${SESSION_PROJECTS[$session_id]:-}"
+        
+        # Handle legacy sessions
+        if [[ -z "$session_project_id" ]]; then
+            local session_data="${SESSIONS[$session_id]}"
+            if [[ "$session_data" == *":"*":"* ]]; then
+                session_project_id="${session_data##*:}"
+            else
+                local working_dir="${session_data#*:}"
+                session_project_id="$(get_current_project_context "$working_dir")"
+            fi
+        fi
+        
+        projects_found["$session_project_id"]=1
+    done
+    
+    # List sessions for each project
+    for project_id in "${!projects_found[@]}"; do
+        local project_dir="${PROJECT_CONTEXTS[$project_id]:-unknown}"
+        echo ""
+        echo "Project: $project_id ($project_dir)"
+        echo "$(printf '%.${#project_id}s' "$(printf '%*s' "${#project_id}" | tr ' ' '-')")"
+        
+        list_project_sessions "$project_id"
+    done
+}
+
+# Find session by project
+find_session_by_project() {
+    local target_project_id="${1:-$(get_current_project_context)}"
+    
+    ensure_arrays_initialized || return 1
+    
+    # Check direct project mapping first
+    if [[ -n "${PROJECT_SESSIONS[$target_project_id]:-}" ]]; then
+        echo "${PROJECT_SESSIONS[$target_project_id]}"
+        return 0
+    fi
+    
+    # Search through all sessions (fallback for legacy)
+    for session_id in "${!SESSIONS[@]}"; do
+        local session_project_id="${SESSION_PROJECTS[$session_id]:-}"
+        
+        if [[ -z "$session_project_id" ]]; then
+            local session_data="${SESSIONS[$session_id]}"
+            if [[ "$session_data" == *":"*":"* ]]; then
+                session_project_id="${session_data##*:}"
+            else
+                local working_dir="${session_data#*:}"
+                session_project_id="$(get_current_project_context "$working_dir")"
+            fi
+        fi
+        
+        if [[ "$session_project_id" == "$target_project_id" ]]; then
+            echo "$session_id"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Stop session for specific project
+stop_project_session() {
+    local target_project_id="${1:-$(get_current_project_context)}"
+    
+    log_info "Stopping session for project: $target_project_id"
+    
+    local session_id
+    if session_id=$(find_session_by_project "$target_project_id"); then
+        stop_managed_session "$session_id"
+    else
+        log_warn "No active session found for project: $target_project_id"
+        return 1
+    fi
+}
+
+# Liste alle Sessions (Enhanced Legacy Function)
 list_sessions() {
-    echo "=== Active Sessions ==="
+    echo "=== Active Sessions (Legacy View) ==="
     
     # Ensure SESSIONS array is initialized globally
     if ! declare -p SESSIONS >/dev/null 2>&1; then
@@ -286,20 +603,34 @@ list_sessions() {
     
     if [[ $session_count -eq 0 ]]; then
         echo "No sessions registered"
+        echo ""
+        echo "Use 'list_sessions_by_project' for enhanced per-project view"
         return 0
     fi
     
     for session_id in "${!SESSIONS[@]}"; do
-        local project_and_dir="${SESSIONS[$session_id]}"
-        local project_name="${project_and_dir%%:*}"
+        local session_data="${SESSIONS[$session_id]}"
+        local project_name project_id
+        
+        if [[ "$session_data" == *":"*":"* ]]; then
+            project_name="${session_data%%:*}"
+            project_id="${session_data##*:}"
+        else
+            project_name="${session_data%%:*}"
+            project_id="legacy"
+        fi
+        
         local state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
         local restart_count="${SESSION_RESTART_COUNTS[$session_id]:-0}"
         local last_seen="${SESSION_LAST_SEEN[$session_id]:-0}"
         local age=$(($(date +%s) - last_seen))
         
-        printf "%-20s %-15s %-10s %3d restarts %3ds ago\n" \
-               "$session_id" "$project_name" "$state" "$restart_count" "$age"
+        printf "%-20s %-15s %-12s %-10s %3d restarts %3ds ago\n" \
+               "$session_id" "$project_name" "$project_id" "$state" "$restart_count" "$age"
     done
+    
+    echo ""
+    echo "Tip: Use 'list_sessions_by_project' for better project organization"
 }
 
 # Bereinige Sessions
@@ -377,14 +708,27 @@ perform_health_check() {
         fi
     fi
     
-    # Methode 2: Session-Datei-Check
-    local session_file="$HOME/.claude_session_${project_name}"
+    # Methode 2: Session-Datei-Check (Project-aware - Issue #89)
+    local session_data="${SESSIONS[$session_id]}"
+    local project_id
+    
+    # Extract project ID from session data
+    if [[ "$session_data" == *":"*":"* ]]; then
+        project_id="${session_data##*:}"
+    else
+        local working_dir="${session_data#*:}"
+        project_id="$(get_current_project_context "$working_dir")"
+    fi
+    
+    local session_file
+    session_file="$(get_session_file_path "$project_id")"
+    
     if [[ -f "$session_file" ]]; then
         local stored_session_id
         stored_session_id=$(cat "$session_file" 2>/dev/null || echo "")
         
         if [[ -n "$stored_session_id" ]]; then
-            update_session_state "$session_id" "$SESSION_STATE_RUNNING" "session file exists"
+            update_session_state "$session_id" "$SESSION_STATE_RUNNING" "project session file exists"
             return 0
         fi
     fi
@@ -790,7 +1134,7 @@ init_session_manager() {
     log_info "Session manager initialized successfully"
 }
 
-# Starte verwaltete Session
+# Starte verwaltete Session (Enhanced for Per-Project - Issue #89)
 start_managed_session() {
     local project_name="$1"
     local working_dir="$2"
@@ -798,57 +1142,129 @@ start_managed_session() {
     shift 3
     local claude_args=("$@")
     
-    log_info "Starting managed session for project: $project_name"
+    # Generate project context
+    local project_id
+    project_id=$(get_current_project_context "$working_dir")
     
-    # Generiere Session-ID
+    log_info "Starting managed session for project: $project_name (ID: $project_id)"
+    
+    # Check if session already exists for this project
+    local existing_session_id
+    if existing_session_id=$(find_session_by_project "$project_id"); then
+        log_info "Found existing session for project $project_id: $existing_session_id"
+        
+        local current_state="${SESSION_STATES[$existing_session_id]:-$SESSION_STATE_UNKNOWN}"
+        if [[ "$current_state" == "$SESSION_STATE_RUNNING" ]]; then
+            log_info "Session already running, returning existing session ID: $existing_session_id"
+            echo "$existing_session_id"
+            return 0
+        else
+            log_info "Existing session not running (state: $current_state), starting new session"
+        fi
+    fi
+    
+    # Generiere neue Session-ID mit project context
     local session_id
-    session_id=$(generate_session_id "$project_name")
+    session_id=$(generate_session_id "$project_name" "$project_id")
     
-    # Registriere Session
-    register_session "$session_id" "$project_name" "$working_dir"
+    # Registriere Session mit project context
+    register_session "$session_id" "$project_name" "$working_dir" "$project_id"
     
     # Starte Session über claunch-Integration
     if declare -f start_or_resume_session >/dev/null 2>&1; then
         if start_or_resume_session "$working_dir" "$use_new_terminal" "${claude_args[@]}"; then
-            update_session_state "$session_id" "$SESSION_STATE_RUNNING" "session started successfully"
+            update_session_state "$session_id" "$SESSION_STATE_RUNNING" "project session started successfully"
+            
+            # Store session ID in project-specific file
+            local session_file
+            session_file="$(get_session_file_path "$project_id")"
+            echo "$session_id" > "$session_file"
+            
+            log_info "Project session started and registered: $session_id -> $session_file"
             echo "$session_id"  # Return session ID für Tracking
             return 0
         else
-            update_session_state "$session_id" "$SESSION_STATE_ERROR" "failed to start session"
+            update_session_state "$session_id" "$SESSION_STATE_ERROR" "failed to start project session"
             return 1
         fi
     else
-        log_error "claunch integration not available"
+        log_error "claunch integration not available for project session"
         update_session_state "$session_id" "$SESSION_STATE_ERROR" "claunch integration unavailable"
         return 1
     fi
 }
 
-# Stoppe verwaltete Session
+# Stoppe verwaltete Session (Enhanced for Per-Project - Issue #89)
 stop_managed_session() {
     local session_id="$1"
     
-    log_info "Stopping managed session: $session_id"
+    log_info "Stopping managed project session: $session_id"
     
     if [[ -z "${SESSIONS[$session_id]:-}" ]]; then
         log_error "Session not found: $session_id"
         return 1
     fi
     
-    local project_and_dir="${SESSIONS[$session_id]}"
-    local project_name="${project_and_dir%%:*}"
+    # Extract project information from session data
+    local session_data="${SESSIONS[$session_id]}"
+    local project_name project_id working_dir
+    
+    if [[ "$session_data" == *":"*":"* ]]; then
+        # New format: project_name:working_dir:project_id
+        project_name="${session_data%%:*}"
+        local temp="${session_data#*:}"
+        working_dir="${temp%%:*}"
+        project_id="${session_data##*:}"
+    else
+        # Legacy format: project_name:working_dir
+        project_name="${session_data%%:*}"
+        working_dir="${session_data#*:}"
+        project_id="$(get_current_project_context "$working_dir")"
+    fi
+    
+    log_debug "Stopping session for project: $project_name (ID: $project_id)"
     
     # Stoppe tmux-Session falls vorhanden
     if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
-        local tmux_session_name="${TMUX_SESSION_PREFIX}-${project_name}"
+        local tmux_session_name="${TMUX_SESSION_PREFIX}-${project_id}"
         
         if tmux has-session -t "$tmux_session_name" 2>/dev/null; then
             tmux kill-session -t "$tmux_session_name"
-            log_info "tmux session terminated: $tmux_session_name"
+            log_info "Project tmux session terminated: $tmux_session_name"
+        else
+            log_debug "No tmux session found to terminate: $tmux_session_name"
         fi
     fi
     
+    # Clean up project-specific session files
+    local session_file
+    session_file="$(get_session_file_path "$project_id")"
+    
+    if [[ -f "$session_file" ]]; then
+        rm -f "$session_file"
+        log_debug "Removed project session file: $session_file"
+    fi
+    
+    # Clean up metadata file if it exists
+    local metadata_file="${session_file}.metadata"
+    if [[ -f "$metadata_file" ]]; then
+        rm -f "$metadata_file"
+        log_debug "Removed project session metadata: $metadata_file"
+    fi
+    
+    # Update session state and clean up from tracking arrays
     update_session_state "$session_id" "$SESSION_STATE_STOPPED" "stopped by user"
+    
+    # Clean up project mappings
+    if [[ -n "${PROJECT_SESSIONS[$project_id]:-}" ]]; then
+        unset "PROJECT_SESSIONS[$project_id]"
+    fi
+    
+    if [[ -n "${SESSION_PROJECTS[$session_id]:-}" ]]; then
+        unset "SESSION_PROJECTS[$session_id]"
+    fi
+    
+    log_info "Project session stopped and cleaned up: $session_id (project: $project_id)"
     return 0
 }
 
