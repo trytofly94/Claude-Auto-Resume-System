@@ -144,6 +144,38 @@ build_cache() {
         return 1
     fi
     
+    # Implement file locking for multi-process safety
+    local lock_file="${queue_file}.cache.lock"
+    local lock_timeout=30  # seconds
+    
+    # Try to acquire lock with timeout (graceful fallback for systems without flock -w)
+    local lock_fd
+    local lock_acquired=false
+    
+    if command -v flock >/dev/null 2>&1; then
+        exec {lock_fd}>"$lock_file" 2>/dev/null || {
+            log_debug "[CACHE] Cannot create lock file, proceeding without lock"
+            lock_fd=""
+        }
+        
+        if [[ -n "$lock_fd" ]]; then
+            if flock -x -w $lock_timeout $lock_fd 2>/dev/null; then
+                log_debug "[CACHE] Cache lock acquired successfully"
+                lock_acquired=true
+            elif flock -x $lock_fd 2>/dev/null; then
+                log_debug "[CACHE] Cache lock acquired successfully (no timeout support)"
+                lock_acquired=true
+            else
+                log_debug "[CACHE] Cannot acquire cache lock, proceeding without lock"
+                exec {lock_fd}>&- 2>/dev/null || true
+                lock_fd=""
+            fi
+        fi
+    else
+        log_debug "[CACHE] flock not available, proceeding without lock"
+        lock_fd=""
+    fi
+    
     # Clear existing cache
     invalidate_cache "rebuild"
     
@@ -175,6 +207,12 @@ build_cache() {
         }
     ' "$queue_file" 2>/dev/null) || {
         log_error "[CACHE] Failed to parse queue file: $queue_file"
+        # Release lock on error
+        if [[ -n "${lock_fd:-}" ]]; then
+            flock -u $lock_fd 2>/dev/null || true
+            exec {lock_fd}>&- 2>/dev/null || true
+            rm -f "$lock_file" 2>/dev/null || true
+        fi
         return 1
     }
     
@@ -203,6 +241,14 @@ build_cache() {
     
     local task_count=${#TASK_INDEX[@]}
     log_info "[CACHE] Cache built successfully: $task_count tasks indexed"
+    
+    # Release lock if acquired
+    if [[ -n "${lock_fd:-}" ]]; then
+        flock -u $lock_fd 2>/dev/null || true
+        exec {lock_fd}>&- 2>/dev/null || true
+        rm -f "$lock_file" 2>/dev/null || true
+        log_debug "[CACHE] Cache lock released"
+    fi
     
     return 0
 }
@@ -362,6 +408,16 @@ get_cache_stats() {
         hit_rate=$(( (CACHE_HIT_COUNT * 100) / total_requests ))
     fi
     
+    # Get memory usage for current process (RSS in KB)
+    local memory_usage_kb=0
+    if command -v ps >/dev/null 2>&1; then
+        memory_usage_kb=$(ps -o rss= -p $$ 2>/dev/null | awk '{print $1}' || echo 0)
+    fi
+    
+    # Calculate cache size estimate (rough approximation)
+    local cache_size_estimate=0
+    cache_size_estimate=$(( ${#TASK_INDEX[@]} * 100 + ${#TASK_STATUS_COUNTS[@]} * 50 + ${#CACHE_STATS_JSON} ))
+    
     jq -n \
         --arg version "$CACHE_VERSION" \
         --arg valid "$QUEUE_CACHE_VALID" \
@@ -371,6 +427,8 @@ get_cache_stats() {
         --argjson misses "$CACHE_MISS_COUNT" \
         --argjson hit_rate "$hit_rate" \
         --argjson task_count "${#TASK_INDEX[@]}" \
+        --argjson memory_kb "$memory_usage_kb" \
+        --argjson cache_size_bytes "$cache_size_estimate" \
         '{
             version: $version,
             valid: ($valid == "true"),
@@ -379,7 +437,11 @@ get_cache_stats() {
             hits: $hits,
             misses: $misses,
             hit_rate_percent: $hit_rate,
-            cached_tasks: $task_count
+            cached_tasks: $task_count,
+            memory: {
+                process_rss_kb: $memory_kb,
+                cache_size_estimate_bytes: $cache_size_bytes
+            }
         }'
 }
 

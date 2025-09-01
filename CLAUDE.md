@@ -396,6 +396,79 @@ Das Setup-Wizard-System unterstützt jetzt **optionale modulare Architektur**:
 - **Modular**: Aufgeteilt in `src/wizard/{config,validation,detection}.sh`
 - **Automatic Fallback**: Graceful Degradation bei fehlenden Modulen
 
+### Cache System Tuning (seit v2.1.0)
+
+Das neue **Task Queue Cache System** bietet konfigurierbare Parameter für optimale Performance:
+
+#### Cache-Konfiguration
+```bash
+# Cache-Konfiguration in Environment-Variablen (Optional)
+export CACHE_MAX_AGE_SECONDS=300        # Cache-Gültigkeit (5 Minuten default)
+export CACHE_MAX_ENTRIES=1000           # Maximale Cache-Einträge (Memory-Schutz)
+export CACHE_VERSION="2.1.0"            # Cache-Version für Kompatibilität
+
+# Cache-Verzeichnis (automatisch erstellt)
+~/.claude-queue-cache/                  # Haupt-Cache-Verzeichnis
+```
+
+#### Cache-Performance-Monitoring
+```bash
+# Cache-Statistiken anzeigen
+./src/task-queue.sh status               # Zeigt Cache-Hit-Rate und Memory-Usage
+make debug                               # Umfassende Cache-Diagnose
+
+# Cache-Metriken (JSON-Format)
+{
+  "version": "2.1.0",
+  "valid": true,
+  "hits": 45,
+  "misses": 3, 
+  "hit_rate_percent": 93,
+  "cached_tasks": 50,
+  "memory": {
+    "process_rss_kb": 12500,
+    "cache_size_estimate_bytes": 8450
+  }
+}
+```
+
+#### Cache-Tuning-Empfehlungen
+
+**Für kleine Projekte (< 20 Tasks)**:
+- `CACHE_MAX_AGE_SECONDS=600` (10 Minuten) - Längere Cache-Gültigkeit
+- Standard-Konfiguration ausreichend
+
+**Für mittlere Projekte (20-100 Tasks)**:  
+- `CACHE_MAX_AGE_SECONDS=300` (5 Minuten) - Standard-Konfiguration
+- Optimale Balance zwischen Performance und Aktualität
+
+**Für große Projekte (100+ Tasks)**:
+- `CACHE_MAX_AGE_SECONDS=180` (3 Minuten) - Häufigere Cache-Aktualisierung
+- `CACHE_MAX_ENTRIES=2000` - Erhöhte Memory-Limits
+- Monitoring der Memory-Usage empfohlen
+
+#### Cache-Debugging
+
+**Cache-Probleme diagnostizieren**:
+```bash
+# Cache-Status prüfen
+./src/task-queue.sh status | jq '.cache'
+
+# Cache manuell invalidieren (bei Problemen)
+unset QUEUE_CACHE_VALID                  # Cache als ungültig markieren
+
+# Cache-Lock-Probleme beheben
+rm -f ~/.claude-queue-cache/*.lock       # Verwaiste Locks entfernen
+
+# Performance-Benchmarks
+make test-cache-performance              # Cache-Performance testen
+```
+
+**Multi-Process-Umgebungen**:
+- File-Locking verhindert Cache-Korruption
+- Graceful Degradation bei Lock-Timeouts (30s)
+- Automatic Lock-Cleanup bei Process-Termination
+
 ---
 
 **Letzte Aktualisierung**: 2025-08-31
