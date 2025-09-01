@@ -180,7 +180,8 @@ record_error_occurrence() {
     local severity="$2"
     local context="$3"
     local task_id="$4"
-    local timestamp=$(date +%s)
+    local timestamp
+    timestamp=$(date +%s)
     
     # Create error fingerprint for tracking
     local error_fingerprint
@@ -501,7 +502,8 @@ create_manual_recovery_report() {
     local report_dir="$PROJECT_ROOT/logs/recovery-reports"
     mkdir -p "$report_dir" 2>/dev/null || report_dir="/tmp"
     
-    local timestamp=$(date +%Y%m%d-%H%M%S)
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
     local report_file="$report_dir/manual-recovery-${task_id}-${timestamp}.json"
     
     # Gather system state information
