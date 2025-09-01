@@ -538,6 +538,72 @@ QUEUE_LOCK_TIMEOUT=30            # File-Locking-Timeout (30 Sek)
 - **Status Tracking**: pending → in_progress → completed/failed/timeout
 - **Issue-Merge Workflows**: Automatisierte Entwicklungszyklen (develop → clear → review → merge)
 
+### 📂 Lokale Task Queues (NEU in v2.0.0 - Issue #91)
+
+Das System unterstützt jetzt **projekt-spezifische Task Queues** mit `.claude-tasks/` Verzeichnissen:
+
+#### Funktionsweise
+- **Automatische Detection**: System erkennt `.claude-tasks/` Verzeichnis im aktuellen Projekt
+- **Projekt-Isolation**: Jedes Projekt hat seine eigene unabhängige Task Queue
+- **Git-Integration**: Optionale Versionskontrolle für Team-Collaboration
+- **Backup System**: Automatische Sicherung bei Änderungen
+
+#### Grundlegende Verwendung
+```bash
+# Neue lokale Queue initialisieren
+./src/task-queue.sh init-local-queue "my-project"
+
+# Queue-Context anzeigen (lokal vs. global)
+./src/task-queue.sh show-context
+
+# Tasks hinzufügen (automatisch zur lokalen Queue wenn verfügbar)
+./src/task-queue.sh add-custom "Fix authentication bug"
+
+# Tasks auflisten (zeigt lokale Queue an)
+./src/task-queue.sh list
+
+# Status anzeigen
+./src/task-queue.sh status
+```
+
+#### Advanced Features
+```bash
+# Mit Git-Tracking initialisieren (für Team-Collaboration)
+./src/task-queue.sh init-local-queue "team-project" --git
+
+# Context explizit wechseln
+./src/task-queue.sh add-custom "Global task" --global  # Erzwingt globale Queue
+./src/task-queue.sh list --local                       # Erzwingt lokale Queue
+
+# Migration (geplant für Phase 2)
+./src/task-queue.sh migrate-to-local "existing-project"
+```
+
+#### Verzeichnisstruktur
+```
+mein-projekt/
+├── src/
+├── package.json
+└── .claude-tasks/           # Lokale Task Queue
+    ├── queue.json           # Aktuelle Tasks
+    ├── completed.json       # Abgeschlossene Tasks
+    ├── config.json          # Projekt-spezifische Einstellungen
+    └── backups/             # Automatische Backups
+        └── backup-*.json
+```
+
+#### Vorteile lokaler Queues
+- **🚀 Projekt-Isolation**: Keine Cross-Kontamination zwischen Projekten
+- **👥 Team-Collaboration**: Tasks via Git teilbar (optional)
+- **📱 Portabilität**: Tasks folgen dem Projekt zwischen Maschinen
+- **🔍 Context-Awareness**: System erkennt automatisch Projekt-Kontext
+- **🔒 Backup-Sicherheit**: Automatische Sicherung vor jeder Änderung
+
+#### Migration & Backward Compatibility
+- **Vollständig rückwärtskompatibel**: Globale Queue funktioniert weiterhin
+- **Automatische Fallback**: Ohne lokale Queue wird globale Queue verwendet
+- **Schrittweise Migration**: Projekte können einzeln migriert werden
+
 ### 🧹 Context Clearing zwischen Tasks (NEU in v1.2)
 
 Das System bietet automatisches Context Clearing zwischen Tasks für saubere Task-Trennung:
