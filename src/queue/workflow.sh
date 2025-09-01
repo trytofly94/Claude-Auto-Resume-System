@@ -738,6 +738,130 @@ get_resource_stats() {
 # COMMAND COMPLETION DETECTION
 # ===============================================================================
 
+# Load smart completion modules if available
+if [[ -f "$SCRIPT_DIR/../completion-prompts.sh" ]]; then
+    source "$SCRIPT_DIR/../completion-prompts.sh"
+fi
+if [[ -f "$SCRIPT_DIR/../completion-fallback.sh" ]]; then
+    source "$SCRIPT_DIR/../completion-fallback.sh"
+fi
+
+# Monitor smart task completion with markers and patterns
+monitor_smart_completion() {
+    local task_id="$1"
+    local command="$2"
+    local phase="${3:-custom}"
+    local timeout="${4:-300}"
+    
+    log_debug "Monitoring smart completion for task $task_id: $command"
+    
+    # Check if smart completion is enabled
+    if [[ "${SMART_COMPLETION_ENABLED:-true}" != "true" ]]; then
+        log_debug "Smart completion disabled, falling back to standard monitoring"
+        return $(monitor_command_completion "$command" "$phase" "$task_id" "$timeout")
+    fi
+    
+    # Get completion marker and patterns for this task
+    local completion_marker="${TASK_COMPLETION_MARKERS[$task_id]:-}"
+    local completion_patterns="${TASK_COMPLETION_PATTERNS[$task_id]:-}"
+    
+    # If no smart patterns available, fall back to standard detection
+    if [[ -z "$completion_marker" && -z "$completion_patterns" ]]; then
+        log_debug "No smart completion patterns for task $task_id, using standard detection"
+        return $(monitor_command_completion "$command" "$phase" "$task_id" "$timeout")
+    fi
+    
+    # Combine patterns if both marker and custom patterns exist
+    if [[ -n "$completion_marker" ]]; then
+        local marker_patterns
+        marker_patterns=$(get_default_completion_patterns "$phase" "$completion_marker")
+        if [[ -n "$completion_patterns" ]]; then
+            completion_patterns="${marker_patterns}|${completion_patterns}"
+        else
+            completion_patterns="$marker_patterns"
+        fi
+    fi
+    
+    log_debug "Using smart completion patterns: $completion_patterns"
+    
+    local start_time=$(date +%s)
+    local check_interval=5
+    local confidence_threshold="${COMPLETION_CONFIDENCE_THRESHOLD:-0.8}"
+    
+    # Calculate smart timeout if available
+    if command -v calculate_task_timeout >/dev/null 2>&1; then
+        local task_description
+        task_description=$(echo "${TASK_METADATA[$task_id]:-{}}" | jq -r '.description // ""')
+        timeout=$(calculate_task_timeout "$phase" "$task_description" "$timeout")
+        log_debug "Smart timeout calculated: ${timeout}s"
+    fi
+    
+    while true; do
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - start_time))
+        
+        # Check for timeout with smart fallback handling
+        if (( elapsed > timeout )); then
+            log_warn "Smart completion timeout after ${elapsed}s for task $task_id"
+            
+            # Try fallback completion if available
+            if command -v handle_timeout_completion >/dev/null 2>&1; then
+                if handle_timeout_completion "$task_id" "$elapsed" "$timeout"; then
+                    log_info "Fallback completion confirmed for task $task_id"
+                    return 0
+                elif [[ $? -eq 2 ]]; then
+                    # Retry requested, extend timeout briefly
+                    timeout=$((timeout + 30))
+                    log_info "Extending timeout by 30s for task $task_id retry"
+                    continue
+                fi
+            fi
+            
+            log_error "Task timeout with no fallback success: $task_id"
+            return 1
+        fi
+        
+        # Capture session output for pattern matching
+        local session_output=""
+        if [[ "$USE_CLAUNCH" == "true" && "$CLAUNCH_MODE" == "tmux" ]]; then
+            if tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
+                session_output=$(tmux capture-pane -t "$TMUX_SESSION_NAME" -p 2>/dev/null || echo "")
+            fi
+        fi
+        
+        # Test completion patterns with confidence scoring
+        if [[ -n "$session_output" && -n "$completion_patterns" ]]; then
+            if test_completion_match "$session_output" "$completion_patterns" "$confidence_threshold"; then
+                log_info "Smart completion detected for task $task_id after ${elapsed}s"
+                
+                # Extract and validate completion marker if present
+                local detected_marker
+                if detected_marker=$(extract_completion_marker "$session_output"); then
+                    if [[ "$detected_marker" == "$completion_marker" ]]; then
+                        log_info "Completion marker validated: $detected_marker"
+                    else
+                        log_warn "Completion marker mismatch: expected $completion_marker, got $detected_marker"
+                    fi
+                fi
+                
+                return 0
+            fi
+        fi
+        
+        # Log progress periodically
+        if (( elapsed % 60 == 0 && elapsed > 0 )); then
+            log_info "Smart monitoring in progress for task $task_id: ${elapsed}s elapsed"
+            
+            # Show context analysis if available
+            if [[ -n "$session_output" ]] && command -v analyze_completion_context >/dev/null 2>&1; then
+                analyze_completion_context "$task_id" "$session_output" "$elapsed"
+            fi
+        fi
+        
+        sleep $check_interval
+    done
+}
+
 # Monitor command completion using multiple detection strategies
 monitor_command_completion() {
     local command="$1"
