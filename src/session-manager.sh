@@ -85,6 +85,12 @@ generate_project_identifier() {
     
     log_debug "Generating project identifier for: $project_path"
     
+    # Validate that the project path exists
+    if [[ ! -d "$project_path" && ! -f "$project_path" ]]; then
+        log_warn "Project path does not exist: $project_path"
+        # Continue anyway but warn - path might be created later
+    fi
+    
     # Resolve symlinks and get canonical path
     local resolved_path
     if resolved_path=$(realpath "$project_path" 2>/dev/null); then
@@ -99,7 +105,7 @@ generate_project_identifier() {
     # Remove leading slash, replace remaining slashes with hyphens
     # Remove special characters, normalize multiple hyphens
     local sanitized
-    sanitized=$(echo "$resolved_path" | sed 's|^/||' | sed 's|/|-|g' | sed 's/[^a-zA-Z0-9-]//g' | sed 's/--*/-/g')
+    sanitized=$(echo "$resolved_path" | sed 's|^/||; s|/|-|g; s/[^a-zA-Z0-9-]//g; s/--*/-/g')
     
     # Handle edge cases: empty sanitized name
     if [[ -z "$sanitized" ]]; then
@@ -117,9 +123,11 @@ generate_project_identifier() {
         path_hash=$(echo "$resolved_path" | shasum -a 256 | cut -c1-6)
     elif command -v sha256sum >/dev/null 2>&1; then
         path_hash=$(echo "$resolved_path" | sha256sum | cut -c1-6)
+    elif command -v md5sum >/dev/null 2>&1; then
+        path_hash=$(echo "$resolved_path" | md5sum | cut -c1-6)
     else
-        # Fallback: use simpler hash from path + timestamp
-        path_hash=$(echo "$resolved_path-$(date +%s)" | cksum | cut -d' ' -f1 | cut -c1-6)
+        # Final fallback: use cksum (less ideal but universally available)
+        path_hash=$(echo "$resolved_path" | cksum | cut -d' ' -f1 | cut -c1-6)
     fi
     
     # Combine sanitized name with hash for uniqueness
@@ -132,12 +140,29 @@ generate_project_identifier() {
 # Get current project context with caching
 get_current_project_context() {
     local working_dir="${1:-$(pwd)}"
+    local MAX_CACHE_SIZE=100  # Maximum cache entries to prevent memory bloat
     
     # Check cache first
     if [[ -n "${PROJECT_CONTEXT_CACHE[$working_dir]:-}" ]]; then
         log_debug "Using cached project context for: $working_dir"
         echo "${PROJECT_CONTEXT_CACHE[$working_dir]}"
         return 0
+    fi
+    
+    # Check cache size and evict oldest entries if needed
+    local cache_size=${#PROJECT_CONTEXT_CACHE[@]}
+    if [[ $cache_size -ge $MAX_CACHE_SIZE ]]; then
+        log_debug "Cache size limit reached ($cache_size >= $MAX_CACHE_SIZE), evicting oldest entries"
+        # Clear half of the cache (simple eviction strategy)
+        local count=0
+        for key in "${!PROJECT_CONTEXT_CACHE[@]}"; do
+            unset PROJECT_CONTEXT_CACHE["$key"]
+            ((count++))
+            if [[ $count -ge $((MAX_CACHE_SIZE / 2)) ]]; then
+                break
+            fi
+        done
+        log_debug "Evicted $count cache entries"
     fi
     
     # Generate new project context
@@ -147,7 +172,7 @@ get_current_project_context() {
     # Cache the result
     PROJECT_CONTEXT_CACHE["$working_dir"]="$project_id"
     
-    log_debug "Cached project context: $working_dir -> $project_id"
+    log_debug "Cached project context: $working_dir -> $project_id (cache size: $((cache_size + 1)))"
     echo "$project_id"
 }
 
