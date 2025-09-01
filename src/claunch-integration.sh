@@ -480,7 +480,8 @@ list_active_sessions() {
         # Fallback: Suche Session-Dateien
         echo "Session files in $HOME:"
         find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | while read -r session_file; do
-            local project=$(basename "$session_file" | sed 's/^\.claude_session_//')
+            local project
+            project=$(basename "$session_file" | sed 's/^\.claude_session_//')
             local session_id
             session_id=$(cat "$session_file" 2>/dev/null || echo "invalid")
             echo "  $project: $session_id"
@@ -586,7 +587,9 @@ init_claunch_integration() {
             [[ "$key" =~ ^[[:space:]]*# ]] && continue
             [[ -z "$key" ]] && continue
             
-            value=$(echo "$value" | sed 's/^["'\'']\|["'\'']$//g')
+            # Remove leading/trailing quotes using parameter expansion
+            value=${value#[\"\']}
+            value=${value%[\"\']}
             
             case "$key" in
                 USE_CLAUNCH|CLAUNCH_MODE|TMUX_SESSION_PREFIX)
