@@ -42,6 +42,26 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $*" >&2
 }
 
+# Cleanup function for failed installations
+cleanup_on_failure() {
+    local temp_wrapper="${1:-}"
+    local target_file="${2:-}"
+    
+    log_warning "Installation failed, cleaning up..."
+    
+    # Clean up temporary files
+    if [[ -n "$temp_wrapper" && -f "$temp_wrapper" ]]; then
+        rm -f "$temp_wrapper"
+        log_info "Removed temporary wrapper: $temp_wrapper"
+    fi
+    
+    # Clean up incomplete target installation
+    if [[ -n "$target_file" && -f "$target_file" && ! -x "$target_file" ]]; then
+        rm -f "$target_file"
+        log_info "Removed incomplete installation: $target_file"
+    fi
+}
+
 # ===============================================================================
 # PLATFORM DETECTION
 # ===============================================================================
@@ -85,9 +105,24 @@ check_install_permissions() {
         log_info "Have write permissions for $target_dir"
         return 0
     else
-        log_warning "Need elevated privileges for installation to $target_dir"
+        log_warning "Installation requires elevated privileges"
+        log_info "This will install to: $target_dir"
+        log_info "Alternative: Use --target-dir ~/bin for user installation"
         return 1
     fi
+}
+
+# Verify PATH accessibility
+verify_path_accessibility() {
+    local target_dir="$1"
+    if [[ ":$PATH:" != *":$target_dir:"* ]]; then
+        log_warning "$target_dir is not in PATH"
+        log_info "You may need to add it to your shell configuration:"
+        log_info "  echo 'export PATH=\"$target_dir:\$PATH\"' >> ~/.bashrc"
+        log_info "  echo 'export PATH=\"$target_dir:\$PATH\"' >> ~/.zshrc"
+        return 1
+    fi
+    return 0
 }
 
 # ===============================================================================
@@ -126,14 +161,23 @@ install_via_symlink() {
     
     log_info "Installing via symlink method..."
     
-    # Validate source script exists
+    # Set up cleanup trap
+    trap 'cleanup_on_failure "" "$target_file"' ERR
+    
+    # Validate source script exists and is executable
     if [[ ! -f "$main_script" ]]; then
         log_error "Main script not found: $main_script"
         return 1
     fi
     
-    # Remove existing installation if present
-    if [[ -L "$target_file" ]] || [[ -f "$target_file" ]]; then
+    if [[ ! -x "$main_script" ]]; then
+        log_error "Main script is not executable: $main_script"
+        return 1
+    fi
+    
+    # Check for existing installation and version
+    if [[ -f "$target_file" ]]; then
+        validate_version_compatibility
         log_info "Removing existing installation..."
         rm -f "$target_file"
     fi
@@ -142,6 +186,9 @@ install_via_symlink() {
     # This ensures proper path resolution
     create_global_wrapper "$installation_dir" "$target_file"
     
+    # Disable trap on success
+    trap - ERR
+    
     return 0
 }
 
@@ -149,18 +196,38 @@ install_via_symlink() {
 install_with_sudo() {
     local installation_dir="$1"
     local target_dir="$2"
+    local target_file="$target_dir/$SCRIPT_NAME"
     
     log_info "Installing with elevated privileges..."
     
     # Create temporary wrapper script
     local temp_wrapper="/tmp/claude-auto-resume-wrapper-$$"
+    
+    # Set up cleanup trap
+    trap 'cleanup_on_failure "$temp_wrapper" "$target_file"' ERR
+    
     create_global_wrapper "$installation_dir" "$temp_wrapper"
     
     # Move to target location with sudo
-    sudo mv "$temp_wrapper" "$target_dir/$SCRIPT_NAME"
-    sudo chmod +x "$target_dir/$SCRIPT_NAME"
+    sudo mv "$temp_wrapper" "$target_file"
+    sudo chmod +x "$target_file"
     
-    log_success "Installed with sudo to $target_dir/$SCRIPT_NAME"
+    # Disable trap on success
+    trap - ERR
+    
+    log_success "Installed with sudo to $target_file"
+}
+
+# Version compatibility check
+validate_version_compatibility() {
+    local installed_version
+    if command -v claude-auto-resume >/dev/null 2>&1; then
+        installed_version=$(claude-auto-resume --version 2>/dev/null || echo "unknown")
+        log_info "Found existing version: $installed_version"
+        # Add version comparison logic here in future releases
+        return 0
+    fi
+    return 0
 }
 
 # ===============================================================================
@@ -179,7 +246,24 @@ validate_installation_env() {
         return 1
     fi
     
-    # Source the installation path utilities
+    # Validate required files exist and are accessible
+    local required_files=(
+        "$installation_dir/src/task-queue.sh"
+        "$installation_dir/config/default.conf"
+    )
+    
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "$file" ]]; then
+            log_error "Required file not found: $file"
+            return 1
+        fi
+        if [[ ! -r "$file" ]]; then
+            log_error "Required file not readable: $file"
+            return 1
+        fi
+    done
+    
+    # Source the installation path utilities if available
     if [[ -f "$installation_dir/src/utils/installation-path.sh" ]]; then
         source "$installation_dir/src/utils/installation-path.sh"
         
@@ -188,8 +272,7 @@ validate_installation_env() {
             return 1
         fi
     else
-        log_error "Installation path utilities not found"
-        return 1
+        log_warning "Installation path utilities not found - proceeding without advanced validation"
     fi
     
     log_success "Installation environment validated"
@@ -206,12 +289,26 @@ validate_global_command() {
         log_success "Global installation successful"
         log_info "Command location: $command_path"
         
-        # Test basic functionality
+        # Verify PATH accessibility
+        local command_dir="$(dirname "$command_path")"
+        verify_path_accessibility "$command_dir"
+        
+        # Test basic functionality with more comprehensive checks
         log_info "Testing basic functionality..."
-        if "$command_name" --version >/dev/null 2>&1; then
+        
+        # Test command execution
+        if timeout 10s "$command_name" --help >/dev/null 2>&1; then
             log_success "Command executes successfully"
         else
             log_warning "Command installed but may have execution issues"
+        fi
+        
+        # Test wrapper script integrity
+        if [[ -f "$command_path" && -x "$command_path" ]]; then
+            log_success "Wrapper script has correct permissions"
+        else
+            log_error "Wrapper script permissions issue"
+            return 1
         fi
         
         return 0
@@ -275,6 +372,16 @@ install_global() {
         echo "  claude-auto-resume --help"
         echo "  claude-auto-resume --continuous"
         echo "  claude-auto-resume --add-custom \"My task\""
+        echo
+        
+        # Check PATH and provide guidance if needed
+        local target_in_path=true
+        if ! verify_path_accessibility "$target_dir"; then
+            target_in_path=false
+            echo "Note: You may need to restart your terminal or source your shell configuration"
+            echo "for the command to be available in new terminal sessions."
+        fi
+        
         return 0
     else
         log_error "Installation completed but validation failed"
@@ -336,8 +443,13 @@ Examples:
     $0                     # Install globally
     $0 --install           # Install globally  
     $0 --uninstall         # Remove global installation
-    $0 --target-dir ~/bin  # Install to custom directory
+    $0 --target-dir ~/bin  # Install to custom directory (user-only)
     $0 --validate          # Check installation status
+
+Notes:
+    - Installation to /usr/local/bin requires sudo privileges
+    - Use --target-dir ~/bin for user-only installation (no sudo required)
+    - Ensure target directory is in your PATH for global access
 
 EOF
 }
