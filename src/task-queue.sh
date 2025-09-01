@@ -1,21 +1,45 @@
 #!/usr/bin/env bash
 
 # Claude Auto-Resume - Task Queue Main Module
-# Refactored modular task queue system (v2.0.0)
-# Reduced from 4843 lines to ~200 lines with modular architecture
-# Version: 2.0.0-refactored
+# Refactored modular task queue system with global installation support
+# Version: 2.0.0-global-cli (Issue #88)
 
 set -euo pipefail
 
 # ===============================================================================
-# GLOBAL CONFIGURATION
+# GLOBAL INSTALLATION SUPPORT
 # ===============================================================================
 
+# Initialize path resolution for global vs local execution
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Load path resolution utilities
+if [[ -f "$SCRIPT_DIR/utils/path-resolver.sh" ]]; then
+    source "$SCRIPT_DIR/utils/path-resolver.sh"
+    initialize_path_resolver
+elif [[ -f "$SCRIPT_DIR/utils/installation-path.sh" ]]; then
+    # Fallback to basic path detection
+    source "$SCRIPT_DIR/utils/installation-path.sh"
+    export CLAUDE_INSTALLATION_DIR="$(get_installation_directory)"
+    export CLAUDE_SRC_DIR="$(get_src_directory)"
+    export CLAUDE_CONFIG_DIR="$(get_config_directory)"
+    export CLAUDE_SCRIPTS_DIR="$(get_scripts_directory)"
+    export CLAUDE_LOGS_DIR="$(get_logs_directory)"
+else
+    # Legacy path detection for backward compatibility
+    CLAUDE_INSTALLATION_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    CLAUDE_SRC_DIR="$CLAUDE_INSTALLATION_DIR/src"
+    CLAUDE_CONFIG_DIR="$CLAUDE_INSTALLATION_DIR/config" 
+    CLAUDE_SCRIPTS_DIR="$CLAUDE_INSTALLATION_DIR/scripts"
+    CLAUDE_LOGS_DIR="$CLAUDE_INSTALLATION_DIR/logs"
+fi
+
+# Update legacy variables for backward compatibility
+SCRIPT_DIR="$CLAUDE_SRC_DIR"
+PROJECT_ROOT="$CLAUDE_INSTALLATION_DIR"
 
 # Configuration defaults (loaded from config/default.conf if available)
-TASK_QUEUE_DIR="${TASK_QUEUE_DIR:-queue}"
+TASK_QUEUE_DIR="${TASK_QUEUE_DIR:-$CLAUDE_INSTALLATION_DIR/queue}"
 TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-true}"
 
 # ===============================================================================
@@ -72,7 +96,14 @@ load_queue_modules() {
 
 # Load configuration
 load_configuration() {
-    local config_file="$PROJECT_ROOT/config/default.conf"
+    local config_file
+    
+    # Use path resolution if available, otherwise fall back to legacy
+    if command -v resolve_config_file >/dev/null 2>&1; then
+        config_file="$(resolve_config_file "default.conf" 2>/dev/null || echo "$PROJECT_ROOT/config/default.conf")"
+    else
+        config_file="$PROJECT_ROOT/config/default.conf"
+    fi
     
     if [[ -f "$config_file" ]]; then
         source "$config_file" || log_warn "Failed to load configuration: $config_file"

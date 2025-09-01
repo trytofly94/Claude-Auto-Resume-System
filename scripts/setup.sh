@@ -95,6 +95,7 @@ FORCE_REINSTALL=false
 DRY_RUN=false
 INTERACTIVE_MODE=true
 CLAUNCH_METHOD="official"  # Use official installer by default (GitHub issue #38)
+GLOBAL_INSTALLATION=false  # Issue #88: Global CLI installation option
 
 # System-Information
 OS=""
@@ -1064,6 +1065,60 @@ EOF
 }
 
 # ===============================================================================
+# GLOBAL CLI INSTALLATION (ISSUE #88)
+# ===============================================================================
+
+# Install claude-auto-resume as a global command
+install_global_cli() {
+    log_info "Installing claude-auto-resume as global command..."
+    
+    # Check if the global installation script exists
+    local install_script="$PROJECT_ROOT/scripts/install-global.sh"
+    if [[ ! -f "$install_script" ]]; then
+        log_error "Global installation script not found: $install_script"
+        return 1
+    fi
+    
+    # Check if already installed
+    if command -v claude-auto-resume >/dev/null 2>&1; then
+        log_info "claude-auto-resume is already available as a global command"
+        
+        if [[ "$FORCE_REINSTALL" == "true" ]]; then
+            log_info "Forcing reinstallation..."
+        else
+            read -p "Overwrite existing global installation? [y/N]: " -r
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                log_info "Skipping global installation"
+                return 0
+            fi
+        fi
+    fi
+    
+    # Run the global installation
+    log_info "Running global installation script..."
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would execute: $install_script --install"
+    else
+        if "$install_script" --install; then
+            log_success "Global CLI installation completed successfully!"
+            log_info "You can now use 'claude-auto-resume' from any directory"
+            
+            # Test the global command
+            if claude-auto-resume --version >/dev/null 2>&1; then
+                log_success "Global command is working correctly"
+            else
+                log_warn "Global command installed but may have issues"
+            fi
+        else
+            log_error "Global CLI installation failed"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# ===============================================================================
 # COMMAND-LINE-INTERFACE
 # ===============================================================================
 
@@ -1083,6 +1138,7 @@ OPTIONS:
     --force                 Force reinstallation of components
     --dry-run               Preview actions without executing them
     --non-interactive       Run without user interaction (use defaults)
+    --global                Install claude-auto-resume as global command
     --fix-permissions       Fix script permissions and exit (useful after git clone)
     --debug                 Enable debug output
     -h, --help              Show this help message
@@ -1180,6 +1236,10 @@ parse_arguments() {
                 INTERACTIVE_MODE=false
                 shift
                 ;;
+            --global)
+                GLOBAL_INSTALLATION=true
+                shift
+                ;;
             --fix-permissions)
                 log_info "Running permission fix only"
                 fix_script_permissions
@@ -1214,6 +1274,7 @@ parse_arguments() {
     log_debug "  FORCE_REINSTALL=$FORCE_REINSTALL"
     log_debug "  DRY_RUN=$DRY_RUN"
     log_debug "  INTERACTIVE_MODE=$INTERACTIVE_MODE"
+    log_debug "  GLOBAL_INSTALLATION=$GLOBAL_INSTALLATION"
 }
 
 # ===============================================================================
@@ -1247,16 +1308,32 @@ show_summary() {
     log_success "Claude Auto-Resume has been successfully set up!"
     echo
     log_info "Quick start guide:"
-    log_info "  1. Start continuous monitoring:"
-    log_info "     $PROJECT_ROOT/src/hybrid-monitor.sh --continuous"
+    
+    if [[ "$GLOBAL_INSTALLATION" == "true" ]]; then
+        log_info "  ✅ Global installation: You can now use 'claude-auto-resume' from anywhere!"
+        echo
+        log_info "  1. Start continuous monitoring from any directory:"
+        log_info "     claude-auto-resume --continuous"
+        echo
+        log_info "  2. Add custom tasks:"
+        log_info "     claude-auto-resume --add-custom \"Your task description\""
+        echo
+        log_info "  3. For help and options:"
+        log_info "     claude-auto-resume --help"
+    else
+        log_info "  1. Start continuous monitoring:"
+        log_info "     $PROJECT_ROOT/src/hybrid-monitor.sh --continuous"
+        echo
+        log_info "  2. Or use the shortcut (if PATH was updated):"
+        log_info "     claude-auto-resume --continuous --new-terminal"
+        echo
+        log_info "  3. For help and options:"
+        log_info "     claude-auto-resume --help"
+        echo
+        log_info "  💡 Tip: Use --global option next time for global installation"
+    fi
     echo
-    log_info "  2. Or use the shortcut (if PATH was updated):"
-    log_info "     claude-auto-resume --continuous --new-terminal"
-    echo
-    log_info "  3. For help and options:"
-    log_info "     claude-auto-resume --help"
-    echo
-    log_info "  4. Configuration file:"
+    log_info "  Configuration file:"
     log_info "     $PROJECT_ROOT/config/user.conf"
     echo
     log_info "For more information, see README.md"
@@ -1312,24 +1389,32 @@ main() {
         log_error "Shortcuts creation failed"
     fi
     
-    # Schritt 5: Konfiguration
+    # Schritt 5: Global Installation (optional)
+    if [[ "$GLOBAL_INSTALLATION" == "true" ]]; then
+        if ! install_global_cli; then
+            ((failed_steps++))
+            log_error "Global CLI installation failed"
+        fi
+    fi
+    
+    # Schritt 6: Konfiguration
     if ! create_user_config; then
         ((failed_steps++))
         log_error "User configuration creation failed"
     fi
     
-    # Schritt 6: Development-Tools (optional)
+    # Schritt 7: Development-Tools (optional)
     if ! install_dev_tools; then
         log_warn "Development tools installation had issues"
     fi
     
-    # Schritt 7: Tests
+    # Schritt 8: Tests
     if ! run_setup_tests; then
         ((failed_steps++))
         log_error "Setup validation tests failed"
     fi
     
-    # Schritt 8: Demo (optional)
+    # Schritt 9: Demo (optional)
     run_demo
     
     # Zusammenfassung
