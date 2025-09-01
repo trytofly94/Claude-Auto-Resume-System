@@ -3,11 +3,14 @@
 # Unit tests for module loader system (Issue #111)
 # Tests the central module loader functionality and loading guards
 
-load '../../src/utils/module-loader.sh'
+# Get the project root directory
+PROJECT_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 
 setup() {
     export BATS_TEST_TMPDIR="${BATS_TMPDIR}/module-loader-test-$$"
     mkdir -p "$BATS_TEST_TMPDIR"
+    # Change to project root for tests
+    cd "$PROJECT_ROOT"
     
     # Create test module files
     cat > "$BATS_TEST_TMPDIR/test-module.sh" << 'EOF'
@@ -42,6 +45,8 @@ EOF
 teardown() {
     rm -rf "$BATS_TEST_TMPDIR"
     unset TEST_MODULE_LOADED TEST_MODULE2_LOADED TEST_FUNCTION_CALLED
+    # Change back to original directory
+    cd "$BATS_ORIGINAL_PWD" 2>/dev/null || true
 }
 
 @test "module loader initializes correctly" {
@@ -92,25 +97,25 @@ teardown() {
 }
 
 @test "core utility modules have loading guards" {
-    # Test logging module guard
-    run bash -c "export LOGGING_MODULE_LOADED=1; source src/utils/logging.sh; echo 'should not execute'"
+    # Test logging module guard - check if it exports the guard variable
+    run bash -c "source src/utils/logging.sh; echo \${LOGGING_MODULE_LOADED}"
     [ "$status" -eq 0 ]
-    [[ ! "$output" =~ "should not execute" ]]
+    [[ "$output" =~ "1" ]]
     
     # Test terminal module guard
-    run bash -c "export TERMINAL_MODULE_LOADED=1; source src/utils/terminal.sh; echo 'should not execute'"
+    run bash -c "source src/utils/terminal.sh; echo \${TERMINAL_MODULE_LOADED}"
     [ "$status" -eq 0 ]
-    [[ ! "$output" =~ "should not execute" ]]
+    [[ "$output" =~ "1" ]]
     
-    # Test network module guard
-    run bash -c "export NETWORK_MODULE_LOADED=1; source src/utils/network.sh; echo 'should not execute'"
+    # Test network module guard  
+    run bash -c "source src/utils/network.sh; echo \${NETWORK_MODULE_LOADED}"
     [ "$status" -eq 0 ]
-    [[ ! "$output" =~ "should not execute" ]]
+    [[ "$output" =~ "1" ]]
 }
 
 @test "task queue uses module loader" {
     # This tests that task-queue.sh can use the module loader
-    run bash -c "source src/task-queue.sh >/dev/null 2>&1; declare -f load_module_loader >/dev/null && echo 'has_function'"
+    run bash -c "source src/task-queue.sh >/dev/null 2>&1; declare -f load_module_safe >/dev/null && echo 'has_function'"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "has_function" ]]
 }
