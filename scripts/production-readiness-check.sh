@@ -257,7 +257,12 @@ validate_security_configuration() {
     
     # Check for hardcoded secrets in source code - optimized for Issue #110
     local source_files_array
-    mapfile -t source_files_array < <(find "$PROJECT_ROOT/src" -name "*.sh" -type f 2>/dev/null || true)
+    if ! mapfile -t source_files_array < <(find "$PROJECT_ROOT/src" -name "*.sh" -type f 2>&1); then
+        local find_error="$?"
+        log_error "Source file discovery failed: exit code $find_error"
+        log_debug "Find command: find $PROJECT_ROOT/src -name '*.sh' -type f"
+        return 1
+    fi
     if [[ ${#source_files_array[@]} -gt 0 ]]; then
         if printf '%s\n' "${source_files_array[@]}" | xargs grep -l "ghp_\|password\s*=\|secret\s*=" 2>/dev/null | head -1 >/dev/null; then
             issues+=("Potential hardcoded secrets found in source code")
@@ -499,7 +504,10 @@ validate_test_coverage() {
         else
             # Use array to count test files efficiently (Issue #110 optimization)
             local test_files_array
-            mapfile -t test_files_array < <(find "$test_path" -name "*.bats" -type f 2>/dev/null || true)
+            if ! mapfile -t test_files_array < <(find "$test_path" -name "*.bats" -type f 2>&1); then
+                log_warn "Test file discovery failed in $test_path"
+                test_files_array=()
+            fi
             if [[ ${#test_files_array[@]} -eq 0 ]]; then
                 empty_test_dirs+=("$test_dir")
             fi

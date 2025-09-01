@@ -586,7 +586,12 @@ fi
 if command -v shfmt >/dev/null 2>&1; then
     echo "Checking shell script formatting..."
     # Use array to avoid command substitution overhead (Issue #110 optimization)
-    mapfile -t shell_files_array < <(find . -name "*.sh" -type f 2>/dev/null)
+    if ! mapfile -t shell_files_array < <(find . -name "*.sh" -type f 2>&1); then
+        local find_error="$?"
+        log_error "Shell file discovery failed: exit code $find_error"
+        log_debug "Find command: find . -name '*.sh' -type f"
+        return 1
+    fi
     if shfmt -d "${shell_files_array[@]}"; then
         echo "✅ All files properly formatted"
     else
