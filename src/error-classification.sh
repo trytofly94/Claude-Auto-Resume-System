@@ -402,7 +402,6 @@ escalate_to_manual_recovery() {
     load_task_queue_if_needed
     if declare -f update_task_status >/dev/null 2>&1; then
         update_task_status "$task_id" "failed" "manual_recovery_required"
-        fi
     fi
     
     log_warn "Manual recovery required for task $task_id"
@@ -428,8 +427,7 @@ schedule_simple_retry() {
     load_task_queue_if_needed
     if declare -f schedule_task_retry >/dev/null 2>&1; then
         schedule_task_retry "$task_id" "$error_context"
-            return $?
-        fi
+        return $?
     fi
     
     # Fallback: mark for retry
@@ -456,9 +454,8 @@ fallback_to_safe_mode() {
     load_task_queue_if_needed
     if declare -f pause_task >/dev/null 2>&1; then
         pause_task "$task_id" "safe_mode"
-        elif declare -f update_task_status >/dev/null 2>&1; then
-            update_task_status "$task_id" "failed" "safe_mode_fallback"
-        fi
+    elif declare -f update_task_status >/dev/null 2>&1; then
+        update_task_status "$task_id" "failed" "safe_mode_fallback"
     fi
     
     log_warn "Task $task_id moved to safe mode - manual review recommended"
@@ -486,8 +483,7 @@ handle_timeout_recovery() {
     load_task_queue_if_needed
     if declare -f reschedule_task_with_timeout >/dev/null 2>&1; then
         reschedule_task_with_timeout "$task_id" "$extended_timeout"
-            return $?
-        fi
+        return $?
     fi
     
     # Fallback: regular retry

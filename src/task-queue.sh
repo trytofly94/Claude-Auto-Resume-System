@@ -108,10 +108,30 @@ load_queue_modules() {
     log_info "All queue modules loaded successfully"
 }
 
-# Load configuration
+# Load configuration using centralized loader (Issue #114)
 load_configuration() {
     local config_file
     
+    # Try to use centralized config loader if available
+    if declare -f load_system_config >/dev/null 2>&1; then
+        # Use path resolution if available, otherwise fall back to legacy
+        if command -v resolve_config_file >/dev/null 2>&1; then
+            config_file="$(resolve_config_file "default.conf" 2>/dev/null || echo "$PROJECT_ROOT/config/default.conf")"
+        else
+            config_file="$PROJECT_ROOT/config/default.conf"
+        fi
+        
+        if ! load_system_config "$config_file"; then
+            log_warn "Failed to load centralized configuration, using fallback"
+        else
+            # Export config to environment variables for backward compatibility
+            export_config_as_env
+            log_debug "Configuration loaded using centralized loader"
+            return 0
+        fi
+    fi
+    
+    # Fallback: Use direct sourcing for backward compatibility
     # Use path resolution if available, otherwise fall back to legacy
     if command -v resolve_config_file >/dev/null 2>&1; then
         config_file="$(resolve_config_file "default.conf" 2>/dev/null || echo "$PROJECT_ROOT/config/default.conf")"
@@ -121,7 +141,7 @@ load_configuration() {
     
     if [[ -f "$config_file" ]]; then
         source "$config_file" || log_warn "Failed to load configuration: $config_file"
-        log_debug "Configuration loaded from: $config_file"
+        log_debug "Configuration loaded from: $config_file (fallback method)"
     else
         log_debug "No configuration file found, using defaults"
     fi
