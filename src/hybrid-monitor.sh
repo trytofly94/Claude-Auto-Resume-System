@@ -178,6 +178,7 @@ load_dependencies() {
     
     # Lade Utility-Module
     local modules=(
+        "utils/config-loader.sh"
         "utils/logging.sh"
         "utils/network.sh" 
         "utils/terminal.sh"
@@ -221,43 +222,25 @@ load_dependencies() {
 # KONFIGURATION UND VALIDIERUNG
 # ===============================================================================
 
-# Lade Konfiguration
+# Load configuration using centralized loader (Issue #114)
 load_configuration() {
     local config_path="${SPECIFIED_CONFIG:-$CONFIG_FILE}"
     
+    # Try to resolve config path if not absolute
     if [[ ! -f "$config_path" ]]; then
         config_path="$SCRIPT_DIR/../$CONFIG_FILE"
     fi
     
-    if [[ -f "$config_path" ]]; then
-        log_info "Loading configuration from: $config_path"
-        
-        while IFS='=' read -r key value; do
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$key" ]] && continue
-            
-            # Remove quotes from beginning and end
-            value=${value#\"} 
-            value=${value%\"}
-            value=${value#\'} 
-            value=${value%\'}
-            
-            # Setze bekannte Konfigurationsvariablen
-            case "$key" in
-                CHECK_INTERVAL_MINUTES|MAX_RESTARTS|USE_CLAUNCH|NEW_TERMINAL_DEFAULT|DEBUG_MODE|DRY_RUN|CLAUNCH_MODE|TMUX_SESSION_PREFIX|USAGE_LIMIT_COOLDOWN|BACKOFF_FACTOR|MAX_WAIT_TIME|LOG_LEVEL|LOG_ROTATION|MAX_LOG_SIZE|LOG_FILE|HEALTH_CHECK_ENABLED|AUTO_RECOVERY_ENABLED|TASK_QUEUE_ENABLED|TASK_DEFAULT_TIMEOUT|TASK_MAX_RETRIES|TASK_RETRY_DELAY|TASK_COMPLETION_PATTERN|QUEUE_PROCESSING_DELAY|QUEUE_MAX_CONCURRENT|QUEUE_AUTO_PAUSE_ON_ERROR|QUEUE_SESSION_CLEAR_BETWEEN_TASKS)
-                    eval "$key='$value'"
-                    log_debug "Config: $key=$value"
-                    ;;
-                # GitHub Integration Configuration Parameters  
-                GITHUB_INTEGRATION_ENABLED|GITHUB_AUTO_COMMENT|GITHUB_STATUS_UPDATES|GITHUB_COMPLETION_NOTIFICATIONS|GITHUB_API_TIMEOUT|GITHUB_RETRY_ATTEMPTS)
-                    eval "$key='$value'"
-                    log_debug "Config: $key=$value"
-                    ;;
-            esac
-        done < <(grep -E '^[^#]*=' "$config_path" || true)
-    else
-        log_warn "Configuration file not found: $config_path (using defaults)"
+    # Use centralized config loader
+    if ! load_system_config "$config_path"; then
+        log_warn "Failed to load configuration, using defaults"
+        return 1
     fi
+    
+    # Export configuration as environment variables for backward compatibility
+    export_config_as_env
+    
+    return 0
 }
 
 # Lade Task Queue Konfiguration und bestimme Processing-Modus
@@ -267,7 +250,9 @@ load_task_queue_config() {
     # Task Queue Processing aktivieren wenn:
     # 1. TASK_QUEUE_ENABLED=true in config, oder 
     # 2. --queue-mode CLI parameter verwendet wird
-    if [[ "${TASK_QUEUE_ENABLED:-false}" == "true" || "${QUEUE_MODE:-false}" == "true" ]]; then
+    local task_enabled
+    task_enabled=$(get_config "TASK_QUEUE_ENABLED" "false")
+    if [[ "$task_enabled" == "true" || "${QUEUE_MODE:-false}" == "true" ]]; then
         if [[ "${TASK_QUEUE_AVAILABLE:-false}" == "true" ]]; then
             export TASK_QUEUE_PROCESSING=true
             log_info "Task Queue processing enabled"

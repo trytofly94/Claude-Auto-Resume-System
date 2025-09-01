@@ -750,22 +750,38 @@ init_claunch_integration() {
     
     log_info "Initializing claunch integration with fallback detection"
     
-    # Lade Konfiguration
-    if [[ -f "$config_file" ]]; then
-        while IFS='=' read -r key value; do
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$key" ]] && continue
-            
-            # Remove leading/trailing quotes using parameter expansion
-            value=${value#[\"\']}
-            value=${value%[\"\']}
-            
-            case "$key" in
-                USE_CLAUNCH|CLAUNCH_MODE|TMUX_SESSION_PREFIX)
-                    eval "$key='$value'"
-                    ;;
-            esac
-        done < <(grep -E '^[^#]*=' "$config_file" || true)
+    # Load configuration using centralized loader (Issue #114)
+    if declare -f load_system_config >/dev/null 2>&1; then
+        # Config should already be loaded by main process, but ensure it's loaded
+        if [[ -z "${SYSTEM_CONFIG_LOADED:-}" ]]; then
+            load_system_config "$config_file" || log_warn "Failed to load centralized config"
+        fi
+        
+        # Get claunch specific config values using centralized functions
+        USE_CLAUNCH=$(get_config "USE_CLAUNCH" "true")
+        CLAUNCH_MODE=$(get_config "CLAUNCH_MODE" "tmux")
+        TMUX_SESSION_PREFIX=$(get_config "TMUX_SESSION_PREFIX" "claude-auto")
+        
+        log_debug "claunch integration configured using centralized loader"
+    else
+        # Fallback: direct config file parsing for backward compatibility
+        if [[ -f "$config_file" ]]; then
+            while IFS='=' read -r key value; do
+                [[ "$key" =~ ^[[:space:]]*# ]] && continue
+                [[ -z "$key" ]] && continue
+                
+                # Remove leading/trailing quotes using parameter expansion
+                value=${value#[\"\']}
+                value=${value%[\"\']}
+                
+                case "$key" in
+                    USE_CLAUNCH|CLAUNCH_MODE|TMUX_SESSION_PREFIX)
+                        eval "$key='$value'"
+                        ;;
+                esac
+            done < <(grep -E '^[^#]*=' "$config_file" || true)
+            log_debug "claunch integration configured from: $config_file (fallback method)"
+        fi
     fi
     
     # Intelligent mode detection with fallback

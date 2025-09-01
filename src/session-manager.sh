@@ -1104,26 +1104,47 @@ init_session_manager() {
         return 1
     fi
     
-    # Lade Konfiguration
-    if [[ -f "$config_file" ]]; then
-        while IFS='=' read -r key value; do
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$key" ]] && continue
-            
-            # Remove quotes from beginning and end
-            value=${value#\"} 
-            value=${value%\"}
-            value=${value#\'} 
-            value=${value%\'}
-            
-            case "$key" in
-                MAX_RESTARTS|SESSION_RESTART_DELAY|HEALTH_CHECK_ENABLED|HEALTH_CHECK_INTERVAL|HEALTH_CHECK_TIMEOUT|AUTO_RECOVERY_ENABLED|RECOVERY_DELAY|MAX_RECOVERY_ATTEMPTS)
-                    eval "$key='$value'"
-                    ;;
-            esac
-        done < <(grep -E '^[^#]*=' "$config_file" || true)
+    # Load configuration using centralized loader (Issue #114)
+    # If centralized config loader is available, use it
+    if declare -f load_system_config >/dev/null 2>&1; then
+        # Config should already be loaded by main process, but ensure it's loaded
+        if [[ -z "${SYSTEM_CONFIG_LOADED:-}" ]]; then
+            load_system_config "$config_file" || log_warn "Failed to load centralized config"
+        fi
         
-        log_debug "Session manager configured from: $config_file"
+        # Get session manager specific config values using centralized functions
+        MAX_RESTARTS=$(get_config "MAX_RESTARTS" "50")
+        SESSION_RESTART_DELAY=$(get_config "SESSION_RESTART_DELAY" "5")
+        HEALTH_CHECK_ENABLED=$(get_config "HEALTH_CHECK_ENABLED" "true")
+        HEALTH_CHECK_INTERVAL=$(get_config "HEALTH_CHECK_INTERVAL" "30")
+        HEALTH_CHECK_TIMEOUT=$(get_config "HEALTH_CHECK_TIMEOUT" "10")
+        AUTO_RECOVERY_ENABLED=$(get_config "AUTO_RECOVERY_ENABLED" "true")
+        RECOVERY_DELAY=$(get_config "RECOVERY_DELAY" "10")
+        MAX_RECOVERY_ATTEMPTS=$(get_config "MAX_RECOVERY_ATTEMPTS" "3")
+        
+        log_debug "Session manager configured using centralized loader"
+    else
+        # Fallback to direct file reading for backward compatibility
+        if [[ -f "$config_file" ]]; then
+            while IFS='=' read -r key value; do
+                [[ "$key" =~ ^[[:space:]]*# ]] && continue
+                [[ -z "$key" ]] && continue
+                
+                # Remove quotes from beginning and end
+                value=${value#\"} 
+                value=${value%\"}
+                value=${value#\'} 
+                value=${value%\'}
+                
+                case "$key" in
+                    MAX_RESTARTS|SESSION_RESTART_DELAY|HEALTH_CHECK_ENABLED|HEALTH_CHECK_INTERVAL|HEALTH_CHECK_TIMEOUT|AUTO_RECOVERY_ENABLED|RECOVERY_DELAY|MAX_RECOVERY_ATTEMPTS)
+                        eval "$key='$value'"
+                        ;;
+                esac
+            done < <(grep -E '^[^#]*=' "$config_file" || true)
+            
+            log_debug "Session manager configured from: $config_file (fallback method)"
+        fi
     fi
     
     # Initialisiere claunch-Integration falls verfügbar
