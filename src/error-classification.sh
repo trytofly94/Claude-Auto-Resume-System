@@ -483,8 +483,7 @@ handle_timeout_recovery() {
     load_task_queue_if_needed
     if declare -f reschedule_task_with_timeout >/dev/null 2>&1; then
         reschedule_task_with_timeout "$task_id" "$extended_timeout"
-            return $?
-        fi
+        return $?
     fi
     
     # Fallback: regular retry
