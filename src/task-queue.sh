@@ -49,6 +49,7 @@ TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-true}"
 # Load core modules in order
 load_queue_modules() {
     local required_modules=(
+        "cache"
         "core"
         "locking"
         "persistence"
@@ -770,10 +771,11 @@ EOF
 # Show version information
 show_version() {
     echo "Claude Auto-Resume Task Queue System"
-    echo "Version: 2.0.0-local-queue"
+    echo "Version: 2.1.0-efficiency-optimization"
     echo "Architecture: Modular (reduced from 4843 to ~1000 lines total)"
-    echo "Features: Core, Persistence, Locking, Interactive, Monitoring, Workflow, Cleanup, LocalQueue"
+    echo "Features: Core, Cache, Persistence, Locking, Interactive, Monitoring, Workflow, Cleanup, LocalQueue"
     echo "Local Queue Support: Issue #91 - Phase 1 Implementation"
+    echo "Performance Optimization: Issue #116 - JSON parsing cache and single-pass operations"
 }
 
 # ===============================================================================

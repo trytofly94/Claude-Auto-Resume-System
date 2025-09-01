@@ -2,10 +2,17 @@
 
 # Claude Auto-Resume - Local Task Queue Module  
 # Project-specific task queue management with .claude-tasks directory
-# Version: 2.0.0-local-queue
-# Issue: #91
+# Version: 2.1.0-efficiency-optimization
+# Issues: #91, #116
 
 set -euo pipefail
+
+# Load cache module for performance optimization
+if [[ -f "${SCRIPT_DIR:-}/queue/cache.sh" ]]; then
+    source "${SCRIPT_DIR}/queue/cache.sh"
+elif [[ -f "${CLAUDE_SRC_DIR:-}/queue/cache.sh" ]]; then
+    source "${CLAUDE_SRC_DIR}/queue/cache.sh"
+fi
 
 # ===============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -376,6 +383,7 @@ local_task_exists() {
 }
 
 # Get local queue statistics
+# Optimized version using cached stats (Issue #116)
 get_local_queue_stats() {
     local queue_file
     local config_file
@@ -384,25 +392,44 @@ get_local_queue_stats() {
     config_file=$(get_local_config_file) || return 1
     
     local project_name=$(jq -r '.project // "unknown"' "$queue_file")
-    local task_count=$(jq '.tasks | length' "$queue_file")
-    local pending_count=$(jq '[.tasks[] | select(.status == "pending")] | length' "$queue_file")
-    local in_progress_count=$(jq '[.tasks[] | select(.status == "in_progress")] | length' "$queue_file")
-    local completed_count=$(jq '[.tasks[] | select(.status == "completed")] | length' "$queue_file")
-    local failed_count=$(jq '[.tasks[] | select(.status == "failed")] | length' "$queue_file")
+    local last_modified=$(jq '.last_modified' "$queue_file")
     
-    cat << EOF
-{
-  "context": "local",
-  "project": "$project_name",
-  "queue_path": "$LOCAL_QUEUE_PATH",
-  "total_tasks": $task_count,
-  "pending": $pending_count,
-  "in_progress": $in_progress_count, 
-  "completed": $completed_count,
-  "failed": $failed_count,
-  "last_modified": $(jq '.last_modified' "$queue_file")
-}
-EOF
+    # Use cached stats if available (single jq call vs 5 separate calls)
+    local stats_data
+    if declare -f get_queue_stats_cached >/dev/null 2>&1; then
+        stats_data=$(get_queue_stats_cached "$queue_file")
+    else
+        # Optimized single-pass operation
+        stats_data=$(jq '
+            .tasks | 
+            group_by(.status) | 
+            map({
+                status: .[0].status,
+                count: length
+            }) |
+            reduce .[] as $item ({}; .[$item.status] = $item.count) |
+            . + {total: (. | add // 0)}
+        ' "$queue_file")
+    fi
+    
+    # Combine project metadata with stats
+    jq -n \
+        --arg context "local" \
+        --arg project "$project_name" \
+        --arg queue_path "$LOCAL_QUEUE_PATH" \
+        --argjson last_modified "$last_modified" \
+        --argjson stats "$stats_data" \
+        '{
+            context: $context,
+            project: $project,
+            queue_path: $queue_path,
+            total_tasks: $stats.total,
+            pending: ($stats.pending // 0),
+            in_progress: ($stats.in_progress // 0),
+            completed: ($stats.completed // 0),
+            failed: ($stats.failed // 0),
+            last_modified: $last_modified
+        }'
 }
 
 # ===============================================================================
