@@ -26,6 +26,9 @@ MAX_RECOVERY_ATTEMPTS="${MAX_RECOVERY_ATTEMPTS:-3}"
 # This prevents issues with sourcing contexts and scope problems
 SESSION_ARRAYS_INITIALIZED="false"
 
+# Module loading guards to prevent redundant sourcing (Issue #111)
+SESSION_MANAGER_LOADED="${SESSION_MANAGER_LOADED:-false}"
+
 # Per-Project Session Management (Issue #89)
 # Additional associative arrays for project-aware session tracking
 PROJECT_SESSIONS_INITIALIZED=false
@@ -33,8 +36,9 @@ PROJECT_SESSIONS_INITIALIZED=false
 # Maximum tracked sessions to prevent memory bloat (Issue #115)
 MAX_TRACKED_SESSIONS="${MAX_TRACKED_SESSIONS:-100}"
 
-# Project ID Cache for efficient lookups (Issue #115)
-declare -gA PROJECT_ID_CACHE
+# Project ID Cache for efficient lookups (Issue #115) 
+declare -gA PROJECT_ID_CACHE 2>/dev/null || true
+declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
 readonly DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
@@ -154,6 +158,11 @@ get_project_id_cached() {
     local cache_key
     cache_key="cache_${working_dir//[\/]/_}"  # Safe cache key
     
+    # Ensure cache is initialized
+    if ! declare -p PROJECT_ID_CACHE >/dev/null 2>&1; then
+        declare -gA PROJECT_ID_CACHE 2>/dev/null || true
+    fi
+    
     # Check cache first - most efficient path
     if [[ -n "${PROJECT_ID_CACHE[$cache_key]:-}" ]]; then
         echo "${PROJECT_ID_CACHE[$cache_key]}"
@@ -174,6 +183,12 @@ get_current_project_context() {
     local working_dir="${1:-$(pwd)}"
     local MAX_CACHE_SIZE=100  # Maximum cache entries to prevent memory bloat
     
+    # Ensure cache is initialized (safety guard)
+    if ! declare -p PROJECT_CONTEXT_CACHE >/dev/null 2>&1; then
+        declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
+        log_debug "Initialized PROJECT_CONTEXT_CACHE in get_current_project_context"
+    fi
+    
     # Check cache first
     if [[ -n "${PROJECT_CONTEXT_CACHE[$working_dir]:-}" ]]; then
         log_debug "Using cached project context for: $working_dir"
@@ -182,11 +197,18 @@ get_current_project_context() {
     fi
     
     # Check cache size and evict oldest entries if needed
-    local cache_size=${#PROJECT_CONTEXT_CACHE[@]}
+    local cache_size=0
+    set +u  # Temporarily disable nounset for array access
+    if declare -p PROJECT_CONTEXT_CACHE >/dev/null 2>&1; then
+        cache_size=${#PROJECT_CONTEXT_CACHE[@]}
+    fi
+    set -u  # Re-enable nounset
+    
     if [[ $cache_size -ge $MAX_CACHE_SIZE ]]; then
         log_debug "Cache size limit reached ($cache_size >= $MAX_CACHE_SIZE), evicting oldest entries"
         # Clear half of the cache (simple eviction strategy)
         local count=0
+        set +u  # Temporarily disable nounset for array iteration
         for key in "${!PROJECT_CONTEXT_CACHE[@]}"; do
             unset PROJECT_CONTEXT_CACHE["$key"]
             ((count++))
@@ -194,6 +216,7 @@ get_current_project_context() {
                 break
             fi
         done
+        set -u  # Re-enable nounset
         log_debug "Evicted $count cache entries"
     fi
     
@@ -235,8 +258,15 @@ get_session_file_path() {
 
 # Optimized array initialization with guards (Issue #115)
 init_session_arrays_once() {
+    # Double-check pattern to prevent race conditions
     if [[ "${SESSION_ARRAYS_INITIALIZED:-false}" == "true" ]]; then
         log_debug "Session arrays already initialized, skipping"
+        return 0
+    fi
+    
+    # Additional safety check for sourcing contexts
+    if [[ "${SESSION_MANAGER_LOADED:-false}" == "true" ]] && [[ "${SESSION_ARRAYS_INITIALIZED:-false}" == "true" ]]; then
+        log_debug "Session manager already fully loaded, skipping array initialization"
         return 0
     fi
     
@@ -271,10 +301,11 @@ init_session_arrays_once() {
     
     # Mark as initialized to prevent re-initialization
     SESSION_ARRAYS_INITIALIZED="true"
-    export SESSION_ARRAYS_INITIALIZED
+    SESSION_MANAGER_LOADED="true"
+    export SESSION_ARRAYS_INITIALIZED SESSION_MANAGER_LOADED
     
     log_debug "Session arrays initialized once (optimization guard active)"
-    log_info "Session arrays initialized successfully"
+    log_info "Session arrays initialized successfully (optimization guards active)"
     return 0
 }
 
@@ -335,10 +366,82 @@ batch_update_session_timestamps() {
     local current_time=$(date +%s)
     local -a session_ids=("$@")
     
-    # Update multiple session timestamps at once
+    # Early return if no sessions to update
+    if [[ ${#session_ids[@]} -eq 0 ]]; then
+        return 0
+    fi
+    
+    # Update multiple session timestamps at once - more efficient loop
     for session_id in "${session_ids[@]}"; do
         [[ -n "$session_id" ]] && SESSION_LAST_SEEN["$session_id"]="$current_time"
     done
+    
+    log_debug "Updated timestamps for ${#session_ids[@]} sessions"
+}
+
+# Efficient session data extraction (Issue #115)
+# This replaces inefficient string parsing with direct array access
+get_session_data_efficient() {
+    local session_id="$1"
+    local -n result_ref="$2"  # nameref for efficient return
+    
+    # Initialize result array
+    result_ref=()  
+    
+    # Try structured data first (most efficient)
+    if [[ -n "${SESSION_PROJECT_NAMES[$session_id]:-}" ]]; then
+        result_ref[0]="${SESSION_PROJECT_NAMES[$session_id]}"
+        result_ref[1]="${SESSION_WORKING_DIRS[$session_id]:-}"
+        result_ref[2]="${SESSION_PROJECT_IDS[$session_id]:-}"
+        return 0
+    fi
+    
+    # Fallback to parsing (backward compatibility)
+    local session_data="${SESSIONS[$session_id]:-}"
+    if [[ -n "$session_data" ]]; then
+        if [[ "$session_data" == *":"*":"* ]]; then
+            # New format: project_name:working_dir:project_id
+            result_ref[0]="${session_data%%:*}"
+            local temp="${session_data#*:}"
+            result_ref[1]="${temp%%:*}"
+            result_ref[2]="${session_data##*:}"
+        else
+            # Legacy format: project_name:working_dir
+            result_ref[0]="${session_data%%:*}"
+            result_ref[1]="${session_data#*:}"
+            result_ref[2]="$(get_current_project_context "${result_ref[1]}")"
+        fi
+        return 0
+    fi
+    
+    return 1
+}
+
+# Batch session state operations (Issue #115)
+batch_update_session_states() {
+    local new_state="$1"
+    shift
+    local -a session_ids=("$@")
+    local current_time=$(date +%s)
+    local updated_count=0
+    
+    # Batch update states for multiple sessions
+    for session_id in "${session_ids[@]}"; do
+        if [[ -n "$session_id" ]] && [[ -n "${SESSIONS[$session_id]:-}" ]]; then
+            local old_state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
+            if [[ "$old_state" != "$new_state" ]]; then
+                SESSION_STATES["$session_id"]="$new_state"
+                SESSION_LAST_SEEN["$session_id"]="$current_time"
+                ((updated_count++))
+            fi
+        fi
+    done
+    
+    if [[ $updated_count -gt 0 ]]; then
+        log_debug "Batch updated $updated_count sessions to state: $new_state"
+    fi
+    
+    return 0
 }
 
 # Memory-efficient session count
@@ -346,16 +449,56 @@ get_session_count() {
     echo "${#SESSIONS[@]}"
 }
 
-# Get session count by state (efficient)
+# Get session count by state (efficient) - optimized with early termination
 get_session_count_by_state() {
     local target_state="$1"
+    local max_count="${2:-0}"  # Optional: stop counting at this limit
     local count=0
     
+    # Early return if no sessions exist
+    if [[ ${#SESSION_STATES[@]} -eq 0 ]]; then
+        echo 0
+        return 0
+    fi
+    
     for session_id in "${!SESSION_STATES[@]}"; do
-        [[ "${SESSION_STATES[$session_id]}" == "$target_state" ]] && ((count++))
+        if [[ "${SESSION_STATES[$session_id]}" == "$target_state" ]]; then
+            ((count++))
+            # Early termination optimization
+            if [[ $max_count -gt 0 ]] && [[ $count -ge $max_count ]]; then
+                break
+            fi
+        fi
     done
     
     echo "$count"
+}
+
+# Efficient multi-state session counting (Issue #115)
+get_session_counts_by_states() {
+    local -a states=("$@")
+    local -A counts
+    
+    # Initialize counts
+    for state in "${states[@]}"; do
+        counts["$state"]=0
+    done
+    
+    # Single pass through all sessions
+    for session_id in "${!SESSION_STATES[@]}"; do
+        local current_state="${SESSION_STATES[$session_id]}"
+        for state in "${states[@]}"; do
+            if [[ "$current_state" == "$state" ]]; then
+                ((counts["$state"]++))
+                break  # Session can only be in one state
+            fi
+        done
+    done
+    
+    # Output results
+    for state in "${states[@]}"; do
+        echo "$state:${counts[$state]}"
+    done
 }
 
 # Ensure arrays are initialized before access (Issue #115 - optimized)
@@ -471,26 +614,16 @@ get_session_info_efficient() {
         return 1
     fi
     
-    # Direct access from structured arrays - no parsing needed!
-    local project_name="${SESSION_PROJECT_NAMES[$session_id]:-}"
-    local working_dir="${SESSION_WORKING_DIRS[$session_id]:-}"
-    local project_id="${SESSION_PROJECT_IDS[$session_id]:-}"
-    
-    # Fallback to parsing if structured data not available (backward compatibility)
-    if [[ -z "$project_name" ]] || [[ -z "$working_dir" ]] || [[ -z "$project_id" ]]; then
-        local session_data="${SESSIONS[$session_id]}"
-        
-        if [[ "$session_data" == *":"*":"* ]]; then
-            project_name="${session_data%%:*}"
-            local temp="${session_data#*:}"
-            working_dir="${temp%%:*}"
-            project_id="${session_data##*:}"
-        else
-            project_name="${session_data%%:*}"
-            working_dir="${session_data#*:}"
-            project_id="$(get_current_project_context "$working_dir")"
-        fi
+    # Use efficient data extraction helper
+    local -a session_data_array
+    if ! get_session_data_efficient "$session_id" session_data_array; then
+        log_error "Failed to extract session data for: $session_id"
+        return 1
     fi
+    
+    local project_name="${session_data_array[0]:-}"
+    local working_dir="${session_data_array[1]:-}"
+    local project_id="${session_data_array[2]:-}"
     
     local state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
     local restart_count="${SESSION_RESTART_COUNTS[$session_id]:-0}"
@@ -551,31 +684,17 @@ list_project_sessions() {
     
     # Batch collect project sessions for efficiency
     for session_id in "${!SESSIONS[@]}"; do
-        # Use structured data first, then fallback to parsing
-        local session_project_id="${SESSION_PROJECT_IDS[$session_id]:-}"
-        
-        if [[ -z "$session_project_id" ]]; then
-            session_project_id="${SESSION_PROJECTS[$session_id]:-}"
-            
-            if [[ -z "$session_project_id" ]]; then
-                # Legacy fallback
-                local session_data="${SESSIONS[$session_id]}"
-                if [[ "$session_data" == *":"*":"* ]]; then
-                    session_project_id="${session_data##*:}"
-                else
-                    local working_dir="${session_data#*:}"
-                    session_project_id="$(get_current_project_context "$working_dir")"
-                fi
-            fi
+        # Use efficient data extraction - no string parsing!
+        local -a session_data_array
+        if ! get_session_data_efficient "$session_id" session_data_array; then
+            continue  # Skip invalid sessions
         fi
         
+        local project_name="${session_data_array[0]:-}"
+        local working_dir="${session_data_array[1]:-}"
+        local session_project_id="${session_data_array[2]:-}"
+        
         if [[ "$session_project_id" == "$target_project_id" ]]; then
-            # Use structured data for efficiency
-            local project_name="${SESSION_PROJECT_NAMES[$session_id]:-}"
-            if [[ -z "$project_name" ]]; then
-                local session_data="${SESSIONS[$session_id]}"
-                project_name="${session_data%%:*}"
-            fi
             
             local state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
             local restart_count="${SESSION_RESTART_COUNTS[$session_id]:-0}"
@@ -615,23 +734,16 @@ list_sessions_by_project() {
         return 0
     fi
     
-    # Collect unique project IDs
+    # Collect unique project IDs using efficient data extraction
     local -A projects_found
     for session_id in "${!SESSIONS[@]}"; do
-        local session_project_id="${SESSION_PROJECTS[$session_id]:-}"
-        
-        # Handle legacy sessions
-        if [[ -z "$session_project_id" ]]; then
-            local session_data="${SESSIONS[$session_id]}"
-            if [[ "$session_data" == *":"*":"* ]]; then
-                session_project_id="${session_data##*:}"
-            else
-                local working_dir="${session_data#*:}"
-                session_project_id="$(get_current_project_context "$working_dir")"
+        local -a session_data_array
+        if get_session_data_efficient "$session_id" session_data_array; then
+            local session_project_id="${session_data_array[2]:-}"
+            if [[ -n "$session_project_id" ]]; then
+                projects_found["$session_project_id"]=1
             fi
         fi
-        
-        projects_found["$session_project_id"]=1
     done
     
     # List sessions for each project
@@ -657,23 +769,15 @@ find_session_by_project() {
         return 0
     fi
     
-    # Search through all sessions (fallback for legacy)
+    # Search through all sessions using efficient data extraction
     for session_id in "${!SESSIONS[@]}"; do
-        local session_project_id="${SESSION_PROJECTS[$session_id]:-}"
-        
-        if [[ -z "$session_project_id" ]]; then
-            local session_data="${SESSIONS[$session_id]}"
-            if [[ "$session_data" == *":"*":"* ]]; then
-                session_project_id="${session_data##*:}"
-            else
-                local working_dir="${session_data#*:}"
-                session_project_id="$(get_current_project_context "$working_dir")"
+        local -a session_data_array
+        if get_session_data_efficient "$session_id" session_data_array; then
+            local session_project_id="${session_data_array[2]:-}"
+            if [[ "$session_project_id" == "$target_project_id" ]]; then
+                echo "$session_id"
+                return 0
             fi
-        fi
-        
-        if [[ "$session_project_id" == "$target_project_id" ]]; then
-            echo "$session_id"
-            return 0
         fi
     done
     
@@ -724,16 +828,14 @@ list_sessions() {
     fi
     
     for session_id in "${!SESSIONS[@]}"; do
-        local session_data="${SESSIONS[$session_id]}"
-        local project_name project_id
-        
-        if [[ "$session_data" == *":"*":"* ]]; then
-            project_name="${session_data%%:*}"
-            project_id="${session_data##*:}"
-        else
-            project_name="${session_data%%:*}"
-            project_id="legacy"
+        # Use efficient data extraction instead of parsing
+        local -a session_data_array
+        if ! get_session_data_efficient "$session_id" session_data_array; then
+            continue  # Skip invalid sessions
         fi
+        
+        local project_name="${session_data_array[0]:-unknown}"
+        local project_id="${session_data_array[2]:-legacy}"
         
         local state="${SESSION_STATES[$session_id]:-$SESSION_STATE_UNKNOWN}"
         local restart_count="${SESSION_RESTART_COUNTS[$session_id]:-0}"
@@ -752,13 +854,21 @@ list_sessions() {
 cleanup_sessions_efficient() {
     local max_sessions=${MAX_TRACKED_SESSIONS:-100}
     local session_count=${#SESSIONS[@]}
+    local force_cleanup="${1:-false}"  # Force cleanup even if under limit
     
-    if [[ $session_count -le $max_sessions ]]; then
+    # Early return if arrays not initialized
+    if [[ "${SESSION_ARRAYS_INITIALIZED:-false}" != "true" ]]; then
+        log_debug "Session arrays not initialized, skipping cleanup"
+        return 0
+    fi
+    
+    # Check if cleanup is needed
+    if [[ $session_count -le $max_sessions ]] && [[ "$force_cleanup" != "true" ]]; then
         log_debug "Session count within limits ($session_count <= $max_sessions), no cleanup needed"
         return 0
     fi
     
-    log_debug "Session limit exceeded ($session_count > $max_sessions), performing cleanup"
+    log_debug "Performing session cleanup (count: $session_count, limit: $max_sessions, forced: $force_cleanup)"
     
     # Collect removal candidates in single pass
     local -a sessions_to_remove
@@ -798,8 +908,185 @@ cleanup_sessions_efficient() {
         ((removed_count++))
     done
     
+    # Additional cleanup: remove orphaned cache entries
+    cleanup_orphaned_cache_entries
+    
+    # Compact arrays if significant cleanup occurred
+    if [[ $removed_count -gt 10 ]] || [[ $removed_count -gt $((session_count / 4)) ]]; then
+        log_debug "Significant cleanup performed, compacting arrays"
+        compact_session_arrays
+    fi
+    
     log_info "Cleaned up $removed_count old sessions (efficient batch operation)"
     return 0
+}
+
+# Remove orphaned cache entries (Issue #115)
+cleanup_orphaned_cache_entries() {
+    local cleaned_cache_entries=0
+    
+    # Clean project context cache for non-existent sessions
+    local -a cache_keys_to_remove
+    for cache_key in "${!PROJECT_CONTEXT_CACHE[@]}"; do
+        local found_session=false
+        for session_id in "${!SESSIONS[@]}"; do
+            local working_dir="${SESSION_WORKING_DIRS[$session_id]:-}"
+            if [[ "$working_dir" == "$cache_key" ]]; then
+                found_session=true
+                break
+            fi
+        done
+        
+        if [[ "$found_session" == "false" ]]; then
+            cache_keys_to_remove+=("$cache_key")
+        fi
+    done
+    
+    # Remove orphaned cache entries
+    for cache_key in "${cache_keys_to_remove[@]}"; do
+        unset "PROJECT_CONTEXT_CACHE[$cache_key]"
+        ((cleaned_cache_entries++))
+    done
+    
+    # Clean project ID cache similarly
+    cache_keys_to_remove=()
+    for cache_key in "${!PROJECT_ID_CACHE[@]}"; do
+        local found_session=false
+        for session_id in "${!SESSIONS[@]}"; do
+            local working_dir="${SESSION_WORKING_DIRS[$session_id]:-}"
+            local normalized_key="cache_${working_dir//[\/]/_}"
+            if [[ "$normalized_key" == "$cache_key" ]]; then
+                found_session=true
+                break
+            fi
+        done
+        
+        if [[ "$found_session" == "false" ]]; then
+            cache_keys_to_remove+=("$cache_key")
+        fi
+    done
+    
+    for cache_key in "${cache_keys_to_remove[@]}"; do
+        unset "PROJECT_ID_CACHE[$cache_key]"
+        ((cleaned_cache_entries++))
+    done
+    
+    if [[ $cleaned_cache_entries -gt 0 ]]; then
+        log_debug "Cleaned up $cleaned_cache_entries orphaned cache entries"
+    fi
+}
+
+# Compact session arrays by removing gaps (Issue #115)
+compact_session_arrays() {
+    # This is mostly a no-op for associative arrays in Bash,
+    # but we can check for consistency and log memory usage
+    local total_arrays=8  # Number of main session arrays
+    local total_entries=0
+    
+    # Count total entries across all arrays
+    total_entries=$((${#SESSIONS[@]} + ${#SESSION_STATES[@]} + ${#SESSION_RESTART_COUNTS[@]} + 
+                    ${#SESSION_RECOVERY_COUNTS[@]} + ${#SESSION_LAST_SEEN[@]} + 
+                    ${#PROJECT_SESSIONS[@]} + ${#SESSION_PROJECTS[@]} + ${#PROJECT_CONTEXTS[@]}))
+    
+    local avg_entries=$((total_entries / total_arrays))
+    log_debug "Array compaction complete - average entries per array: $avg_entries"
+    
+    # Verify array consistency
+    local inconsistencies=0
+    for session_id in "${!SESSIONS[@]}"; do
+        if [[ -z "${SESSION_STATES[$session_id]:-}" ]]; then
+            log_warn "Inconsistency found: session $session_id missing state"
+            ((inconsistencies++))
+        fi
+    done
+    
+    if [[ $inconsistencies -gt 0 ]]; then
+        log_warn "Found $inconsistencies array inconsistencies during compaction"
+    fi
+}
+
+# Advanced cleanup with memory pressure handling (Issue #115)
+cleanup_sessions_with_pressure_handling() {
+    local memory_pressure="${1:-false}"
+    local aggressive_mode="${2:-false}"
+    
+    log_debug "Running cleanup with memory pressure handling (pressure: $memory_pressure, aggressive: $aggressive_mode)"
+    
+    # Under memory pressure, be more aggressive
+    local cleanup_age_stopped=1800   # 30 minutes
+    local cleanup_age_error=900      # 15 minutes
+    local max_sessions=${MAX_TRACKED_SESSIONS:-100}
+    
+    if [[ "$memory_pressure" == "true" ]]; then
+        cleanup_age_stopped=900   # 15 minutes
+        cleanup_age_error=300     # 5 minutes
+        max_sessions=$((max_sessions / 2))  # Reduce limit by half
+        log_debug "Memory pressure mode: reduced cleanup ages and session limit"
+    fi
+    
+    if [[ "$aggressive_mode" == "true" ]]; then
+        cleanup_age_stopped=300   # 5 minutes
+        cleanup_age_error=60      # 1 minute
+        max_sessions=$((max_sessions / 4))  # Reduce limit by 75%
+        log_debug "Aggressive cleanup mode: very short cleanup ages"
+    fi
+    
+    # Temporarily override the limit
+    local original_limit=${MAX_TRACKED_SESSIONS:-100}
+    MAX_TRACKED_SESSIONS=$max_sessions
+    
+    # Run efficient cleanup
+    cleanup_sessions_efficient true
+    
+    # Restore original limit
+    MAX_TRACKED_SESSIONS=$original_limit
+    
+    # Additional aggressive cleanup if needed
+    if [[ "$aggressive_mode" == "true" ]]; then
+        # Remove sessions that haven't been seen recently, regardless of state
+        local current_time=$(date +%s)
+        local -a sessions_to_remove
+        
+        for session_id in "${!SESSIONS[@]}"; do
+            local last_seen="${SESSION_LAST_SEEN[$session_id]:-0}"
+            local age=$((current_time - last_seen))
+            
+            if [[ $age -gt 600 ]]; then  # 10 minutes for any session
+                sessions_to_remove+=("$session_id")
+            fi
+        done
+        
+        # Remove sessions found in aggressive cleanup
+        local aggressive_removed=0
+        for session_id in "${sessions_to_remove[@]}"; do
+            remove_session_completely "$session_id"
+            ((aggressive_removed++))
+        done
+        
+        if [[ $aggressive_removed -gt 0 ]]; then
+            log_info "Aggressive cleanup removed $aggressive_removed additional sessions"
+        fi
+    fi
+}
+
+# Complete session removal helper (Issue #115)
+remove_session_completely() {
+    local session_id="$1"
+    
+    # Remove from all arrays efficiently
+    unset "SESSIONS[$session_id]" "SESSION_STATES[$session_id]" 
+    unset "SESSION_RESTART_COUNTS[$session_id]" "SESSION_RECOVERY_COUNTS[$session_id]"
+    unset "SESSION_LAST_SEEN[$session_id]"
+    
+    # Remove structured data
+    unset "SESSION_PROJECT_NAMES[$session_id]" "SESSION_WORKING_DIRS[$session_id]"
+    unset "SESSION_PROJECT_IDS[$session_id]"
+    
+    # Clean project mappings
+    local project_id="${SESSION_PROJECTS[$session_id]:-}"
+    if [[ -n "$project_id" ]]; then
+        unset "SESSION_PROJECTS[$session_id]" "PROJECT_SESSIONS[$project_id]"
+    fi
 }
 
 # Backward compatibility wrapper
@@ -1405,22 +1692,16 @@ stop_managed_session() {
         return 1
     fi
     
-    # Extract project information from session data
-    local session_data="${SESSIONS[$session_id]}"
-    local project_name project_id working_dir
-    
-    if [[ "$session_data" == *":"*":"* ]]; then
-        # New format: project_name:working_dir:project_id
-        project_name="${session_data%%:*}"
-        local temp="${session_data#*:}"
-        working_dir="${temp%%:*}"
-        project_id="${session_data##*:}"
-    else
-        # Legacy format: project_name:working_dir
-        project_name="${session_data%%:*}"
-        working_dir="${session_data#*:}"
-        project_id="$(get_current_project_context "$working_dir")"
+    # Extract project information using efficient data extraction
+    local -a session_data_array
+    if ! get_session_data_efficient "$session_id" session_data_array; then
+        log_error "Failed to extract session data for: $session_id"
+        return 1
     fi
+    
+    local project_name="${session_data_array[0]:-}"
+    local working_dir="${session_data_array[1]:-}"
+    local project_id="${session_data_array[2]:-}"
     
     log_debug "Stopping session for project: $project_name (ID: $project_id)"
     
