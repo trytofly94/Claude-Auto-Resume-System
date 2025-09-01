@@ -73,9 +73,17 @@ remove_local_task() {
     
     queue_file=$(get_local_queue_file) || return 1
     
-    if ! local_task_exists "$task_id"; then
-        log_error "Task $task_id not found in local queue"
-        return 1
+    # Use cached task existence check if available
+    if declare -f task_exists_cached >/dev/null 2>&1; then
+        if ! task_exists_cached "$queue_file" "$task_id"; then
+            log_error "Task $task_id not found in local queue"
+            return 1
+        fi
+    else
+        if ! local_task_exists "$task_id"; then
+            log_error "Task $task_id not found in local queue"
+            return 1
+        fi
     fi
     
     log_debug "Removing task from local queue: $task_id"
@@ -115,9 +123,17 @@ update_local_task() {
     
     queue_file=$(get_local_queue_file) || return 1
     
-    if ! local_task_exists "$task_id"; then
-        log_error "Task $task_id not found in local queue"
-        return 1
+    # Use cached task existence check if available
+    if declare -f task_exists_cached >/dev/null 2>&1; then
+        if ! task_exists_cached "$queue_file" "$task_id"; then
+            log_error "Task $task_id not found in local queue"
+            return 1
+        fi
+    else
+        if ! local_task_exists "$task_id"; then
+            log_error "Task $task_id not found in local queue"
+            return 1
+        fi
     fi
     
     log_debug "Updating task in local queue: $task_id"
