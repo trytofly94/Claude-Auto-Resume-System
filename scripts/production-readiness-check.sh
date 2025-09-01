@@ -255,11 +255,11 @@ validate_security_configuration() {
         fi
     fi
     
-    # Check for hardcoded secrets in source code
-    local source_files
-    source_files=$(find "$PROJECT_ROOT/src" -name "*.sh" -type f 2>/dev/null || true)
-    if [[ -n "$source_files" ]]; then
-        if echo "$source_files" | xargs grep -l "ghp_\|password\s*=\|secret\s*=" 2>/dev/null | head -1 >/dev/null; then
+    # Check for hardcoded secrets in source code - optimized for Issue #110
+    local source_files_array
+    mapfile -t source_files_array < <(find "$PROJECT_ROOT/src" -name "*.sh" -type f 2>/dev/null || true)
+    if [[ ${#source_files_array[@]} -gt 0 ]]; then
+        if printf '%s\n' "${source_files_array[@]}" | xargs grep -l "ghp_\|password\s*=\|secret\s*=" 2>/dev/null | head -1 >/dev/null; then
             issues+=("Potential hardcoded secrets found in source code")
         fi
     fi
@@ -497,9 +497,10 @@ validate_test_coverage() {
         if [[ ! -d "$test_path" ]]; then
             missing_test_dirs+=("$test_dir")
         else
-            local test_count
-            test_count=$(find "$test_path" -name "*.bats" -type f 2>/dev/null | wc -l)
-            if [[ $test_count -eq 0 ]]; then
+            # Use array to count test files efficiently (Issue #110 optimization)
+            local test_files_array
+            mapfile -t test_files_array < <(find "$test_path" -name "*.bats" -type f 2>/dev/null || true)
+            if [[ ${#test_files_array[@]} -eq 0 ]]; then
                 empty_test_dirs+=("$test_dir")
             fi
         fi
@@ -531,9 +532,10 @@ validate_test_execution() {
         return 0
     fi
     
-    # Try to run a basic test
-    local basic_test
-    basic_test=$(find "$PROJECT_ROOT/tests" -name "test-logging.bats" -o -name "test-*.bats" | head -1)
+    # Try to run a basic test - optimized for Issue #110
+    local test_files_array basic_test
+    mapfile -t test_files_array < <(find "$PROJECT_ROOT/tests" -name "test-logging.bats" -o -name "test-*.bats" 2>/dev/null | head -1)
+    basic_test="${test_files_array[0]:-}"
     
     if [[ -n "$basic_test" ]]; then
         if ! timeout 60 bats "$basic_test" >/dev/null 2>&1; then

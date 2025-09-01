@@ -237,6 +237,27 @@ validate_test_environment() {
 }
 
 # ===============================================================================
+# OPTIMIZED FILE DISCOVERY
+# ===============================================================================
+
+# Global array to cache shell files (performance optimization for Issue #110)
+CACHED_SHELL_FILES=()
+SHELL_FILES_CACHED=false
+
+# Discover shell files once and cache for reuse
+discover_shell_files() {
+    if [[ "$SHELL_FILES_CACHED" == "true" ]]; then
+        return 0  # Already cached
+    fi
+    
+    log_debug "Discovering shell files (caching for performance)"
+    mapfile -t CACHED_SHELL_FILES < <(find "$PROJECT_ROOT" -name "*.sh" -type f 2>/dev/null | grep -v ".git" | sort)
+    SHELL_FILES_CACHED=true
+    
+    log_debug "Cached ${#CACHED_SHELL_FILES[@]} shell files for reuse"
+}
+
+# ===============================================================================
 # TEST-AUSFÜHRUNG
 # ===============================================================================
 
@@ -247,18 +268,17 @@ run_syntax_tests() {
     local syntax_errors=0
     local checked_files=0
     
-    # Finde alle Shell-Skripte
-    local shell_files
-    shell_files=$(find "$PROJECT_ROOT" -name "*.sh" -type f 2>/dev/null | grep -v ".git" | sort)
+    # Use cached shell files for performance (Issue #110 optimization)
+    discover_shell_files
     
-    if [[ -z "$shell_files" ]]; then
+    if [[ ${#CACHED_SHELL_FILES[@]} -eq 0 ]]; then
         log_warn "No shell files found for syntax testing"
         return 0
     fi
     
     log_info "Checking syntax of shell scripts..."
     
-    while IFS= read -r file; do
+    for file in "${CACHED_SHELL_FILES[@]}"; do
         if [[ "$VERBOSE_OUTPUT" == "true" ]]; then
             log_debug "Checking: $file"
         fi
@@ -274,7 +294,7 @@ run_syntax_tests() {
                 return 1
             fi
         fi
-    done <<< "$shell_files"
+    done
     
     if [[ $syntax_errors -eq 0 ]]; then
         log_success "All $checked_files shell scripts have valid syntax"
@@ -606,10 +626,10 @@ run_lint_tests() {
     if has_command shellcheck; then
         log_info "Running ShellCheck..."
         
-        local shell_files
-        shell_files=$(find "$PROJECT_ROOT" -name "*.sh" -type f 2>/dev/null | grep -v ".git" | sort)
+        # Use cached shell files for performance (Issue #110 optimization)
+        discover_shell_files
         
-        if [[ -n "$shell_files" ]]; then
+        if [[ ${#CACHED_SHELL_FILES[@]} -gt 0 ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
                 log_info "[DRY RUN] Would run ShellCheck on shell files"
             else
@@ -619,7 +639,7 @@ run_lint_tests() {
                     shellcheck_options+=("--format=gcc")
                 fi
                 
-                while IFS= read -r file; do
+                for file in "${CACHED_SHELL_FILES[@]}"; do
                     if [[ "$VERBOSE_OUTPUT" == "true" ]]; then
                         log_debug "ShellCheck: $file"
                     fi
@@ -632,7 +652,7 @@ run_lint_tests() {
                             return 1
                         fi
                     fi
-                done <<< "$shell_files"
+                done
             fi
         fi
     else
@@ -643,11 +663,11 @@ run_lint_tests() {
     if has_command shfmt; then
         log_info "Running shfmt format check..."
         
-        local shell_files
-        shell_files=$(find "$PROJECT_ROOT" -name "*.sh" -type f 2>/dev/null | grep -v ".git" | sort)
+        # Use cached shell files for performance (Issue #110 optimization)
+        discover_shell_files
         
-        if [[ -n "$shell_files" && "$DRY_RUN" != "true" ]]; then
-            while IFS= read -r file; do
+        if [[ ${#CACHED_SHELL_FILES[@]} -gt 0 && "$DRY_RUN" != "true" ]]; then
+            for file in "${CACHED_SHELL_FILES[@]}"; do
                 if [[ "$VERBOSE_OUTPUT" == "true" ]]; then
                     log_debug "Format check: $file"
                 fi
@@ -656,7 +676,7 @@ run_lint_tests() {
                     log_warn "File not properly formatted: $file"
                     ((lint_issues++))
                 fi
-            done <<< "$shell_files"
+            done
         fi
     else
         log_debug "shfmt not available - skipping format checks"

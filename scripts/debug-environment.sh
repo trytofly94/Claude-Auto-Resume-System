@@ -113,7 +113,9 @@ print_header "Project Structure"
 for dir in src scripts tests logs queue; do
     if [[ -d "$dir" ]]; then
         print_success "$dir/ directory exists"
-        echo -e "    Files: $(find "$dir" -type f | wc -l)"
+        # Use array to count files without subprocess overhead
+        mapfile -t dir_files < <(find "$dir" -type f 2>/dev/null || true)
+        echo -e "    Files: ${#dir_files[@]}"
     else
         print_error "$dir/ directory missing"
     fi
@@ -144,7 +146,9 @@ if [[ -f "src/setup-wizard.sh" ]]; then
     
     # Check modular architecture
     if [[ -d "src/wizard" ]]; then
-        module_count=$(find src/wizard -name "*.sh" | wc -l)
+        # Use array to avoid subprocess overhead
+        mapfile -t wizard_modules < <(find src/wizard -name "*.sh" -type f 2>/dev/null)
+        module_count=${#wizard_modules[@]}
         print_success "Modular architecture available ($module_count modules)"
         for module in src/wizard/*.sh; do
             if [[ -f "$module" ]]; then
@@ -168,9 +172,11 @@ print_header "Testing Environment"
 if [[ -f "scripts/run-tests.sh" ]]; then
     print_success "Test runner found"
     
-    # Check test structure
-    unit_tests=$(find tests/unit -name "*.bats" 2>/dev/null | wc -l || echo 0)
-    integration_tests=$(find tests/integration -name "*.bats" 2>/dev/null | wc -l || echo 0)
+    # Check test structure - use arrays to avoid multiple subprocess calls
+    mapfile -t unit_test_files < <(find tests/unit -name "*.bats" -type f 2>/dev/null || true)
+    mapfile -t integration_test_files < <(find tests/integration -name "*.bats" -type f 2>/dev/null || true)
+    unit_tests=${#unit_test_files[@]}
+    integration_tests=${#integration_test_files[@]}
     
     echo -e "    Unit tests: $unit_tests"
     echo -e "    Integration tests: $integration_tests"
