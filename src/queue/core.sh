@@ -44,6 +44,12 @@ fi
 if ! declare -p TASK_PRIORITIES &>/dev/null; then
     declare -gA TASK_PRIORITIES=()
 fi
+if ! declare -p TASK_COMPLETION_MARKERS &>/dev/null; then
+    declare -gA TASK_COMPLETION_MARKERS=()
+fi
+if ! declare -p TASK_COMPLETION_PATTERNS &>/dev/null; then
+    declare -gA TASK_COMPLETION_PATTERNS=()
+fi
 
 # ===============================================================================
 # DYNAMIC REUSABLE FUNCTIONS
@@ -197,6 +203,22 @@ add_task() {
     TASK_TIMESTAMPS["$task_id"]=$(date +%s)
     TASK_PRIORITIES["$task_id"]=$(echo "$task_data" | jq -r '.priority // "normal"')
     
+    # Handle completion markers for smart completion detection
+    local completion_marker
+    local completion_patterns
+    completion_marker=$(echo "$task_data" | jq -r '.completion_marker // empty')
+    completion_patterns=$(echo "$task_data" | jq -r '.completion_patterns[]? // empty' | tr '\n' '|' | sed 's/|$//')
+    
+    if [[ -n "$completion_marker" ]]; then
+        TASK_COMPLETION_MARKERS["$task_id"]="$completion_marker"
+        log_debug "Set completion marker for task $task_id: $completion_marker"
+    fi
+    
+    if [[ -n "$completion_patterns" ]]; then
+        TASK_COMPLETION_PATTERNS["$task_id"]="$completion_patterns"
+        log_debug "Set completion patterns for task $task_id: $completion_patterns"
+    fi
+    
     log_info "Added task: $task_id"
     log_debug "Global state now has ${#TASK_STATES[@]} tasks in TASK_STATES and ${#TASK_METADATA[@]} in TASK_METADATA"
     return 0
@@ -219,6 +241,8 @@ remove_task() {
     unset TASK_RETRY_COUNTS["$task_id"]
     unset TASK_TIMESTAMPS["$task_id"]
     unset TASK_PRIORITIES["$task_id"]
+    unset TASK_COMPLETION_MARKERS["$task_id"]
+    unset TASK_COMPLETION_PATTERNS["$task_id"]
     
     log_info "Removed task: $task_id"
     return 0
