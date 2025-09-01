@@ -74,7 +74,13 @@ fi
 print_header "Initial State Check"
 if [[ -d "src/wizard" ]]; then
     print_success "Modular architecture available"
-    echo -e "    Modules found: $(find src/wizard -name "*.sh" | wc -l)"
+    # Count wizard modules efficiently using array
+    wizard_modules=()
+    if mapfile -t wizard_modules < <(find src/wizard -name "*.sh" 2>/dev/null); then
+        echo -e "    Modules found: ${#wizard_modules[@]}"
+    else
+        echo -e "    Modules found: 0 (discovery failed or directory missing)"
+    fi
     for module in src/wizard/*.sh; do
         if [[ -f "$module" ]]; then
             module_name=$(basename "$module")

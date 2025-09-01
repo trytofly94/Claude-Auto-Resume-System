@@ -113,7 +113,13 @@ print_header "Project Structure"
 for dir in src scripts tests logs queue; do
     if [[ -d "$dir" ]]; then
         print_success "$dir/ directory exists"
-        echo -e "    Files: $(find "$dir" -type f | wc -l)"
+        # Use array to count files without subprocess overhead
+        if ! mapfile -t dir_files < <(find "$dir" -type f 2>&1); then
+            local find_error="$?"
+            print_warning "File discovery failed in $dir: exit code $find_error"
+            dir_files=()  # Initialize empty array on failure
+        fi
+        echo -e "    Files: ${#dir_files[@]}"
     else
         print_error "$dir/ directory missing"
     fi
@@ -144,7 +150,13 @@ if [[ -f "src/setup-wizard.sh" ]]; then
     
     # Check modular architecture
     if [[ -d "src/wizard" ]]; then
-        module_count=$(find src/wizard -name "*.sh" | wc -l)
+        # Use array to avoid subprocess overhead
+        if ! mapfile -t wizard_modules < <(find src/wizard -name "*.sh" -type f 2>&1); then
+            local find_error="$?"
+            print_warning "Wizard module discovery failed: exit code $find_error"
+            wizard_modules=()  # Initialize empty array on failure
+        fi
+        module_count=${#wizard_modules[@]}
         print_success "Modular architecture available ($module_count modules)"
         for module in src/wizard/*.sh; do
             if [[ -f "$module" ]]; then
@@ -168,9 +180,19 @@ print_header "Testing Environment"
 if [[ -f "scripts/run-tests.sh" ]]; then
     print_success "Test runner found"
     
-    # Check test structure
-    unit_tests=$(find tests/unit -name "*.bats" 2>/dev/null | wc -l || echo 0)
-    integration_tests=$(find tests/integration -name "*.bats" 2>/dev/null | wc -l || echo 0)
+    # Check test structure - use arrays to avoid multiple subprocess calls
+    # Discover test files with robust error handling
+    if ! mapfile -t unit_test_files < <(find tests/unit -name "*.bats" -type f 2>&1); then
+        print_warning "Unit test discovery failed - directory may not exist"
+        unit_test_files=()
+    fi
+    
+    if ! mapfile -t integration_test_files < <(find tests/integration -name "*.bats" -type f 2>&1); then
+        print_warning "Integration test discovery failed - directory may not exist"  
+        integration_test_files=()
+    fi
+    unit_tests=${#unit_test_files[@]}
+    integration_tests=${#integration_test_files[@]}
     
     echo -e "    Unit tests: $unit_tests"
     echo -e "    Integration tests: $integration_tests"
