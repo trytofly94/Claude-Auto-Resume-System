@@ -49,6 +49,24 @@ load_queue_modules() {
         fi
     done
     
+    # Load local queue modules (Issue #91)
+    local local_modules=(
+        "$SCRIPT_DIR/local-queue.sh"
+        "$SCRIPT_DIR/queue/local-operations.sh"
+    )
+    
+    for module in "${local_modules[@]}"; do
+        if [[ -f "$module" ]]; then
+            source "$module" || {
+                log_error "Failed to load local queue module: $(basename "$module")"
+                return 1
+            }
+            log_debug "Loaded local queue module: $(basename "$module")"
+        else
+            log_warn "Local queue module not found: $(basename "$module")"
+        fi
+    done
+    
     log_info "All queue modules loaded successfully"
 }
 
@@ -165,6 +183,17 @@ main() {
             cmd_validate_queue "$@"
             ;;
         
+        # Local queue operations (Issue #91)
+        "init-local-queue")
+            cmd_init_local_queue "$@"
+            ;;
+        "show-context")
+            cmd_show_context "$@"
+            ;;
+        "migrate-to-local")
+            cmd_migrate_to_local "$@"
+            ;;
+        
         # Help and information
         "help"|"-h"|"--help")
             show_help
@@ -185,7 +214,7 @@ main() {
 # COMMAND IMPLEMENTATIONS
 # ===============================================================================
 
-# Add task command
+# Add task command (context-aware for local queues)
 cmd_add_task() {
     local task_json="${1:-}"
     
@@ -195,16 +224,26 @@ cmd_add_task() {
         return 1
     fi
     
-    if add_task "$task_json"; then
-        echo "Task added successfully"
-        save_queue_state false
+    # Use local queue if active, otherwise global
+    if is_local_queue_active; then
+        if add_local_task "$task_json"; then
+            echo "Task added to local queue successfully"
+        else
+            echo "Failed to add task to local queue" >&2
+            return 1
+        fi
     else
-        echo "Failed to add task" >&2
-        return 1
+        if add_task "$task_json"; then
+            echo "Task added to global queue successfully"
+            save_queue_state false
+        else
+            echo "Failed to add task to global queue" >&2
+            return 1
+        fi
     fi
 }
 
-# Remove task command
+# Remove task command (context-aware for local queues)
 cmd_remove_task() {
     local task_id="${1:-}"
     
@@ -213,12 +252,22 @@ cmd_remove_task() {
         return 1
     fi
     
-    if remove_task "$task_id"; then
-        echo "Task removed: $task_id"
-        save_queue_state false
+    # Use local queue if active, otherwise global
+    if is_local_queue_active; then
+        if remove_local_task "$task_id"; then
+            echo "Task removed from local queue: $task_id"
+        else
+            echo "Failed to remove task from local queue: $task_id" >&2
+            return 1
+        fi
     else
-        echo "Failed to remove task: $task_id" >&2
-        return 1
+        if remove_task "$task_id"; then
+            echo "Task removed from global queue: $task_id"
+            save_queue_state false
+        else
+            echo "Failed to remove task from global queue: $task_id" >&2
+            return 1
+        fi
     fi
 }
 
@@ -515,6 +564,103 @@ cmd_validate_queue() {
 }
 
 # ===============================================================================
+# LOCAL QUEUE COMMAND IMPLEMENTATIONS (Issue #91)
+# ===============================================================================
+
+# Initialize local queue command
+cmd_init_local_queue() {
+    local project_name="${1:-$(basename "$PWD")}"
+    local track_in_git="${2:-false}"
+    
+    # Parse additional flags
+    local force_flag="false"
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            "--force")
+                force_flag="true"
+                ;;
+            "--git"|"--track-git")
+                track_in_git="true"
+                ;;
+        esac
+    done
+    
+    if init_local_queue "$project_name" "$track_in_git"; then
+        echo "Local queue initialized successfully"
+        echo "Project: $project_name"
+        echo "Location: $PWD/.claude-tasks"
+        echo "Track in git: $track_in_git"
+        
+        # Show initial status
+        cmd_show_context
+    else
+        echo "Failed to initialize local queue" >&2
+        return 1
+    fi
+}
+
+# Show current queue context command
+cmd_show_context() {
+    local context=$(get_queue_context)
+    
+    echo "Current queue context: $context"
+    
+    if is_local_queue_active; then
+        echo "Local queue details:"
+        get_local_queue_stats | jq .
+    else
+        echo "Using global queue"
+        get_queue_stats | jq .
+    fi
+}
+
+# Migrate to local queue command
+cmd_migrate_to_local() {
+    local project_name="${1:-$(basename "$PWD")}"
+    local copy_mode="${2:-move}"  # move or copy
+    
+    echo "Migration to local queue not implemented yet in Phase 1"
+    echo "This will be implemented in Phase 2 of the local queue rollout"
+    echo ""
+    echo "For now, use: $0 init-local-queue \"$project_name\""
+    echo "Then manually recreate your tasks in the new local queue"
+    
+    return 1
+}
+
+# Enhanced status command with local queue support
+cmd_show_status() {
+    if is_local_queue_active; then
+        echo "=== LOCAL QUEUE STATUS ==="
+        get_local_queue_stats | jq .
+    else
+        echo "=== GLOBAL QUEUE STATUS ==="
+        get_queue_stats | jq .
+    fi
+}
+
+# Enhanced list command with local queue support  
+cmd_list_tasks() {
+    local status_filter="${1:-all}"
+    local format="${2:-json}"
+    
+    if is_local_queue_active; then
+        echo "=== LOCAL TASKS ($LOCAL_PROJECT_NAME) ==="
+        local queue_file=$(get_local_queue_file)
+        
+        if [[ "$status_filter" == "all" ]]; then
+            jq '.tasks' "$queue_file"
+        else
+            jq --arg status "$status_filter" '[.tasks[] | select(.status == $status)]' "$queue_file"
+        fi
+    else
+        echo "=== GLOBAL TASKS ==="
+        list_tasks "$status_filter" "$format"
+    fi
+}
+
+# ===============================================================================
 # HELP AND VERSION
 # ===============================================================================
 
@@ -563,6 +709,11 @@ SYSTEM:
     load                               Load queue state
     validate                           Validate queue integrity
 
+LOCAL QUEUE (Issue #91):
+    init-local-queue [name] [--git]     Initialize .claude-tasks/ in current directory
+    show-context                        Show current queue context (local/global)
+    migrate-to-local [name]             Migrate global tasks to local queue (Phase 2)
+
 HELP:
     help                               Show this help
     version                            Show version information
@@ -575,6 +726,12 @@ EXAMPLES:
     task-queue.sh interactive
     task-queue.sh monitor 60 10
     task-queue.sh cleanup full
+    
+    # Local queue examples (Issue #91)
+    task-queue.sh init-local-queue "my-project"     # Initialize local queue
+    task-queue.sh init-local-queue --git           # Initialize with git tracking
+    task-queue.sh show-context                      # Check current context
+    task-queue.sh list                             # List tasks (auto-detects local/global)
 
 EOF
 }
@@ -582,9 +739,10 @@ EOF
 # Show version information
 show_version() {
     echo "Claude Auto-Resume Task Queue System"
-    echo "Version: 2.0.0-refactored"
+    echo "Version: 2.0.0-local-queue"
     echo "Architecture: Modular (reduced from 4843 to ~1000 lines total)"
-    echo "Features: Core, Persistence, Locking, Interactive, Monitoring, Workflow, Cleanup"
+    echo "Features: Core, Persistence, Locking, Interactive, Monitoring, Workflow, Cleanup, LocalQueue"
+    echo "Local Queue Support: Issue #91 - Phase 1 Implementation"
 }
 
 # ===============================================================================

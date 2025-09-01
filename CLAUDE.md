@@ -126,19 +126,44 @@ make pre-commit                            # Pre-commit validation
 make dev-cycle                             # Full development cycle
 ```
 
-### Task Queue Backup Management
+### Task Queue Management
 ```bash
-# View current backup files
-ls -la queue/backups/                      # List all backup files
-find queue/backups/ -name "*.json" | wc -l # Count backup files
+# Global Queue Operations
+ls -la queue/backups/                      # List global backup files
+find queue/backups/ -name "*.json" | wc -l # Count global backup files
 
-# Manual backup cleanup (if needed)
+# Manual backup cleanup (if needed)  
 source src/task-queue.sh && cleanup_old_backups  # Clean backups older than retention period
 cleanup_old_backups 7                      # Clean backups older than 7 days
 
 # Backup file structure
 # backup-YYYYMMDD-HHMMSS.json              # Standard automatic backups
 # backup-before-clear-YYYYMMDD-HHMMSS.json # Pre-clear operation backups
+```
+
+### Local Task Queues (NEU in v2.0.0 - Issue #91)
+```bash
+# Local Queue Initialization
+./src/task-queue.sh init-local-queue "project-name"        # Initialize local queue
+./src/task-queue.sh init-local-queue "project-name" --git  # Initialize with git tracking
+
+# Queue Context Management
+./src/task-queue.sh show-context            # Display current queue context (local/global)
+./src/task-queue.sh list                    # List tasks (auto-detects local/global)
+./src/task-queue.sh status                  # Show status (auto-detects local/global)
+
+# Explicit Context Control  
+./src/task-queue.sh add-custom "Task" --local    # Force local queue
+./src/task-queue.sh add-custom "Task" --global   # Force global queue
+
+# Local Queue Structure
+ls -la .claude-tasks/                       # View local queue directory
+cat .claude-tasks/queue.json | jq .         # View local tasks
+cat .claude-tasks/config.json | jq .        # View local configuration
+ls -la .claude-tasks/backups/               # View local backups
+
+# Migration (planned for Phase 2)
+./src/task-queue.sh migrate-to-local "project"   # Migrate global to local (not yet implemented)
 ```
 
 ## 5. Konfiguration
