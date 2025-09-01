@@ -286,51 +286,120 @@ check_tmux_availability() {
 # PROJEKT- UND SESSION-MANAGEMENT
 # ===============================================================================
 
-# Erkenne aktuelles Projekt
+# ===============================================================================
+# PROJECT DETECTION AND CONTEXT MANAGEMENT (Issue #89)
+# ===============================================================================
+
+# Erkenne aktuelles Projekt mit Enhanced Project Context
 detect_project() {
     local working_dir="${1:-$(pwd)}"
     
     log_debug "Detecting project from directory: $working_dir"
     
-    # Projekt-Name basierend auf Verzeichnisname
-    PROJECT_NAME=$(basename "$working_dir")
+    # Generate unique project identifier using session-manager function
+    if declare -f get_current_project_context >/dev/null 2>&1; then
+        PROJECT_ID=$(get_current_project_context "$working_dir")
+        log_debug "Generated project ID: $PROJECT_ID"
+    else
+        # Fallback if session-manager not available
+        log_warn "session-manager functions not available, using basic project detection"
+        PROJECT_ID=$(basename "$working_dir" | sed 's/[^a-zA-Z0-9-]//g')-$(date +%s | cut -c-6)
+    fi
     
-    # Bereinige Projekt-Namen für tmux-Session-Kompatibilität
+    # Backward compatible project name (for legacy code)
+    PROJECT_NAME=$(basename "$working_dir")
     PROJECT_NAME=${PROJECT_NAME//[^a-zA-Z0-9_-]/_}
     
-    log_info "Detected project: $PROJECT_NAME"
+    log_info "Detected project: $PROJECT_NAME (ID: $PROJECT_ID)"
     
-    # Erstelle tmux-Session-Name
-    TMUX_SESSION_NAME="${TMUX_SESSION_PREFIX}-${PROJECT_NAME}"
+    # Create project-specific tmux session name
+    TMUX_SESSION_NAME="${TMUX_SESSION_PREFIX}-${PROJECT_ID}"
     
-    log_debug "tmux session name: $TMUX_SESSION_NAME"
+    log_debug "Project-aware tmux session name: $TMUX_SESSION_NAME"
 }
 
-# Erkenne bestehende Session
+# Store project-specific session information
+store_project_session_info() {
+    local working_dir="${1:-$(pwd)}"
+    
+    # Ensure we have project context
+    if [[ -z "${PROJECT_ID:-}" ]]; then
+        log_warn "No project ID available for storing session info"
+        return 1
+    fi
+    
+    local session_file
+    if declare -f get_session_file_path >/dev/null 2>&1; then
+        session_file="$(get_session_file_path "$PROJECT_ID")"
+    else
+        session_file="$HOME/.claude_session_${PROJECT_ID}"
+    fi
+    
+    # Create session metadata file
+    local metadata_file="${session_file}.metadata"
+    
+    cat > "$metadata_file" <<EOF
+{
+  "project_id": "$PROJECT_ID",
+  "project_name": "$PROJECT_NAME",
+  "working_dir": "$working_dir",
+  "tmux_session_name": "$TMUX_SESSION_NAME",
+  "claunch_mode": "$CLAUNCH_MODE",
+  "created": "$(date -Iseconds)",
+  "created_timestamp": $(date +%s)
+}
+EOF
+    
+    log_debug "Stored project session metadata: $metadata_file"
+    return 0
+}
+
+# Erkenne bestehende Session (Project-aware - Issue #89)
 detect_existing_session() {
+    local working_dir="${1:-$(pwd)}"
+    
     log_debug "Detecting existing claunch session for project"
     
-    # Session-Datei-Pfad
-    local session_file="$HOME/.claude_session_${PROJECT_NAME}"
+    # Ensure project context is established
+    if [[ -z "${PROJECT_ID:-}" ]]; then
+        detect_project "$working_dir"
+    fi
+    
+    # Project-specific session file path
+    local session_file
+    if declare -f get_session_file_path >/dev/null 2>&1; then
+        session_file="$(get_session_file_path "$PROJECT_ID")"
+    else
+        # Fallback to project-based naming
+        session_file="$HOME/.claude_session_${PROJECT_ID}"
+    fi
+    
+    log_debug "Checking for session file: $session_file"
     
     if [[ -f "$session_file" ]]; then
-        SESSION_ID=$(cat "$session_file")
-        log_info "Found existing session ID: $SESSION_ID"
+        SESSION_ID=$(cat "$session_file" 2>/dev/null)
         
-        # Prüfe ob tmux-Session existiert (im tmux-Modus)
-        if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
-            if tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
-                log_info "Existing tmux session found: $TMUX_SESSION_NAME"
-                return 0
-            else
-                log_warn "Session file exists but tmux session not found"
-                return 1
+        if [[ -n "$SESSION_ID" ]]; then
+            log_info "Found existing session ID: $SESSION_ID (project: $PROJECT_ID)"
+            
+            # Prüfe ob tmux-Session existiert (im tmux-Modus)
+            if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
+                if tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
+                    log_info "Existing project tmux session found: $TMUX_SESSION_NAME"
+                    return 0
+                else
+                    log_warn "Session file exists but tmux session not found for project: $PROJECT_ID"
+                    return 1
+                fi
             fi
+            
+            return 0
+        else
+            log_warn "Session file exists but is empty for project: $PROJECT_ID"
+            return 1
         fi
-        
-        return 0
     else
-        log_debug "No existing session file found"
+        log_debug "No existing session file found for project: $PROJECT_ID"
         return 1
     fi
 }
@@ -339,24 +408,42 @@ detect_existing_session() {
 # CLAUNCH-WRAPPER-FUNKTIONEN
 # ===============================================================================
 
-# Starte neue claunch-Session
+# Starte neue claunch-Session (Project-aware - Issue #89)
 start_claunch_session() {
     local working_dir="${1:-$(pwd)}"
     shift
     local claude_args=("$@")
     
-    log_info "Starting new claunch session in $CLAUNCH_MODE mode"
+    log_info "Starting new project-aware claunch session in $CLAUNCH_MODE mode"
     log_debug "Working directory: $working_dir"
     log_debug "Claude arguments: ${claude_args[*]}"
     
+    # Ensure project detection first
+    detect_project "$working_dir"
+    
     # Wechsele ins Arbeitsverzeichnis
     cd "$working_dir"
+    
+    # Initialize local task queue if available
+    if declare -f init_local_queue >/dev/null 2>&1; then
+        log_debug "Attempting to initialize local task queue for project"
+        if init_local_queue "$PROJECT_NAME" 2>/dev/null; then
+            log_info "Local task queue initialized for project: $PROJECT_NAME"
+        else
+            log_debug "Local task queue initialization skipped or failed (non-critical)"
+        fi
+    fi
     
     # Baue claunch-Kommando zusammen
     local claunch_cmd=("$CLAUNCH_PATH")
     
     if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
         claunch_cmd+=("--tmux")
+        # Add project-specific session name if supported by claunch
+        if "$CLAUNCH_PATH" --help 2>/dev/null | grep -q "\-\-session-name\|--name"; then
+            claunch_cmd+=("--session-name" "$TMUX_SESSION_NAME")
+            log_debug "Using explicit session name: $TMUX_SESSION_NAME"
+        fi
     fi
     
     # Füge Claude-Argumente hinzu
@@ -364,11 +451,14 @@ start_claunch_session() {
         claunch_cmd+=("--" "${claude_args[@]}")
     fi
     
-    log_debug "Executing: ${claunch_cmd[*]}"
+    log_debug "Executing project-aware claunch: ${claunch_cmd[*]}"
     
     # Führe claunch aus
     if "${claunch_cmd[@]}"; then
-        log_info "claunch session started successfully"
+        log_info "Project-aware claunch session started successfully (project: $PROJECT_ID)"
+        
+        # Store project-specific session information
+        store_project_session_info "$working_dir"
         
         # Aktualisiere Session-Informationen
         detect_existing_session "$working_dir"
@@ -376,7 +466,7 @@ start_claunch_session() {
         return 0
     else
         local exit_code=$?
-        log_error "Failed to start claunch session (exit code: $exit_code)"
+        log_error "Failed to start project-aware claunch session (exit code: $exit_code)"
         return $exit_code
     fi
 }
@@ -443,56 +533,122 @@ send_command_to_session() {
 # SESSION-MANAGEMENT-FUNKTIONEN
 # ===============================================================================
 
-# Prüfe Session-Status
+# Prüfe Session-Status (Project-aware - Issue #89)
 check_session_status() {
-    log_debug "Checking claunch session status"
+    local working_dir="${1:-$(pwd)}"
+    
+    log_debug "Checking project-aware claunch session status"
+    
+    # Ensure project context
+    if [[ -z "${PROJECT_ID:-}" ]]; then
+        detect_project "$working_dir"
+    fi
     
     if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
         if tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
-            log_debug "tmux session is active: $TMUX_SESSION_NAME"
+            log_debug "Project tmux session is active: $TMUX_SESSION_NAME"
             return 0
         else
-            log_debug "tmux session not found: $TMUX_SESSION_NAME"
+            log_debug "Project tmux session not found: $TMUX_SESSION_NAME"
             return 1
         fi
     else
-        # Im direct-Modus prüfen wir die Session-Datei
-        if [[ -f "$HOME/.claude_session_${PROJECT_NAME}" ]]; then
-            log_debug "Session file exists for project: $PROJECT_NAME"
+        # Im direct-Modus prüfen wir die projektspezifische Session-Datei
+        local session_file
+        if declare -f get_session_file_path >/dev/null 2>&1; then
+            session_file="$(get_session_file_path "$PROJECT_ID")"
+        else
+            session_file="$HOME/.claude_session_${PROJECT_ID}"
+        fi
+        
+        if [[ -f "$session_file" ]]; then
+            log_debug "Session file exists for project: $PROJECT_ID"
             return 0
         else
-            log_debug "No session file found for project: $PROJECT_NAME"
+            log_debug "No session file found for project: $PROJECT_ID"
             return 1
         fi
     fi
 }
 
-# Liste aktive Sessions
+# Liste aktive Sessions (Enhanced with Project Context - Issue #89)
 list_active_sessions() {
-    log_info "Listing active claunch sessions"
+    log_info "Listing active project-aware claunch sessions"
     
-    echo "=== Active claunch Sessions ==="
+    echo "=== Active Project-Aware Claude Sessions ==="
     
     # Nutze claunch list falls verfügbar
     if "$CLAUNCH_PATH" list >/dev/null 2>&1; then
+        echo "Via claunch:"
         "$CLAUNCH_PATH" list
     else
-        # Fallback: Suche Session-Dateien
-        echo "Session files in $HOME:"
-        find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | while read -r session_file; do
-            local project
-            project=$(basename "$session_file" | sed 's/^\.claude_session_//')
-            local session_id
-            session_id=$(cat "$session_file" 2>/dev/null || echo "invalid")
-            echo "  $project: $session_id"
-        done
+        echo "claunch list not available, using file-based detection"
     fi
     
-    # Zeige tmux-Sessions falls verfügbar
+    # Enhanced project-aware session file detection
+    echo ""
+    echo "=== Project Session Files ==="
+    local found_sessions=0
+    
+    # Find all project-specific session files
+    find "$HOME" -name ".claude_session_*" -type f 2>/dev/null | sort | while read -r session_file; do
+        local project_id
+        project_id=$(basename "$session_file" | sed 's/^\.claude_session_//')
+        
+        local session_id
+        session_id=$(cat "$session_file" 2>/dev/null || echo "invalid")
+        
+        # Look for associated metadata
+        local metadata_file="${session_file}.metadata"
+        local project_name="unknown"
+        local working_dir="unknown"
+        
+        if [[ -f "$metadata_file" ]]; then
+            if command -v jq >/dev/null 2>&1; then
+                project_name=$(jq -r '.project_name // "unknown"' "$metadata_file" 2>/dev/null)
+                working_dir=$(jq -r '.working_dir // "unknown"' "$metadata_file" 2>/dev/null)
+            else
+                # Fallback parsing without jq
+                project_name=$(grep '"project_name":' "$metadata_file" | sed 's/.*"project_name": *"\\([^"]*\\)".*/\\1/' || echo "unknown")
+                working_dir=$(grep '"working_dir":' "$metadata_file" | sed 's/.*"working_dir": *"\\([^"]*\\)".*/\\1/' || echo "unknown")
+            fi
+        fi
+        
+        printf "  %-25s %-15s %-40s %s\\n" "$project_id" "$project_name" "$working_dir" "$session_id"
+        ((found_sessions++)) || true
+    done
+    
+    # Check if we found any sessions
+    if [[ $found_sessions -eq 0 ]]; then
+        echo "  No project session files found"
+    fi
+    
+    # Zeige project-aware tmux-Sessions
     if [[ "$CLAUNCH_MODE" == "tmux" ]] && has_command tmux; then
         echo ""
-        echo "=== Active tmux Sessions ==="
-        tmux list-sessions 2>/dev/null | grep "$TMUX_SESSION_PREFIX" || echo "  No claude tmux sessions found"
+        echo "=== Active Project tmux Sessions ==="
+        local tmux_sessions_found=0
+        
+        tmux list-sessions -F "#{session_name} #{session_created}" 2>/dev/null | grep "^$TMUX_SESSION_PREFIX" | while read -r session_line; do
+            local session_name created_time
+            session_name=$(echo "$session_line" | cut -d' ' -f1)
+            created_time=$(echo "$session_line" | cut -d' ' -f2-)
+            
+            # Extract project ID from session name
+            local project_id
+            if [[ "$session_name" =~ ^${TMUX_SESSION_PREFIX}-(.+)$ ]]; then
+                project_id="${BASH_REMATCH[1]}"
+            else
+                project_id="unknown"
+            fi
+            
+            printf "  %-30s %-25s %s\\n" "$session_name" "$project_id" "$(date -d "@$created_time" 2>/dev/null || echo "unknown time")"
+            ((tmux_sessions_found++)) || true
+        done
+        
+        if [[ $tmux_sessions_found -eq 0 ]]; then
+            echo "  No project tmux sessions found"
+        fi
     fi
 }
 

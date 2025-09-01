@@ -85,8 +85,13 @@ PAUSE_QUEUE=false
 RESUME_QUEUE=false
 CLEAR_QUEUE=false
 
-# Session Management Argumente
+# Session Management Argumente (Enhanced for Per-Project - Issue #89)
 LIST_SESSIONS=false
+LIST_SESSIONS_BY_PROJECT=false
+STOP_SESSION=false
+STOP_PROJECT_SESSION=false
+CLEANUP_SESSIONS=false
+SWITCH_PROJECT=""
 SHOW_SESSION_ID=false
 SYSTEM_STATUS=false
 
@@ -915,18 +920,109 @@ continuous_monitoring_loop() {
 # ===============================================================================
 
 # Handle Session Management Operations (non-queue operations)
+# Enhanced Session Management Operations Handler (Issue #89)
 handle_session_management_operations() {
-    log_debug "Processing session management operations"
+    log_debug "Processing enhanced session management operations"
     
     local operation_handled=false
     
+    # Legacy session listing
     if [[ "$LIST_SESSIONS" == "true" ]]; then
-        log_info "Listing active Claude sessions"
+        log_info "Listing active Claude sessions (legacy format)"
         if declare -f list_sessions >/dev/null 2>&1; then
             list_sessions
             operation_handled=true
         else
             log_error "Session management module not available"
+            return 1
+        fi
+    fi
+    
+    # Enhanced project-aware session listing  
+    if [[ "$LIST_SESSIONS_BY_PROJECT" == "true" ]]; then
+        log_info "Listing sessions organized by project"
+        if declare -f list_sessions_by_project >/dev/null 2>&1; then
+            list_sessions_by_project
+            operation_handled=true
+        else
+            log_warn "Per-project session listing not available, falling back to legacy format"
+            if declare -f list_sessions >/dev/null 2>&1; then
+                list_sessions
+                operation_handled=true
+            fi
+        fi
+    fi
+    
+    # Stop session for current project
+    if [[ "$STOP_SESSION" == "true" || "$STOP_PROJECT_SESSION" == "true" ]]; then
+        log_info "Stopping session for current project"
+        if declare -f stop_project_session >/dev/null 2>&1; then
+            if stop_project_session; then
+                log_info "Project session stopped successfully"
+                operation_handled=true
+            else
+                log_error "Failed to stop project session"
+                return 1
+            fi
+        else
+            log_error "Per-project session management not available"
+            return 1
+        fi
+    fi
+    
+    # Clean up inactive/orphaned sessions
+    if [[ "$CLEANUP_SESSIONS" == "true" ]]; then
+        log_info "Cleaning up inactive/orphaned sessions"
+        local cleaned_count=0
+        
+        # Clean up session-manager tracked sessions
+        if declare -f cleanup_sessions >/dev/null 2>&1; then
+            cleanup_sessions
+            ((cleaned_count++)) || true
+        fi
+        
+        # Clean up claunch orphaned sessions  
+        if declare -f cleanup_orphaned_sessions >/dev/null 2>&1; then
+            cleanup_orphaned_sessions
+            ((cleaned_count++)) || true
+        fi
+        
+        if [[ $cleaned_count -gt 0 ]]; then
+            log_info "Session cleanup completed"
+            operation_handled=true
+        else
+            log_warn "No session cleanup functions available"
+        fi
+    fi
+    
+    # Switch project context
+    if [[ -n "$SWITCH_PROJECT" ]]; then
+        log_info "Switching to project context: $SWITCH_PROJECT"
+        
+        # Validate project path
+        if [[ ! -d "$SWITCH_PROJECT" ]]; then
+            log_error "Project directory does not exist: $SWITCH_PROJECT"
+            return 1
+        fi
+        
+        # Change working directory 
+        if cd "$SWITCH_PROJECT"; then
+            log_info "Switched to project directory: $(pwd)"
+            
+            # Initialize local queue if available
+            if declare -f detect_local_queue >/dev/null 2>&1; then
+                if detect_local_queue; then
+                    log_info "Local task queue detected for project"
+                else
+                    log_debug "No local task queue found for project"
+                fi
+            fi
+            
+            # Update working directory for subsequent operations
+            WORKING_DIR="$(pwd)"
+            operation_handled=true
+        else
+            log_error "Failed to switch to project directory: $SWITCH_PROJECT"
             return 1
         fi
     fi
@@ -1036,9 +1132,14 @@ TASK QUEUE OPTIONS:
     --clear-queue            Clear all tasks from queue
 
 SESSION MANAGEMENT OPTIONS:
-    --list-sessions          List active Claude sessions
-    --show-session-id        Display current session ID
-    --system-status          Show system status and diagnostics
+    --list-sessions                 List active Claude sessions (legacy format)
+    --list-sessions-by-project     List sessions organized by project
+    --stop-session                 Stop session for current project
+    --stop-project-session         Stop session for current project (alias)
+    --cleanup-sessions             Clean up inactive/orphaned sessions
+    --switch-project PATH          Switch context to different project directory
+    --show-session-id              Display current session ID
+    --system-status                Show system status and diagnostics
 
 SETUP OPTIONS:
     --setup-wizard           Force run setup wizard even if session detected
@@ -1218,6 +1319,30 @@ parse_arguments() {
                 LIST_SESSIONS=true
                 shift
                 ;;
+            --list-sessions-by-project)
+                LIST_SESSIONS_BY_PROJECT=true
+                shift
+                ;;
+            --stop-session)
+                STOP_SESSION=true
+                shift
+                ;;
+            --stop-project-session)
+                STOP_PROJECT_SESSION=true
+                shift
+                ;;
+            --cleanup-sessions)
+                CLEANUP_SESSIONS=true
+                shift
+                ;;
+            --switch-project)
+                if [[ -z "${2:-}" ]]; then
+                    log_error "Option $1 requires a project path"
+                    exit 1
+                fi
+                SWITCH_PROJECT="$2"
+                shift 2
+                ;;
             --show-session-id)
                 SHOW_SESSION_ID=true
                 shift
@@ -1289,11 +1414,12 @@ main() {
     load_dependencies
     
     # Handle Session Management Operations (these work even if task queue is unavailable)
-    if [[ "$LIST_SESSIONS" == "true" || "$SHOW_SESSION_ID" == "true" || "$SYSTEM_STATUS" == "true" ]]; then
+    # Enhanced Session Management Operations Check (Issue #89)
+    if [[ "$LIST_SESSIONS" == "true" || "$LIST_SESSIONS_BY_PROJECT" == "true" || "$STOP_SESSION" == "true" || "$STOP_PROJECT_SESSION" == "true" || "$CLEANUP_SESSIONS" == "true" || -n "$SWITCH_PROJECT" || "$SHOW_SESSION_ID" == "true" || "$SYSTEM_STATUS" == "true" ]]; then
         handle_session_management_operations
         # Exit after session operations unless in continuous mode
         if [[ "$CONTINUOUS_MODE" != "true" && "$QUEUE_MODE" != "true" ]]; then
-            log_info "Session management operations completed"
+            log_info "Per-project session management operations completed"
             exit 0
         fi
     fi
