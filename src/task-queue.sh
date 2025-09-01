@@ -48,6 +48,8 @@ TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-true}"
 
 # Load core modules in order
 load_queue_modules() {
+    load_module_loader
+    
     local required_modules=(
         "cache"
         "core"
@@ -60,21 +62,32 @@ load_queue_modules() {
     )
     
     for module in "${required_modules[@]}"; do
-        local module_file="$SCRIPT_DIR/queue/${module}.sh"
+        local queue_module="queue/$module"
         
-        if [[ -f "$module_file" ]]; then
-            source "$module_file" || {
-                log_error "Failed to load module: $module"
+        if command -v load_module_safe >/dev/null 2>&1; then
+            if load_module_safe "$queue_module"; then
+                log_debug "Loaded queue module: $module"
+            else
+                log_error "Failed to load queue module: $module"
                 return 1
-            }
-            log_debug "Loaded module: $module"
+            fi
         else
-            log_error "Required module not found: $module_file"
-            return 1
+            # Fallback to direct sourcing
+            local module_file="$SCRIPT_DIR/queue/${module}.sh"
+            if [[ -f "$module_file" ]]; then
+                source "$module_file" || {
+                    log_error "Failed to load module: $module"
+                    return 1
+                }
+                log_debug "Loaded module: $module"
+            else
+                log_error "Required module not found: $module_file"
+                return 1
+            fi
         fi
     done
     
-    # Load local queue modules (Issue #91)
+    # Load local queue modules (Issue #91) - keeping direct loading for now
     local local_modules=(
         "$SCRIPT_DIR/local-queue.sh"
         "$SCRIPT_DIR/queue/local-operations.sh"
@@ -114,9 +127,19 @@ load_configuration() {
     fi
 }
 
-# Load logging utilities
+# Load central module loader first
+load_module_loader() {
+    if [[ -z "${MODULE_LOADER_LOADED:-}" ]] && [[ -f "$SCRIPT_DIR/utils/module-loader.sh" ]]; then
+        source "$SCRIPT_DIR/utils/module-loader.sh"
+    fi
+}
+
+# Load logging utilities using module loader
 load_logging() {
-    if [[ -f "$SCRIPT_DIR/utils/logging.sh" ]]; then
+    load_module_loader
+    if command -v load_module_safe >/dev/null 2>&1; then
+        load_module_safe "logging"
+    elif [[ -f "$SCRIPT_DIR/utils/logging.sh" ]]; then
         source "$SCRIPT_DIR/utils/logging.sh"
     else
         # Fallback logging functions
@@ -129,7 +152,14 @@ load_logging() {
 
 # Load CLI parser utilities (Issue #93)
 load_cli_parser() {
-    if [[ -f "$SCRIPT_DIR/utils/cli-parser.sh" ]]; then
+    load_module_loader
+    if command -v load_module_safe >/dev/null 2>&1; then
+        if load_module_safe "cli-parser"; then
+            log_debug "CLI parser loaded for context clearing support"
+        else
+            log_warn "Failed to load CLI parser utilities"
+        fi
+    elif [[ -f "$SCRIPT_DIR/utils/cli-parser.sh" ]]; then
         source "$SCRIPT_DIR/utils/cli-parser.sh"
         log_debug "CLI parser loaded for context clearing support"
     else

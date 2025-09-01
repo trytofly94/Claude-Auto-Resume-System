@@ -7,6 +7,11 @@
 
 set -euo pipefail
 
+# Module loading guard - prevent duplicate sourcing
+if [[ -n "${TERMINAL_MODULE_LOADED:-}" ]]; then
+    return 0
+fi
+
 # ===============================================================================
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
@@ -558,3 +563,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         open_terminal_window "echo 'Terminal test successful! Press Enter to continue...'; read" "$(pwd)" "Terminal Test"
     fi
 fi
+
+# Mark this module as loaded
+export TERMINAL_MODULE_LOADED=1

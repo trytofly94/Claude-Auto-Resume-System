@@ -7,6 +7,11 @@
 
 set -euo pipefail
 
+# Module loading guard - prevent duplicate sourcing
+if [[ -n "${NETWORK_MODULE_LOADED:-}" ]]; then
+    return 0
+fi
+
 # ===============================================================================
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
@@ -481,3 +486,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "=== Network Information ==="
     get_network_info
 fi
+
+# Mark this module as loaded
+export NETWORK_MODULE_LOADED=1

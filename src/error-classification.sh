@@ -61,6 +61,16 @@ has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Load task queue module only once to avoid redundant sourcing (Issue #111)
+TASK_QUEUE_LOADED="${TASK_QUEUE_LOADED:-false}"
+load_task_queue_if_needed() {
+    if [[ "$TASK_QUEUE_LOADED" == "false" ]] && [[ -f "$SCRIPT_DIR/task-queue.sh" ]]; then
+        source "$SCRIPT_DIR/task-queue.sh"
+        TASK_QUEUE_LOADED="true"
+        log_debug "Task queue module loaded for error classification"
+    fi
+}
+
 # ===============================================================================
 # ERROR CLASSIFICATION ENGINE
 # ===============================================================================
@@ -389,10 +399,9 @@ escalate_to_manual_recovery() {
     recovery_report_file=$(create_manual_recovery_report "$task_id" "$error_context" "$error_message")
     
     # Mark task as requiring manual intervention
-    if [[ -f "$SCRIPT_DIR/task-queue.sh" ]]; then
-        source "$SCRIPT_DIR/task-queue.sh"
-        if declare -f update_task_status >/dev/null 2>&1; then
-            update_task_status "$task_id" "failed" "manual_recovery_required"
+    load_task_queue_if_needed
+    if declare -f update_task_status >/dev/null 2>&1; then
+        update_task_status "$task_id" "failed" "manual_recovery_required"
         fi
     fi
     
@@ -416,10 +425,9 @@ schedule_simple_retry() {
     fi
     
     # Attempt to reschedule task
-    if [[ -f "$SCRIPT_DIR/task-queue.sh" ]]; then
-        source "$SCRIPT_DIR/task-queue.sh"
-        if declare -f schedule_task_retry >/dev/null 2>&1; then
-            schedule_task_retry "$task_id" "$error_context"
+    load_task_queue_if_needed
+    if declare -f schedule_task_retry >/dev/null 2>&1; then
+        schedule_task_retry "$task_id" "$error_context"
             return $?
         fi
     fi
@@ -445,10 +453,9 @@ fallback_to_safe_mode() {
     fi
     
     # Pause processing for this task
-    if [[ -f "$SCRIPT_DIR/task-queue.sh" ]]; then
-        source "$SCRIPT_DIR/task-queue.sh"
-        if declare -f pause_task >/dev/null 2>&1; then
-            pause_task "$task_id" "safe_mode"
+    load_task_queue_if_needed
+    if declare -f pause_task >/dev/null 2>&1; then
+        pause_task "$task_id" "safe_mode"
         elif declare -f update_task_status >/dev/null 2>&1; then
             update_task_status "$task_id" "failed" "safe_mode_fallback"
         fi
@@ -476,10 +483,9 @@ handle_timeout_recovery() {
     # Try to restart with extended timeout
     local extended_timeout=$((${TASK_DEFAULT_TIMEOUT:-3600} * 2))  # Double the timeout
     
-    if [[ -f "$SCRIPT_DIR/task-queue.sh" ]]; then
-        source "$SCRIPT_DIR/task-queue.sh"
-        if declare -f reschedule_task_with_timeout >/dev/null 2>&1; then
-            reschedule_task_with_timeout "$task_id" "$extended_timeout"
+    load_task_queue_if_needed
+    if declare -f reschedule_task_with_timeout >/dev/null 2>&1; then
+        reschedule_task_with_timeout "$task_id" "$extended_timeout"
             return $?
         fi
     fi
@@ -688,10 +694,9 @@ schedule_task_retry() {
     log_info "Scheduling retry for task $task_id (reason: $reason)"
     
     # This is a fallback - the actual implementation should be in task-queue.sh
-    if [[ -f "$SCRIPT_DIR/task-queue.sh" ]]; then
-        source "$SCRIPT_DIR/task-queue.sh"
-        if declare -f retry_task >/dev/null 2>&1; then
-            retry_task "$task_id"
+    load_task_queue_if_needed
+    if declare -f retry_task >/dev/null 2>&1; then
+        retry_task "$task_id"
             return $?
         fi
     fi
