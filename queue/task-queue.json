@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "timestamp": "2025-09-01T06:03:01+02:00",
+  "timestamp": "2025-09-09T00:42:17+02:00",
   "tasks": [
     {
       "id": "custom-1756647048",
@@ -22,6 +22,15 @@
       "created_at": "2025-09-01T06:02:51+02:00",
       "priority": "normal",
       "completion_marker": "TEST_CLI_MARKER_123",
+      "retry_count": 0
+    },
+    {
+      "id": "custom-1757371336-3202",
+      "type": "custom",
+      "description": "TEST: Production readiness validation task",
+      "status": "pending",
+      "created_at": "2025-09-09T00:42:16+02:00",
+      "priority": "normal",
       "retry_count": 0
     },
     {

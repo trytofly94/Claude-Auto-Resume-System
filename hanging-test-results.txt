@@ -1,6 +1,6 @@
 FILE: module-loader-test.bats
 STATUS: PASS (0)
-DURATION: 8s
+DURATION: 6s
 OUTPUT: 1..10
 ok 1 module loader initializes correctly
 ok 2 can load module by absolute path
