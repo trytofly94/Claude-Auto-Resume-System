@@ -176,7 +176,7 @@ trap interrupt_handler INT TERM
 load_dependencies() {
     log_debug "Loading dependencies from: $SCRIPT_DIR"
     
-    # Lade Utility-Module
+    # Lade Utility-Module in korrekter Reihenfolge
     local modules=(
         "utils/config-loader.sh"
         "utils/logging.sh"
@@ -1392,11 +1392,11 @@ main() {
     # Parse Kommandozeilen-Argumente
     parse_arguments "$@"
     
+    # Lade Dependencies (muss vor load_configuration aufgerufen werden)
+    load_dependencies
+    
     # Lade Konfiguration
     load_configuration
-    
-    # Lade Dependencies
-    load_dependencies
     
     # Handle Session Management Operations (these work even if task queue is unavailable)
     # Enhanced Session Management Operations Check (Issue #89)

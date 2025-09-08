@@ -99,7 +99,7 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
     fi
     
     # Check for problematic files
-    log_files=$(git status --porcelain | grep -E "logs/.*\.log|task-queue\.json" | wc -l || echo 0)
+    log_files=$(git status --porcelain | grep -E "logs/.*\.log|task-queue\.json" | wc -l | tr -d ' ' || echo 0)
     if [[ $log_files -gt 0 ]]; then
         print_warning "$log_files log/runtime files in git status (should be ignored)"
         echo -e "    Run: make git-unstage-logs"
