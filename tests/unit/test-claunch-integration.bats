@@ -560,7 +560,7 @@ cleanup_test_environment() {
         run list_active_sessions
         [ "$status" -eq 0 ]
         [ -n "$output" ]
-        [[ "$output" =~ "Active claunch Sessions" ]]
+        [[ "$output" =~ "Active Project-Aware Claude Sessions" ]]
         
         unset CLAUNCH_PATH
         unset -f claunch
@@ -595,6 +595,13 @@ cleanup_test_environment() {
 @test "start_or_resume_session function handles both cases" {
     if declare -f start_or_resume_session >/dev/null 2>&1; then
         export DRY_RUN=true
+        export USE_CLAUNCH=true
+        export CLAUNCH_PATH="/usr/local/bin/claunch"
+        
+        # Mock logging functions
+        log_info() { echo "[INFO] $*"; }
+        log_debug() { echo "[DEBUG] $*"; }
+        export -f log_info log_debug
         
         # Mock detect_existing_session to return false (no existing session)
         detect_existing_session() { return 1; }
@@ -604,11 +611,16 @@ cleanup_test_environment() {
         start_claunch_session() { echo "Started new session"; return 0; }
         export -f start_claunch_session
         
+        # Mock start_claunch_in_new_terminal
+        start_claunch_in_new_terminal() { echo "Started new terminal session"; return 0; }
+        export -f start_claunch_in_new_terminal
+        
         run start_or_resume_session "$(pwd)" false "continue"
         [ "$status" -eq 0 ]
-        [[ "$output" =~ "Starting new session" ]]
+        [[ "$output" =~ "Starting new claunch session" ]]
         
-        unset -f detect_existing_session start_claunch_session
+        unset -f detect_existing_session start_claunch_session start_claunch_in_new_terminal log_info log_debug
+        unset USE_CLAUNCH CLAUNCH_PATH
     else
         skip "start_or_resume_session function not implemented yet"
     fi
