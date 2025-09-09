@@ -42,14 +42,20 @@ declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
 # Use safe conditional assignment to prevent readonly variable conflicts
-DEFAULT_SESSION_CLEANUP_AGE="${DEFAULT_SESSION_CLEANUP_AGE:-1800}"    # 30 minutes for stopped sessions
-export DEFAULT_SESSION_CLEANUP_AGE
+if [[ -z "${DEFAULT_SESSION_CLEANUP_AGE:-}" ]]; then
+    DEFAULT_SESSION_CLEANUP_AGE="1800"    # 30 minutes for stopped sessions
+    export DEFAULT_SESSION_CLEANUP_AGE
+fi
 
-DEFAULT_ERROR_SESSION_CLEANUP_AGE="${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-900}"   # 15 minutes for error sessions
-export DEFAULT_ERROR_SESSION_CLEANUP_AGE
+if [[ -z "${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-}" ]]; then
+    DEFAULT_ERROR_SESSION_CLEANUP_AGE="900"   # 15 minutes for error sessions
+    export DEFAULT_ERROR_SESSION_CLEANUP_AGE
+fi
 
-BATCH_OPERATION_THRESHOLD="${BATCH_OPERATION_THRESHOLD:-10}"     # Use batch operations when >=10 sessions
-export BATCH_OPERATION_THRESHOLD
+if [[ -z "${BATCH_OPERATION_THRESHOLD:-}" ]]; then
+    BATCH_OPERATION_THRESHOLD="10"     # Use batch operations when >=10 sessions
+    export BATCH_OPERATION_THRESHOLD
+fi
 
 # Project context cache to avoid repeated computation (moved to global for consistency)
 # declare -A PROJECT_CONTEXT_CACHE  # Moved to optimization section above
