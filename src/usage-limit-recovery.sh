@@ -98,7 +98,7 @@ detect_usage_limit_in_queue() {
             detected_pattern="time_based:$pattern"
             
             # Extract the time from the output
-            extracted_time=$(echo "$session_output" | grep -ioE "([0-9]{1,2}:[0-9]{2} *[ap]m|[0-9]{1,2}:[0-9]{2})" | head -1 | tr -d ' ')
+            extracted_time=$(echo "$session_output" | grep -ioE "([0-9]{1,2}:[0-9]{2} *[ap]m|[0-9]{1,2}:[0-9]{2})" | head -1 | tr -d ' ' | tr '[:upper:]' '[:lower:]')
             
             # Calculate precise wait time
             if [[ -n "$extracted_time" ]]; then
