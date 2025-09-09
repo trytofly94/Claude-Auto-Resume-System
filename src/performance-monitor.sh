@@ -66,9 +66,33 @@ else
     log_error() { echo "[ERROR] $*" >&2; }
 fi
 
-# Load configuration
-if [[ -f "$PROJECT_ROOT/config/default.conf" ]]; then
-    source "$PROJECT_ROOT/config/default.conf" 2>/dev/null || true
+# Load centralized configuration loader (Issue #114)
+if [[ -f "$SCRIPT_DIR/utils/config-loader.sh" ]]; then
+    source "$SCRIPT_DIR/utils/config-loader.sh"
+    # Load configuration using centralized loader
+    load_system_config || log_warn "Failed to load centralized configuration, using defaults"
+    
+    # Get configuration values using centralized getter
+    PERFORMANCE_MONITORING="$(get_config "PERFORMANCE_MONITORING" "${PERFORMANCE_MONITORING:-false}")"
+    MEMORY_LIMIT_MB="$(get_config "MEMORY_LIMIT_MB" "${MEMORY_LIMIT_MB:-100}")"
+    CPU_LIMIT_PERCENT="$(get_config "CPU_LIMIT_PERCENT" "${CPU_LIMIT_PERCENT:-80}")"
+    DISK_USAGE_LIMIT_PERCENT="$(get_config "DISK_USAGE_LIMIT_PERCENT" "${DISK_USAGE_LIMIT_PERCENT:-90}")"
+    LARGE_QUEUE_OPTIMIZATION="$(get_config "LARGE_QUEUE_OPTIMIZATION" "${LARGE_QUEUE_OPTIMIZATION:-false}")"
+    AUTO_CLEANUP="$(get_config "AUTO_CLEANUP" "${AUTO_CLEANUP:-false}")"
+    CLEANUP_INTERVAL="$(get_config "CLEANUP_INTERVAL" "${CLEANUP_INTERVAL:-300}")"
+    PERFORMANCE_LOG_INTERVAL="$(get_config "PERFORMANCE_LOG_INTERVAL" "${PERFORMANCE_LOG_INTERVAL:-60}")"
+    CONSERVATIVE_MODE="$(get_config "CONSERVATIVE_MODE" "${CONSERVATIVE_MODE:-false}")"
+    MEMORY_CHECK_INTERVAL="$(get_config "MEMORY_CHECK_INTERVAL" "${MEMORY_CHECK_INTERVAL:-30}")"
+    MEMORY_CLEANUP_THRESHOLD="$(get_config "MEMORY_CLEANUP_THRESHOLD" "${MEMORY_CLEANUP_THRESHOLD:-80}")"
+    QUEUE_SIZE_OPTIMIZATION_THRESHOLD="$(get_config "QUEUE_SIZE_OPTIMIZATION_THRESHOLD" "${QUEUE_SIZE_OPTIMIZATION_THRESHOLD:-100}")"
+    LOG_SIZE_LIMIT_MB="$(get_config "LOG_SIZE_LIMIT_MB" "${LOG_SIZE_LIMIT_MB:-50}")"
+    BACKUP_RETENTION_HOURS="$(get_config "BACKUP_RETENTION_HOURS" "${BACKUP_RETENTION_HOURS:-168}")"
+else
+    # Fallback: Load configuration directly if centralized loader not available
+    if [[ -f "$PROJECT_ROOT/config/default.conf" ]]; then
+        source "$PROJECT_ROOT/config/default.conf" 2>/dev/null || true
+    fi
+    log_warn "Centralized config loader not available, using fallback method"
 fi
 
 # Performance log file
@@ -82,7 +106,7 @@ PERFORMANCE_LOG="${PERFORMANCE_LOG:-$PROJECT_ROOT/logs/performance.log}"
 monitor_memory_usage() {
     local pid="${1:-$$}"
     
-    if command -v ps >/dev/null; then
+    if has_command_cached ps 2>/dev/null || command -v ps >/dev/null; then
         # Get memory usage in MB (works on both macOS and Linux)
         local memory_kb
         memory_kb=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{print $1}' || echo "0")
@@ -94,7 +118,7 @@ monitor_memory_usage() {
 
 # Monitor system memory usage
 monitor_system_memory() {
-    if command -v free >/dev/null; then
+    if has_command_cached free 2>/dev/null || command -v free >/dev/null; then
         # Linux system
         free -m | awk 'NR==2{printf "%.1f", $3*100/($3+$4)}'
     elif [[ "$(uname)" == "Darwin" ]]; then
@@ -425,7 +449,7 @@ collect_performance_metrics() {
     queue_size=$(get_queue_size_fast)
     
     # Disk usage (if available)
-    if command -v df >/dev/null; then
+    if has_command_cached df 2>/dev/null || command -v df >/dev/null; then
         disk_usage=$(df "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {print $5}' | sed 's/%//' || echo "0")
     else
         disk_usage="0"
