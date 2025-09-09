@@ -653,20 +653,83 @@ check_usage_limits() {
                 return 2
             fi
             
-            # Prüfe Output auf Limit-Meldungen
-            if echo "$claude_output" | grep -q "Claude AI usage limit reached\|usage limit reached"; then
-                log_info "Usage limit detected via CLI check"
-                limit_detected=true
+            # Comprehensive usage limit pattern detection
+            local limit_patterns=(
+                "Claude AI usage limit reached"
+                "usage limit reached"
+                "rate limit"
+                "too many requests"
+                "please try again later"
+                "request limit exceeded"
+                "quota exceeded"
+                "temporarily unavailable"
+                "service temporarily overloaded"
+                "try again at [0-9]\+[ap]m"
+                "try again after [0-9]\+[ap]m"
+                "come back at [0-9]\+[ap]m"
+                "available again at [0-9]\+[ap]m"
+                "reset at [0-9]\+[ap]m"
+                "limit resets at [0-9]\+[ap]m"
+                "wait until [0-9]\+[ap]m"
+                "blocked until [0-9]\+[ap]m"
+            )
+            
+            local pattern_found=""
+            for pattern in "${limit_patterns[@]}"; do
+                if echo "$claude_output" | grep -iq "$pattern"; then
+                    pattern_found="$pattern"
+                    log_info "Usage limit detected via pattern: $pattern_found"
+                    limit_detected=true
+                    break
+                fi
+            done
+            
+            if [[ "$limit_detected" == "true" ]]; then
+                # Enhanced timestamp extraction for pm/am patterns
+                local extracted_timestamp=""
                 
-                # Extrahiere Timestamp falls vorhanden
-                local extracted_timestamp
-                extracted_timestamp=$(echo "$claude_output" | grep -o '[0-9]\{10,\}' | head -1 || echo "")
+                # Try to extract pm/am time patterns
+                local time_match
+                if time_match=$(echo "$claude_output" | grep -io "[0-9]\+[ap]m" | head -1); then
+                    log_debug "Extracted time pattern: $time_match"
+                    
+                    # Convert pm/am to 24h timestamp
+                    local hour_part="${time_match%[ap]m}"
+                    local ampm_part="${time_match: -2}"
+                    
+                    # Convert to 24h format
+                    if [[ "$ampm_part" == "pm" && "$hour_part" -ne 12 ]]; then
+                        hour_part=$((hour_part + 12))
+                    elif [[ "$ampm_part" == "am" && "$hour_part" -eq 12 ]]; then
+                        hour_part=0
+                    fi
+                    
+                    # Calculate next occurrence of this time today or tomorrow
+                    local target_time
+                    target_time=$(date -d "today ${hour_part}:00" +%s 2>/dev/null || date -j -f "%H:%M" "${hour_part}:00" +%s 2>/dev/null)
+                    local current_time=$(date +%s)
+                    
+                    if [[ $target_time -le $current_time ]]; then
+                        # If time has passed today, set for tomorrow
+                        target_time=$(date -d "tomorrow ${hour_part}:00" +%s 2>/dev/null || date -j -v+1d -f "%H:%M" "${hour_part}:00" +%s 2>/dev/null)
+                    fi
+                    
+                    extracted_timestamp="$target_time"
+                    log_debug "Calculated resume timestamp: $extracted_timestamp"
+                fi
+                
+                # Fallback: try to extract raw timestamp
+                if [[ -z "$extracted_timestamp" ]]; then
+                    extracted_timestamp=$(echo "$claude_output" | grep -o '[0-9]\{10,\}' | head -1 || echo "")
+                fi
                 
                 if [[ -n "$extracted_timestamp" && "$extracted_timestamp" =~ ^[0-9]+$ ]]; then
                     resume_timestamp="$extracted_timestamp"
+                    log_debug "Using extracted timestamp: $extracted_timestamp"
                 else
                     # Standard-Wartezeit falls kein Timestamp verfügbar
                     resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+"${USAGE_LIMIT_COOLDOWN:-300}"S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
+                    log_debug "Using default cooldown: ${USAGE_LIMIT_COOLDOWN:-300}s"
                 fi
             fi
         else
