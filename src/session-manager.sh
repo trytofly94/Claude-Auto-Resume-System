@@ -42,22 +42,16 @@ declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
 # Use proper readonly guards to prevent multiple declarations
-if [[ -z "${DEFAULT_SESSION_CLEANUP_AGE:-}" ]] && ! declare -p DEFAULT_SESSION_CLEANUP_AGE &>/dev/null; then
+if ! declare -p DEFAULT_SESSION_CLEANUP_AGE &>/dev/null; then
     readonly DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
-elif [[ -z "${DEFAULT_SESSION_CLEANUP_AGE:-}" ]]; then
-    DEFAULT_SESSION_CLEANUP_AGE=1800  # Set value if not readonly yet
 fi
 
-if [[ -z "${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-}" ]] && ! declare -p DEFAULT_ERROR_SESSION_CLEANUP_AGE &>/dev/null; then
-    readonly DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions
-elif [[ -z "${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-}" ]]; then
-    DEFAULT_ERROR_SESSION_CLEANUP_AGE=900  # Set value if not readonly yet
+if ! declare -p DEFAULT_ERROR_SESSION_CLEANUP_AGE &>/dev/null; then
+    readonly DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions  
 fi
 
-if [[ -z "${BATCH_OPERATION_THRESHOLD:-}" ]] && ! declare -p BATCH_OPERATION_THRESHOLD &>/dev/null; then
+if ! declare -p BATCH_OPERATION_THRESHOLD &>/dev/null; then
     readonly BATCH_OPERATION_THRESHOLD=10     # Use batch operations when >=10 sessions
-elif [[ -z "${BATCH_OPERATION_THRESHOLD:-}" ]]; then
-    BATCH_OPERATION_THRESHOLD=10  # Set value if not readonly yet
 fi
 
 # Project context cache to avoid repeated computation (moved to global for consistency)
