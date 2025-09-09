@@ -49,7 +49,7 @@ has_command() {
 # USAGE LIMIT DETECTION
 # ===============================================================================
 
-# Enhanced usage limit detection for queue processing
+# Enhanced usage limit detection with precise time parsing
 detect_usage_limit_in_queue() {
     local session_output="$1"
     local task_id="${2:-}"
@@ -70,30 +70,70 @@ detect_usage_limit_in_queue() {
         "quota exceeded"
         "temporarily unavailable"
         "service temporarily overloaded"
+        "daily usage limit"
+        "hourly rate limit"
+        "api quota exceeded"
+    )
+    
+    # Specific time-based patterns for precise detection
+    local time_based_patterns=(
+        "blocked until [0-9]{1,2}:[0-9]{2} *[ap]m"
+        "try again at [0-9]{1,2}:[0-9]{2} *[ap]m"
+        "available again at [0-9]{1,2}:[0-9]{2} *[ap]m"
+        "wait until [0-9]{1,2}:[0-9]{2} *[ap]m"
+        "retry at [0-9]{1,2}:[0-9]{2} *[ap]m"
+        "blocked until [0-9]{1,2}:[0-9]{2}"
+        "available at [0-9]{1,2}:[0-9]{2}"
     )
     
     local limit_detected=false
     local detected_pattern=""
+    local extracted_time=""
+    local wait_seconds=0
     
-    # Check for usage limit patterns
-    for pattern in "${limit_patterns[@]}"; do
-        if echo "$session_output" | grep -qi "$pattern"; then
+    # Check for time-based patterns first (higher priority)
+    for pattern in "${time_based_patterns[@]}"; do
+        if echo "$session_output" | grep -qiE "$pattern"; then
             limit_detected=true
-            detected_pattern="$pattern"
+            detected_pattern="time_based:$pattern"
+            
+            # Extract the time from the output
+            extracted_time=$(echo "$session_output" | grep -ioE "([0-9]{1,2}:[0-9]{2} *[ap]m|[0-9]{1,2}:[0-9]{2})" | head -1 | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+            
+            # Calculate precise wait time
+            if [[ -n "$extracted_time" ]]; then
+                wait_seconds=$(calculate_precise_wait_time "$extracted_time")
+                log_info "Detected time-based usage limit: available at $extracted_time (wait: ${wait_seconds}s)"
+            fi
             break
         fi
     done
     
+    # If no time-based pattern, check generic patterns
+    if [[ "$limit_detected" == "false" ]]; then
+        for pattern in "${limit_patterns[@]}"; do
+            if echo "$session_output" | grep -qi "$pattern"; then
+                limit_detected=true
+                detected_pattern="generic:$pattern"
+                break
+            fi
+        done
+    fi
+    
     if [[ "$limit_detected" == "true" ]]; then
         log_warn "Usage limit detected during queue processing (pattern: '$detected_pattern')"
         
-        # Record usage limit occurrence
-        record_usage_limit_occurrence "$task_id" "$detected_pattern"
+        # Record usage limit occurrence with enhanced data
+        record_usage_limit_occurrence "$task_id" "$detected_pattern" "$extracted_time" "$wait_seconds"
         
         # Create usage limit checkpoint if task is active
         if [[ -n "$task_id" ]]; then
-            create_usage_limit_checkpoint "$task_id"
+            create_usage_limit_checkpoint "$task_id" "$extracted_time" "$wait_seconds"
         fi
+        
+        # Store extracted wait time for use by calling functions
+        export DETECTED_USAGE_LIMIT_WAIT_SECONDS="$wait_seconds"
+        export DETECTED_USAGE_LIMIT_TIME="$extracted_time"
         
         return 0  # Usage limit detected
     fi
@@ -101,33 +141,118 @@ detect_usage_limit_in_queue() {
     return 1  # No usage limit detected
 }
 
+# Calculate precise wait time from extracted time string
+calculate_precise_wait_time() {
+    local time_string="$1"
+    
+    if [[ -z "$time_string" ]]; then
+        log_debug "No time string provided, returning default cooldown"
+        echo "$USAGE_LIMIT_COOLDOWN"
+        return
+    fi
+    
+    log_debug "Calculating precise wait time for: '$time_string'"
+    
+    # Current time
+    local current_epoch=$(date +%s)
+    local current_hour=$(date +%H)
+    local current_minute=$(date +%M)
+    local current_seconds=$((current_hour * 3600 + current_minute * 60))
+    
+    # Parse the time string
+    local target_hour target_minute target_seconds target_epoch
+    
+    # Handle 12-hour format (with AM/PM)
+    if [[ "$time_string" =~ ^([0-9]{1,2}):([0-9]{2})[ap]m$ ]]; then
+        target_hour=${BASH_REMATCH[1]}
+        target_minute=${BASH_REMATCH[2]}
+        
+        # Convert to 24-hour format
+        if [[ "$time_string" =~ pm$ ]] && [[ $target_hour -ne 12 ]]; then
+            target_hour=$((target_hour + 12))
+        elif [[ "$time_string" =~ am$ ]] && [[ $target_hour -eq 12 ]]; then
+            target_hour=0
+        fi
+        
+    # Handle 24-hour format
+    elif [[ "$time_string" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+        target_hour=${BASH_REMATCH[1]}
+        target_minute=${BASH_REMATCH[2]}
+        
+    else
+        log_warn "Unable to parse time format '$time_string', using default cooldown"
+        echo "$USAGE_LIMIT_COOLDOWN"
+        return
+    fi
+    
+    # Convert to seconds since midnight
+    target_seconds=$((target_hour * 3600 + target_minute * 60))
+    
+    # Calculate wait time
+    local wait_seconds
+    if [[ $target_seconds -gt $current_seconds ]]; then
+        # Target time is later today
+        wait_seconds=$((target_seconds - current_seconds))
+    else
+        # Target time is tomorrow
+        wait_seconds=$((86400 - current_seconds + target_seconds))
+    fi
+    
+    # Add small buffer (30 seconds) to avoid exact timing issues
+    wait_seconds=$((wait_seconds + 30))
+    
+    # Ensure minimum and maximum bounds
+    if [[ $wait_seconds -lt 60 ]]; then
+        wait_seconds=60  # Minimum 1 minute
+    elif [[ $wait_seconds -gt $MAX_WAIT_TIME ]]; then
+        wait_seconds=$MAX_WAIT_TIME
+    fi
+    
+    log_debug "Calculated wait time: ${wait_seconds}s (target: $target_hour:$(printf "%02d" $target_minute), current: $current_hour:$(printf "%02d" $current_minute))"
+    echo "$wait_seconds"
+}
+
 # Record usage limit occurrence for tracking
 record_usage_limit_occurrence() {
     local task_id="${1:-system}"
     local pattern="${2:-unknown}"
+    local extracted_time="${3:-}"
+    local wait_seconds="${4:-0}"
     local timestamp=$(date +%s)
     
+    # Enhanced tracking with time information
+    local history_entry="$task_id:$pattern"
+    if [[ -n "$extracted_time" ]]; then
+        history_entry="$history_entry:$extracted_time:$wait_seconds"
+    fi
+    
     # Track usage limit history
-    USAGE_LIMIT_HISTORY["$timestamp"]="$task_id:$pattern"
+    USAGE_LIMIT_HISTORY["$timestamp"]="$history_entry"
     
     # Increment counter for this task/pattern combination
     local key="${task_id}:${pattern}"
     USAGE_LIMIT_COUNTS["$key"]=$((${USAGE_LIMIT_COUNTS["$key"]:-0} + 1))
     
-    log_debug "Usage limit occurrence recorded: $key (count: ${USAGE_LIMIT_COUNTS["$key"]})"
+    if [[ -n "$extracted_time" ]]; then
+        log_debug "Usage limit occurrence recorded: $key (count: ${USAGE_LIMIT_COUNTS["$key"]}, available at: $extracted_time, wait: ${wait_seconds}s)"
+    else
+        log_debug "Usage limit occurrence recorded: $key (count: ${USAGE_LIMIT_COUNTS["$key"]})"
+    fi
 }
 
 # Create usage limit checkpoint
 create_usage_limit_checkpoint() {
     local task_id="$1"
+    local extracted_time="${2:-}"
+    local wait_seconds="${3:-0}"
     
-    log_debug "Creating usage limit checkpoint for task $task_id"
+    log_debug "Creating usage limit checkpoint for task $task_id (available at: $extracted_time, wait: ${wait_seconds}s)"
     
     # Create checkpoint using backup system if available
     if [[ -f "$SCRIPT_DIR/task-state-backup.sh" ]]; then
         source "$SCRIPT_DIR/task-state-backup.sh"
         if declare -f create_task_checkpoint >/dev/null 2>&1; then
-            create_task_checkpoint "$task_id" "usage_limit"
+            create_task_checkpoint "$task_id" "usage_limit" "$extracted_time" "$wait_seconds"
             return $?
         fi
     fi
@@ -139,6 +264,10 @@ create_usage_limit_checkpoint() {
     
     if [[ -d "$checkpoint_dir" ]]; then
         local checkpoint_file="$checkpoint_dir/usage-limit-${task_id}-$(date +%s).json"
+        
+        # Calculate resume time
+        local resume_time=$(($(date +%s) + wait_seconds))
+        
         cat > "$checkpoint_file" << EOF
 {
     "task_id": "$task_id",
@@ -146,6 +275,10 @@ create_usage_limit_checkpoint() {
     "checkpoint_reason": "usage_limit",
     "usage_limit_info": {
         "detection_time": $(date +%s),
+        "extracted_time": "$extracted_time",
+        "wait_seconds": $wait_seconds,
+        "estimated_resume_time": $resume_time,
+        "resume_time_iso": "$(date -d "@$resume_time" -Iseconds 2>/dev/null || date -r "$resume_time" -Iseconds 2>/dev/null || echo "unknown")",
         "occurrence_count": ${USAGE_LIMIT_COUNTS["$task_id:usage_limit"]:-1}
     }
 }
@@ -165,10 +298,15 @@ pause_queue_for_usage_limit() {
     local estimated_wait_time="${1:-}"
     local current_task_id="${2:-}"
     local detected_pattern="${3:-usage_limit}"
+    local extracted_time="${4:-}"
     
-    # Calculate intelligent wait time if not provided
-    if [[ -z "$estimated_wait_time" ]]; then
+    # Use precise wait time from detection if available, otherwise calculate
+    if [[ -z "$estimated_wait_time" ]] && [[ -n "${DETECTED_USAGE_LIMIT_WAIT_SECONDS:-}" ]]; then
+        estimated_wait_time="$DETECTED_USAGE_LIMIT_WAIT_SECONDS"
+        log_info "Using precise wait time from detection: ${estimated_wait_time}s"
+    elif [[ -z "$estimated_wait_time" ]]; then
         estimated_wait_time=$(calculate_usage_limit_wait_time "$current_task_id" "$detected_pattern")
+        log_info "Calculated fallback wait time: ${estimated_wait_time}s"
     fi
     
     log_warn "Pausing queue for usage limit (estimated wait: ${estimated_wait_time}s, pattern: '$detected_pattern')"
