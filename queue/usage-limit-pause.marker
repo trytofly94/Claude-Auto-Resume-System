@@ -1,0 +1,13 @@
+{
+    "pause_time": 1757397371,
+    "estimated_wait_time": 30,
+    "estimated_resume_time": 1757397401,
+    "current_task_id": "hybrid-monitor",
+    "detected_pattern": "monitor_detected",
+    "pause_reason": "usage_limit",
+    "occurrence_count": 1,
+    "system_info": {
+        "hostname": "MacMini-2.local",
+        "pid": 66620
+    }
+}

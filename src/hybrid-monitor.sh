@@ -756,6 +756,7 @@ handle_usage_limit() {
         pause_queue_for_usage_limit "$wait_seconds" "hybrid-monitor" "$detected_pattern" "$extracted_time"
     else
         log_warn "Enhanced pause functionality not available, using basic wait"
+    fi
     
     # Live-Countdown anzeigen
     while [[ $wait_seconds -gt 0 ]]; do
