@@ -898,6 +898,14 @@ continuous_monitoring_loop() {
         log_info "=== Monitoring Cycle $CURRENT_CYCLE/$MAX_RESTARTS ==="
         echo "$(date): Starting check cycle $CURRENT_CYCLE"
         
+        # Enhanced monitoring: Check for automatic queue resume first
+        if declare -f auto_resume_queue_if_ready >/dev/null 2>&1; then
+            log_debug "Step 0: Checking for automatic queue resume"
+            if auto_resume_queue_if_ready; then
+                log_info "✓ Queue automatically resumed after usage limit wait period"
+            fi
+        fi
+        
         # Schritt 1: Prüfe Usage-Limits
         log_debug "Step 1: Checking usage limits"
         case $(check_usage_limits; echo $?) in
@@ -960,15 +968,25 @@ continuous_monitoring_loop() {
         
         # Schritt 3: Nächster Check
         if [[ $CURRENT_CYCLE -lt $MAX_RESTARTS && "$MONITORING_ACTIVE" == "true" ]]; then
+            # Enhanced resource monitoring and health checks
+            perform_cycle_maintenance "$CURRENT_CYCLE"
+            
             local next_check_time
             next_check_time=$(date -d "+$CHECK_INTERVAL_MINUTES minutes" 2>/dev/null || date -v+"${CHECK_INTERVAL_MINUTES}"M 2>/dev/null || echo "in $CHECK_INTERVAL_MINUTES minutes")
             
             log_info "Next check at: $next_check_time"
             log_debug "Waiting $CHECK_INTERVAL_MINUTES minutes before next check"
             
-            # Interruptable sleep
-            for ((i = 0; i < check_interval_seconds && MONITORING_ACTIVE; i++)); do
-                sleep 1
+            # Interruptable sleep with periodic health checks
+            local health_check_interval=60  # Check every minute during wait
+            for ((i = 0; i < check_interval_seconds && MONITORING_ACTIVE; i += health_check_interval)); do
+                sleep $health_check_interval
+                
+                # Periodic health check during wait
+                if [[ $((i % 300)) -eq 0 ]] && [[ $i -gt 0 ]]; then  # Every 5 minutes
+                    log_debug "Periodic health check during wait interval"
+                    perform_periodic_health_check
+                fi
             done
         fi
     done
@@ -978,6 +996,97 @@ continuous_monitoring_loop() {
     fi
     
     log_info "Continuous monitoring completed"
+}
+
+# Enhanced cycle maintenance for long-running operations
+perform_cycle_maintenance() {
+    local cycle_number="$1"
+    
+    log_debug "Performing cycle maintenance for cycle $cycle_number"
+    
+    # 1. Memory usage monitoring
+    local memory_usage
+    if memory_usage=$(ps -o rss= -p $$ 2>/dev/null); then
+        local memory_mb=$((memory_usage / 1024))
+        log_debug "Current memory usage: ${memory_mb}MB"
+        
+        # Alert if memory usage is excessive (>100MB for a monitoring script)
+        if [[ $memory_mb -gt 100 ]]; then
+            log_warn "High memory usage detected: ${memory_mb}MB"
+        fi
+    fi
+    
+    # 2. Cleanup usage limit tracking data every 10 cycles
+    if [[ $((cycle_number % 10)) -eq 0 ]]; then
+        log_debug "Performing periodic cleanup of usage limit tracking data"
+        if declare -f cleanup_usage_limit_tracking >/dev/null 2>&1; then
+            cleanup_usage_limit_tracking 24  # Keep 24 hours of data
+        fi
+    fi
+    
+    # 3. Check for stale lock files
+    local lock_files_pattern="/tmp/*claude*lock*"
+    if ls $lock_files_pattern >/dev/null 2>&1; then
+        local stale_count=0
+        for lock_file in $lock_files_pattern; do
+            if [[ -f "$lock_file" ]]; then
+                local lock_age
+                lock_age=$(date -r "$lock_file" +%s 2>/dev/null || stat -c %Y "$lock_file" 2>/dev/null || echo "0")
+                local current_time=$(date +%s)
+                local age_minutes=$(( (current_time - lock_age) / 60 ))
+                
+                # Remove locks older than 30 minutes
+                if [[ $age_minutes -gt 30 ]]; then
+                    log_debug "Cleaning stale lock file: $lock_file (age: ${age_minutes}m)"
+                    rm -f "$lock_file" 2>/dev/null || true
+                    ((stale_count++))
+                fi
+            fi
+        done
+        
+        if [[ $stale_count -gt 0 ]]; then
+            log_debug "Cleaned $stale_count stale lock files"
+        fi
+    fi
+    
+    # 4. Log system health summary every 20 cycles
+    if [[ $((cycle_number % 20)) -eq 0 ]]; then
+        log_info "System health summary (cycle $cycle_number):"
+        log_info "  - Process ID: $$"
+        log_info "  - Memory usage: ${memory_mb:-unknown}MB"
+        log_info "  - Uptime: $((cycle_number * CHECK_INTERVAL_MINUTES)) minutes"
+        log_info "  - Queue status: $(declare -f get_queue_status >/dev/null 2>&1 && get_queue_status || echo "unknown")"
+    fi
+}
+
+# Periodic health check during wait intervals  
+perform_periodic_health_check() {
+    log_debug "Performing periodic health check"
+    
+    # 1. Check if usage limit wait is complete and auto-resume queue
+    if declare -f auto_resume_queue_if_ready >/dev/null 2>&1; then
+        if auto_resume_queue_if_ready; then
+            log_info "Queue auto-resumed during wait period"
+        fi
+    fi
+    
+    # 2. Quick claunch health check if applicable
+    if [[ "$USE_CLAUNCH" == "true" && -n "$MAIN_SESSION_ID" ]]; then
+        if declare -f quick_session_health_check >/dev/null 2>&1; then
+            if ! quick_session_health_check "$MAIN_SESSION_ID"; then
+                log_warn "Session health issue detected during wait period"
+            fi
+        fi
+    fi
+    
+    # 3. Check system load (if available)
+    if has_command uptime; then
+        local load_avg
+        load_avg=$(uptime | grep -o 'load average: [0-9.]*' | cut -d' ' -f3 | cut -d',' -f1)
+        if [[ -n "$load_avg" ]] && (( $(echo "$load_avg > 5.0" | bc -l 2>/dev/null || echo 0) )); then
+            log_warn "High system load detected: $load_avg"
+        fi
+    fi
 }
 
 # ===============================================================================
