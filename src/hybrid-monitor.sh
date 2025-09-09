@@ -628,13 +628,23 @@ execute_context_clearing() {
 # MONITORING-KERNFUNKTIONEN
 # ===============================================================================
 
-# Prüfe Usage-Limits mit verschiedenen Methoden
+# Enhanced usage limit detection using the precise detection module
 check_usage_limits() {
-    log_debug "Checking for Claude usage limits"
+    log_debug "Checking for Claude usage limits with enhanced detection"
     
     local limit_detected=false
-# Removed unused wait_time variable
     local resume_timestamp=0
+    local extracted_wait_time=0
+    
+    # Load usage limit recovery module if not already loaded
+    if ! declare -f detect_usage_limit_in_queue >/dev/null 2>&1; then
+        if [[ -f "$SCRIPT_DIR/usage-limit-recovery.sh" ]]; then
+            source "$SCRIPT_DIR/usage-limit-recovery.sh"
+            log_debug "Loaded enhanced usage limit recovery module"
+        else
+            log_warn "Enhanced usage limit recovery module not found, using fallback detection"
+        fi
+    fi
     
     # Test-Modus für Entwicklung
     if [[ "$TEST_MODE" == "true" ]]; then
@@ -642,10 +652,10 @@ check_usage_limits() {
         resume_timestamp=$(date -d "+${TEST_WAIT_SECONDS} seconds" +%s 2>/dev/null || date -v+"${TEST_WAIT_SECONDS}"S +%s 2>/dev/null || echo $(($(date +%s) + "${TEST_WAIT_SECONDS}")))
         limit_detected=true
     else
-        # Echte Limit-Prüfung
+        # Enhanced limit check using precise detection
         local claude_output
         
-        if claude_output=$(timeout 30 claude -p 'check' 2>&1); then
+        if claude_output=$(timeout 30 claude -p 'status' 2>&1); then
             local exit_code=$?
             
             if [[ $exit_code -eq 124 ]]; then
@@ -653,84 +663,56 @@ check_usage_limits() {
                 return 2
             fi
             
-            # Comprehensive usage limit pattern detection
-            local limit_patterns=(
-                "Claude AI usage limit reached"
-                "usage limit reached"
-                "rate limit"
-                "too many requests"
-                "please try again later"
-                "request limit exceeded"
-                "quota exceeded"
-                "temporarily unavailable"
-                "service temporarily overloaded"
-                "try again at [0-9]\+[ap]m"
-                "try again after [0-9]\+[ap]m"
-                "come back at [0-9]\+[ap]m"
-                "available again at [0-9]\+[ap]m"
-                "reset at [0-9]\+[ap]m"
-                "limit resets at [0-9]\+[ap]m"
-                "wait until [0-9]\+[ap]m"
-                "blocked until [0-9]\+[ap]m"
-            )
-            
-            local pattern_found=""
-            for pattern in "${limit_patterns[@]}"; do
-                if echo "$claude_output" | grep -iq "$pattern"; then
-                    pattern_found="$pattern"
-                    log_info "Usage limit detected via pattern: $pattern_found"
+            # Use enhanced detection from usage-limit-recovery.sh
+            if declare -f detect_usage_limit_in_queue >/dev/null 2>&1; then
+                if detect_usage_limit_in_queue "$claude_output" "monitor-session"; then
                     limit_detected=true
-                    break
+                    
+                    # Get precise wait time if available
+                    if [[ -n "${DETECTED_USAGE_LIMIT_WAIT_SECONDS:-}" ]]; then
+                        extracted_wait_time="$DETECTED_USAGE_LIMIT_WAIT_SECONDS"
+                        resume_timestamp=$(($(date +%s) + extracted_wait_time))
+                        log_info "Enhanced detection: Usage limit detected with precise wait time ${extracted_wait_time}s"
+                        if [[ -n "${DETECTED_USAGE_LIMIT_TIME:-}" ]]; then
+                            log_info "Service available again at: ${DETECTED_USAGE_LIMIT_TIME}"
+                        fi
+                    else
+                        # Fallback to default wait time
+                        resume_timestamp=$(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300}))
+                        log_info "Enhanced detection: Usage limit detected, using default cooldown"
+                    fi
                 fi
-            done
+            else
+                # Fallback to basic pattern matching
+                log_debug "Using fallback pattern matching for usage limit detection"
+                local limit_patterns=(
+                    "Claude AI usage limit reached"
+                    "usage limit reached"
+                    "rate limit"
+                    "too many requests"
+                    "please try again later"
+                    "request limit exceeded"
+                    "quota exceeded"
+                    "temporarily unavailable"
+                    "service temporarily overloaded"
+                    "blocked until [0-9]\+[ap]m"
+                )
+                
+                for pattern in "${limit_patterns[@]}"; do
+                    if echo "$claude_output" | grep -iq "$pattern"; then
+                        log_info "Fallback detection: Usage limit detected via pattern: $pattern"
+                        limit_detected=true
+                        # Use default cooldown for fallback detection
+                        resume_timestamp=$(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300}))
+                        break
+                    fi
+                done
+            fi
             
-            if [[ "$limit_detected" == "true" ]]; then
-                # Enhanced timestamp extraction for pm/am patterns
-                local extracted_timestamp=""
-                
-                # Try to extract pm/am time patterns
-                local time_match
-                if time_match=$(echo "$claude_output" | grep -io "[0-9]\+[ap]m" | head -1); then
-                    log_debug "Extracted time pattern: $time_match"
-                    
-                    # Convert pm/am to 24h timestamp
-                    local hour_part="${time_match%[ap]m}"
-                    local ampm_part="${time_match: -2}"
-                    
-                    # Convert to 24h format
-                    if [[ "$ampm_part" == "pm" && "$hour_part" -ne 12 ]]; then
-                        hour_part=$((hour_part + 12))
-                    elif [[ "$ampm_part" == "am" && "$hour_part" -eq 12 ]]; then
-                        hour_part=0
-                    fi
-                    
-                    # Calculate next occurrence of this time today or tomorrow
-                    local target_time
-                    target_time=$(date -d "today ${hour_part}:00" +%s 2>/dev/null || date -j -f "%H:%M" "${hour_part}:00" +%s 2>/dev/null)
-                    local current_time=$(date +%s)
-                    
-                    if [[ $target_time -le $current_time ]]; then
-                        # If time has passed today, set for tomorrow
-                        target_time=$(date -d "tomorrow ${hour_part}:00" +%s 2>/dev/null || date -j -v+1d -f "%H:%M" "${hour_part}:00" +%s 2>/dev/null)
-                    fi
-                    
-                    extracted_timestamp="$target_time"
-                    log_debug "Calculated resume timestamp: $extracted_timestamp"
-                fi
-                
-                # Fallback: try to extract raw timestamp
-                if [[ -z "$extracted_timestamp" ]]; then
-                    extracted_timestamp=$(echo "$claude_output" | grep -o '[0-9]\{10,\}' | head -1 || echo "")
-                fi
-                
-                if [[ -n "$extracted_timestamp" && "$extracted_timestamp" =~ ^[0-9]+$ ]]; then
-                    resume_timestamp="$extracted_timestamp"
-                    log_debug "Using extracted timestamp: $extracted_timestamp"
-                else
-                    # Standard-Wartezeit falls kein Timestamp verfügbar
-                    resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+"${USAGE_LIMIT_COOLDOWN:-300}"S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
-                    log_debug "Using default cooldown: ${USAGE_LIMIT_COOLDOWN:-300}s"
-                fi
+            # If limit detected but no precise wait time available, use default
+            if [[ "$limit_detected" == "true" && "$resume_timestamp" -eq 0 ]]; then
+                resume_timestamp=$(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300}))
+                log_debug "Using default cooldown: ${USAGE_LIMIT_COOLDOWN:-300}s"
             fi
         else
             log_warn "Failed to check Claude usage limits"
@@ -746,7 +728,7 @@ check_usage_limits() {
     return 0
 }
 
-# Behandle Usage-Limit mit intelligentem Warten
+# Enhanced usage limit handling with task queue integration
 handle_usage_limit() {
     local resume_timestamp="$1"
     local current_timestamp
@@ -758,7 +740,22 @@ handle_usage_limit() {
         return 0
     fi
     
-    log_info "Usage limit detected - waiting $wait_seconds seconds"
+    log_info "Usage limit detected - pausing operations for $wait_seconds seconds"
+    
+    # Use enhanced pause functionality if available
+    if declare -f pause_queue_for_usage_limit >/dev/null 2>&1; then
+        local detected_pattern="monitor_detected"
+        local extracted_time=""
+        
+        # Try to extract time information if available
+        if [[ -n "${DETECTED_USAGE_LIMIT_TIME:-}" ]]; then
+            extracted_time="$DETECTED_USAGE_LIMIT_TIME"
+        fi
+        
+        log_info "Using enhanced queue pause functionality"
+        pause_queue_for_usage_limit "$wait_seconds" "hybrid-monitor" "$detected_pattern" "$extracted_time"
+    else
+        log_warn "Enhanced pause functionality not available, using basic wait"
     
     # Live-Countdown anzeigen
     while [[ $wait_seconds -gt 0 ]]; do

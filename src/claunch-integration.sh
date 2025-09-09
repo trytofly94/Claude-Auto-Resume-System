@@ -547,6 +547,12 @@ start_claunch_session_with_retry() {
         
         validate_and_fix_session_id "$session_file"
         
+        # Enhanced pre-startup validation and cleanup
+        if [[ $attempt -gt 1 ]]; then
+            log_debug "Performing enhanced cleanup before retry attempt $attempt"
+            perform_claunch_cleanup "$working_dir"
+        fi
+        
         # Attempt to start claunch session
         if start_claunch_session_internal "$working_dir" "${claude_args[@]}"; then
             log_info "claunch session started successfully on attempt $attempt"
@@ -556,13 +562,16 @@ start_claunch_session_with_retry() {
         local exit_code=$?
         log_warn "claunch session failed on attempt $attempt (exit code: $exit_code)"
         
-        # Provide specific guidance based on exit code
+        # Enhanced error handling and recovery based on exit code
         case $exit_code in
             1)
-                log_debug "Exit code 1: Usually session ID format issue or claunch state problem"
-                # Clean potentially problematic session files
+                log_debug "Exit code 1: Session ID format issue or claunch state problem"
+                # Enhanced cleanup for problematic session files
                 if [[ -f "$session_file" ]]; then
-                    log_debug "Removing potentially problematic session file: $session_file"
+                    log_debug "Backing up and removing problematic session file: $session_file"
+                    if cp "$session_file" "${session_file}.backup.$(date +%s)" 2>/dev/null; then
+                        log_debug "Session file backed up successfully"
+                    fi
                     rm -f "$session_file" "${session_file}.metadata"
                 fi
                 ;;
@@ -594,6 +603,61 @@ start_claunch_session_with_retry() {
     done
     
     return 1
+}
+
+# Enhanced cleanup for claunch session recovery
+perform_claunch_cleanup() {
+    local working_dir="${1:-$(pwd)}"
+    
+    log_debug "Performing enhanced claunch cleanup for project: $PROJECT_ID"
+    
+    # 1. Clean orphaned tmux sessions related to this project
+    if has_command tmux && [[ "$CLAUNCH_MODE" == "tmux" ]]; then
+        local project_session_pattern="${TMUX_SESSION_PREFIX}-${PROJECT_ID}"
+        log_debug "Checking for orphaned tmux sessions matching pattern: $project_session_pattern"
+        
+        # List tmux sessions and clean orphaned ones
+        if tmux list-sessions 2>/dev/null | grep -q "$project_session_pattern"; then
+            log_debug "Found existing tmux sessions for this project, checking for orphaned sessions"
+            
+            # Kill sessions that appear to be orphaned (no active panes)
+            local orphaned_sessions
+            orphaned_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "$project_session_pattern" | head -5)
+            
+            for session in $orphaned_sessions; do
+                if tmux list-panes -t "$session" 2>/dev/null | wc -l | grep -q "^0$"; then
+                    log_debug "Cleaning up orphaned tmux session: $session"
+                    tmux kill-session -t "$session" 2>/dev/null || true
+                fi
+            done
+        fi
+    fi
+    
+    # 2. Clean stale socket files
+    local socket_pattern="${HOME}/.config/claunch/sockets/*${PROJECT_ID}*"
+    if ls $socket_pattern >/dev/null 2>&1; then
+        log_debug "Cleaning stale claunch socket files"
+        rm -f $socket_pattern 2>/dev/null || true
+    fi
+    
+    # 3. Clean temporary files
+    local temp_pattern="/tmp/claunch-*${PROJECT_ID}*"
+    if ls $temp_pattern >/dev/null 2>&1; then
+        log_debug "Cleaning temporary claunch files"
+        rm -f $temp_pattern 2>/dev/null || true
+    fi
+    
+    # 4. Refresh PATH environment (in case claunch location changed)
+    refresh_shell_path
+    
+    # 5. Re-validate claunch before retry
+    if ! validate_claunch_environment; then
+        log_warn "claunch environment still invalid after cleanup"
+        return 1
+    fi
+    
+    log_debug "Enhanced claunch cleanup completed"
+    return 0
 }
 
 # Internal session startup (separated for retry logic)
