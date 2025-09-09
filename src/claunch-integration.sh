@@ -413,20 +413,205 @@ detect_existing_session() {
 # CLAUNCH-WRAPPER-FUNKTIONEN
 # ===============================================================================
 
-# Starte neue claunch-Session (Project-aware - Issue #89)
-start_claunch_session() {
-    local working_dir="${1:-$(pwd)}"
+# Session ID format validation and correction (Issue #134)
+validate_and_fix_session_id() {
+    local session_file="$1"
+    
+    if [[ ! -f "$session_file" ]]; then
+        log_debug "No session file to validate: $session_file"
+        return 0  # No file, nothing to fix
+    fi
+    
+    local session_id
+    session_id=$(cat "$session_file" 2>/dev/null || echo "")
+    
+    if [[ -z "$session_id" ]]; then
+        log_debug "Empty session file, removing: $session_file"
+        rm -f "$session_file"
+        return 0
+    fi
+    
+    log_debug "Validating session ID format: $session_id"
+    
+    # Check if session ID matches claunch expected format (sess-xxxxxxxx)
+    if [[ "$session_id" =~ ^sess-[a-f0-9]{8}$ ]]; then
+        log_debug "Session ID format is valid: $session_id"
+        return 0
+    fi
+    
+    # Check if it's a full UUID format that needs correction
+    if [[ "$session_id" =~ ^sess-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]; then
+        # Extract first 8 characters after sess-
+        local short_id="sess-${session_id:5:8}"
+        log_warn "Invalid session ID format detected: $session_id"
+        log_info "Converting to claunch compatible format: $short_id"
+        
+        # Update the session file with corrected format
+        echo "$short_id" > "$session_file"
+        log_debug "Session file updated with corrected ID"
+        return 0
+    fi
+    
+    # Invalid or unrecognized format - remove file to force new session
+    log_warn "Unrecognized session ID format: $session_id"
+    log_info "Removing invalid session file to allow fresh session creation"
+    rm -f "$session_file"
+    return 0
+}
+
+# Pre-execution environment validation (Issue #134)
+validate_claunch_environment() {
+    log_debug "Validating claunch execution environment"
+    
+    # Check 1: claunch binary is accessible and executable
+    if [[ ! -x "$CLAUNCH_PATH" ]]; then
+        log_error "claunch binary not executable: $CLAUNCH_PATH"
+        return 1
+    fi
+    
+    # Check 2: Basic claunch functionality
+    if ! "$CLAUNCH_PATH" --version >/dev/null 2>&1; then
+        log_error "claunch binary appears corrupted or non-functional"
+        return 1
+    fi
+    
+    # Check 3: tmux availability if in tmux mode
+    if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
+        if ! command -v tmux >/dev/null 2>&1; then
+            log_error "tmux required for CLAUNCH_MODE=tmux but not found"
+            return 1
+        fi
+        
+        # Check if tmux server is responsive
+        if ! tmux list-sessions >/dev/null 2>&1; then
+            log_debug "tmux server not running or not responsive - this is normal"
+        fi
+    fi
+    
+    # Check 4: Claude CLI availability
+    if ! command -v claude >/dev/null 2>&1; then
+        log_error "Claude CLI not found - required for claunch operation"
+        return 1
+    fi
+    
+    # Check 5: Working directory accessibility
+    if [[ ! -d "$(pwd)" ]]; then
+        log_error "Current working directory not accessible"
+        return 1
+    fi
+    
+    # Check 6: Write permissions for session files
+    local test_session_file="$HOME/.claude_session_test_$$"
+    if ! touch "$test_session_file" 2>/dev/null; then
+        log_error "Cannot write session files to $HOME"
+        return 1
+    fi
+    rm -f "$test_session_file"
+    
+    log_debug "claunch environment validation passed"
+    return 0
+}
+
+# Enhanced session startup with retry logic (Issue #134)
+start_claunch_session_with_retry() {
+    local working_dir="$1"
     shift
     local claude_args=("$@")
     
-    log_info "Starting new project-aware claunch session in $CLAUNCH_MODE mode"
+    local max_attempts=3
+    local attempt=1
+    local base_delay=1
+    
+    log_info "Starting claunch session with retry logic (max attempts: $max_attempts)"
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        log_debug "claunch startup attempt $attempt/$max_attempts"
+        
+        # Validate environment before each attempt
+        if ! validate_claunch_environment; then
+            log_error "Environment validation failed on attempt $attempt"
+            if [[ $attempt -eq $max_attempts ]]; then
+                return 1
+            fi
+            ((attempt++))
+            continue
+        fi
+        
+        # Validate and fix session ID format if session file exists
+        local session_file
+        if declare -f get_session_file_path >/dev/null 2>&1; then
+            session_file="$(get_session_file_path "$PROJECT_ID")"
+        else
+            session_file="$HOME/.claude_session_${PROJECT_ID}"
+        fi
+        
+        validate_and_fix_session_id "$session_file"
+        
+        # Attempt to start claunch session
+        if start_claunch_session_internal "$working_dir" "${claude_args[@]}"; then
+            log_info "claunch session started successfully on attempt $attempt"
+            return 0
+        fi
+        
+        local exit_code=$?
+        log_warn "claunch session failed on attempt $attempt (exit code: $exit_code)"
+        
+        # Provide specific guidance based on exit code
+        case $exit_code in
+            1)
+                log_debug "Exit code 1: Usually session ID format issue or claunch state problem"
+                # Clean potentially problematic session files
+                if [[ -f "$session_file" ]]; then
+                    log_debug "Removing potentially problematic session file: $session_file"
+                    rm -f "$session_file" "${session_file}.metadata"
+                fi
+                ;;
+            126)
+                log_error "Exit code 126: Permission denied or binary not executable"
+                return $exit_code  # Don't retry permission issues
+                ;;
+            127)
+                log_error "Exit code 127: claunch command not found"
+                return $exit_code  # Don't retry missing command
+                ;;
+            *)
+                log_debug "Exit code $exit_code: Generic failure, will retry"
+                ;;
+        esac
+        
+        # Don't retry on final attempt
+        if [[ $attempt -eq $max_attempts ]]; then
+            log_error "All claunch startup attempts failed"
+            return $exit_code
+        fi
+        
+        # Wait before retry with minimal delay
+        local delay=$((base_delay * attempt))
+        log_debug "Waiting ${delay}s before retry..."
+        sleep $delay
+        
+        ((attempt++))
+    done
+    
+    return 1
+}
+
+# Internal session startup (separated for retry logic)
+start_claunch_session_internal() {
+    local working_dir="$1"
+    shift
+    local claude_args=("$@")
+    
+    log_debug "Internal claunch session startup"
     log_debug "Working directory: $working_dir"
     log_debug "Claude arguments: ${claude_args[*]}"
     
-    # Ensure project detection first
-    detect_project "$working_dir"
+    # Ensure project detection
+    if [[ -z "${PROJECT_ID:-}" ]]; then
+        detect_project "$working_dir"
+    fi
     
-    # Wechsele ins Arbeitsverzeichnis
+    # Change to working directory
     cd "$working_dir"
     
     # Initialize local task queue if available
@@ -439,7 +624,7 @@ start_claunch_session() {
         fi
     fi
     
-    # Baue claunch-Kommando zusammen
+    # Build claunch command
     local claunch_cmd=("$CLAUNCH_PATH")
     
     if [[ "$CLAUNCH_MODE" == "tmux" ]]; then
@@ -451,29 +636,61 @@ start_claunch_session() {
         fi
     fi
     
-    # Füge Claude-Argumente hinzu
+    # Add Claude arguments
     if [[ ${#claude_args[@]} -gt 0 ]]; then
         claunch_cmd+=("--" "${claude_args[@]}")
     fi
     
-    log_debug "Executing project-aware claunch: ${claunch_cmd[*]}"
+    log_debug "Executing claunch: ${claunch_cmd[*]}"
     
-    # Führe claunch aus
-    if "${claunch_cmd[@]}"; then
-        log_info "Project-aware claunch session started successfully (project: $PROJECT_ID)"
+    # Execute claunch with enhanced error capture
+    local claunch_output
+    local exit_code
+    
+    if claunch_output=$("${claunch_cmd[@]}" 2>&1); then
+        log_info "claunch session started successfully (project: $PROJECT_ID)"
         
         # Store project-specific session information
         store_project_session_info "$working_dir"
         
-        # Aktualisiere Session-Informationen
+        # Update session information
         detect_existing_session "$working_dir"
         
         return 0
     else
-        local exit_code=$?
-        log_error "Failed to start project-aware claunch session (exit code: $exit_code)"
+        exit_code=$?
+        log_error "claunch session failed (exit code: $exit_code)"
+        
+        # Enhanced diagnostic information
+        if [[ -n "$claunch_output" ]]; then
+            log_debug "claunch output: $claunch_output"
+            # Check for specific error patterns
+            if [[ "$claunch_output" == *"Invalid session ID format"* ]]; then
+                log_warn "Session ID format issue detected - will be handled by retry logic"
+            elif [[ "$claunch_output" == *"tmux"* ]]; then
+                log_warn "tmux-related issue detected: consider checking tmux configuration"
+            fi
+        fi
+        
         return $exit_code
     fi
+}
+
+# Starte neue claunch-Session (Project-aware - Issue #89, Enhanced Issue #134)
+start_claunch_session() {
+    local working_dir="${1:-$(pwd)}"
+    shift
+    local claude_args=("$@")
+    
+    log_info "Starting new project-aware claunch session in $CLAUNCH_MODE mode (with reliability enhancements)"
+    log_debug "Working directory: $working_dir"
+    log_debug "Claude arguments: ${claude_args[*]}"
+    
+    # Ensure project detection first
+    detect_project "$working_dir"
+    
+    # Use enhanced retry logic for improved reliability
+    start_claunch_session_with_retry "$working_dir" "${claude_args[@]}"
 }
 
 # Starte claunch in neuem Terminal
