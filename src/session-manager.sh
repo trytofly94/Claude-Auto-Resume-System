@@ -41,10 +41,16 @@ declare -gA PROJECT_ID_CACHE 2>/dev/null || true
 declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
-# Use [[ ! -v ]] to check if variable is unset (more robust than -z check)
-[[ ! -v DEFAULT_SESSION_CLEANUP_AGE ]] && readonly DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
-[[ ! -v DEFAULT_ERROR_SESSION_CLEANUP_AGE ]] && readonly DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions
-[[ ! -v BATCH_OPERATION_THRESHOLD ]] && readonly BATCH_OPERATION_THRESHOLD=10     # Use batch operations when >=10 sessions
+# Use proper readonly guards to prevent multiple declarations
+if [[ -z "${DEFAULT_SESSION_CLEANUP_AGE:-}" ]]; then
+    readonly DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
+fi
+if [[ -z "${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-}" ]]; then
+    readonly DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions
+fi
+if [[ -z "${BATCH_OPERATION_THRESHOLD:-}" ]]; then
+    readonly BATCH_OPERATION_THRESHOLD=10     # Use batch operations when >=10 sessions
+fi
 
 # Project context cache to avoid repeated computation (moved to global for consistency)
 # declare -A PROJECT_CONTEXT_CACHE  # Moved to optimization section above
