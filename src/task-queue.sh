@@ -517,20 +517,32 @@ cmd_start_monitoring() {
     local interval="${2:-5}"   # Default 5 second intervals
     local debug_mode="false"
     
-    # Check for debug flag in arguments
+    # Check for debug flag in arguments without shifting
     local arg
     for arg in "$@"; do
         case "$arg" in
             "--debug"|"--verbose"|"debug")
                 debug_mode="true"
-                shift || true
                 ;;
         esac
     done
     
-    # Reparse arguments after removing debug flags
-    duration="${1:-30}"
-    interval="${2:-5}"
+    # Filter out debug flags and get clean arguments
+    local clean_args=()
+    for arg in "$@"; do
+        case "$arg" in
+            "--debug"|"--verbose"|"debug")
+                # Skip debug flags
+                ;;
+            *)
+                clean_args+=("$arg")
+                ;;
+        esac
+    done
+    
+    # Parse clean arguments
+    duration="${clean_args[0]:-30}"
+    interval="${clean_args[1]:-5}"
     
     if [[ "$debug_mode" == "true" ]]; then
         log_info "Starting monitoring in debug mode (duration: ${duration}s, interval: ${interval}s)"

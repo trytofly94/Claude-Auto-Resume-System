@@ -1772,6 +1772,8 @@ create_workflow_checkpoint() {
         --arg checkpoint_id "$(generate_task_id "checkpoint")" \
         --arg created_at "$(date -Iseconds)" \
         --arg reason "$checkpoint_reason" \
+        --arg claunch_mode "${CLAUNCH_MODE:-unknown}" \
+        --arg session_name "${TMUX_SESSION_NAME:-unknown}" \
         '{
             checkpoint_id: $checkpoint_id,
             workflow_id: $workflow_data.id,
@@ -1779,8 +1781,8 @@ create_workflow_checkpoint() {
             reason: $reason,
             workflow_state: $workflow_data,
             system_info: {
-                claunch_mode: env.CLAUNCH_MODE // "unknown",
-                session_name: env.TMUX_SESSION_NAME // "unknown"
+                claunch_mode: $claunch_mode,
+                session_name: $session_name
             }
         }')
     

@@ -41,9 +41,10 @@ declare -gA PROJECT_ID_CACHE 2>/dev/null || true
 declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
-readonly DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
-readonly DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions
-readonly BATCH_OPERATION_THRESHOLD=10     # Use batch operations when >=10 sessions
+# Use readonly only if not already set to prevent re-sourcing conflicts
+[[ ! -v DEFAULT_SESSION_CLEANUP_AGE ]] && readonly DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
+[[ ! -v DEFAULT_ERROR_SESSION_CLEANUP_AGE ]] && readonly DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions
+[[ ! -v BATCH_OPERATION_THRESHOLD ]] && readonly BATCH_OPERATION_THRESHOLD=10     # Use batch operations when >=10 sessions
 
 # Project context cache to avoid repeated computation (moved to global for consistency)
 # declare -A PROJECT_CONTEXT_CACHE  # Moved to optimization section above
