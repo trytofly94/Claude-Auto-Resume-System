@@ -91,7 +91,7 @@ handle_timeout_completion() {
     
     case "$FALLBACK_STRATEGY" in
         "interactive")
-            return $(prompt_completion_confirmation "$task_id")
+            return "$(prompt_completion_confirmation "$task_id")"
             ;;
         "timeout")
             log_info "Automatic timeout completion for task $task_id"
@@ -103,7 +103,7 @@ handle_timeout_completion() {
             ;;
         *)
             log_warn "Unknown fallback strategy: $FALLBACK_STRATEGY, using interactive"
-            return $(prompt_completion_confirmation "$task_id")
+            return "$(prompt_completion_confirmation "$task_id")"
             ;;
     esac
 }
@@ -319,7 +319,7 @@ handle_session_interruption() {
     # Mark task for recovery
     if [[ -n "${TASK_METADATA[$task_id]:-}" ]]; then
         local updated_metadata
-        updated_metadata=$(echo "${TASK_METADATA[$task_id]}" | jq '. + {"interrupted_at": "'$interruption_time'", "requires_recovery": true}')
+        updated_metadata=$(echo "${TASK_METADATA[$task_id]}" | jq '. + {"interrupted_at": "'"$interruption_time"'", "requires_recovery": true}')
         TASK_METADATA["$task_id"]="$updated_metadata"
     fi
     

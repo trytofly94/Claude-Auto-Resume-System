@@ -308,7 +308,7 @@ detect_project() {
         log_debug "session-manager functions not available, using basic project detection"
         local basename_dir
         basename_dir=$(basename "$working_dir")
-        PROJECT_ID=$(echo "$basename_dir" | sed 's/[^a-zA-Z0-9-]//g')-$(date +%s | cut -c-6)
+        PROJECT_ID=${basename_dir//[^a-zA-Z0-9-]/}-$(date +%s | cut -c-6)
     fi
     
     # Backward compatible project name (for legacy code)
