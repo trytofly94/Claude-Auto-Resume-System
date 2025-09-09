@@ -48,6 +48,8 @@ TASK_QUEUE_ENABLED="${TASK_QUEUE_ENABLED:-true}"
 
 # Load core modules in order
 load_queue_modules() {
+    # CRITICAL FIX (Issue #128): Load logging FIRST before any log calls
+    load_logging
     load_module_loader
     
     local required_modules=(

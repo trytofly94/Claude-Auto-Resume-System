@@ -174,12 +174,14 @@ trap interrupt_handler INT TERM
 
 # Lade alle erforderlichen Module
 load_dependencies() {
-    log_debug "Loading dependencies from: $SCRIPT_DIR"
+    # Note: Cannot use log_debug yet - logging.sh not loaded
+    echo "[DEBUG] Loading dependencies from: $SCRIPT_DIR" >&2
     
-    # Lade Utility-Module
+    # CRITICAL: Load logging.sh FIRST so other modules can use logging functions
+    # Then load other utilities in dependency order
     local modules=(
-        "utils/config-loader.sh"
         "utils/logging.sh"
+        "utils/config-loader.sh"
         "utils/network.sh" 
         "utils/terminal.sh"
         "claunch-integration.sh"
@@ -205,14 +207,32 @@ load_dependencies() {
         export TASK_QUEUE_AVAILABLE=false
     fi
     
+    local logging_loaded=false
+    
     for module in "${modules[@]}"; do
         local module_path="$SCRIPT_DIR/$module"
         if [[ -f "$module_path" ]]; then
             # shellcheck source=/dev/null
             source "$module_path"
-            log_debug "Loaded module: $module"
+            
+            # After loading logging.sh, we can use log functions
+            if [[ "$module" == "utils/logging.sh" ]]; then
+                logging_loaded=true
+                log_debug "Logging module loaded, switching to structured logging"
+            fi
+            
+            # Use appropriate logging method
+            if [[ "$logging_loaded" == "true" ]]; then
+                log_debug "Loaded module: $module"
+            else
+                echo "[DEBUG] Loaded module: $module" >&2
+            fi
         else
-            log_warn "Module not found: $module_path"
+            if [[ "$logging_loaded" == "true" ]]; then
+                log_warn "Module not found: $module_path"
+            else
+                echo "[WARN] Module not found: $module_path" >&2
+            fi
         fi
     done
 }
@@ -1385,18 +1405,22 @@ parse_arguments() {
 # ===============================================================================
 
 main() {
-    log_info "Hybrid Claude Monitor v$VERSION starting up"
+    # Note: Cannot use logging functions yet - dependencies not loaded
+    echo "[INFO] Hybrid Claude Monitor v$VERSION starting up"
+    
+    # Parse Kommandozeilen-Argumente first (no dependencies needed)
+    parse_arguments "$@"
+    
+    # CRITICAL FIX: Load dependencies BEFORE trying to load configuration
+    # This ensures config-loader.sh is sourced before load_system_config() is called
+    load_dependencies
+    
+    # Now logging functions are available
     log_debug "Script directory: $SCRIPT_DIR"
     log_debug "Working directory: $WORKING_DIR"
     
-    # Parse Kommandozeilen-Argumente
-    parse_arguments "$@"
-    
-    # Lade Konfiguration
+    # Load configuration (now dependencies are available)
     load_configuration
-    
-    # Lade Dependencies
-    load_dependencies
     
     # Handle Session Management Operations (these work even if task queue is unavailable)
     # Enhanced Session Management Operations Check (Issue #89)
