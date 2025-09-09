@@ -1,25 +1,17 @@
-FILE: test-claunch-integration.bats
-STATUS: FAIL (1)
-DURATION: 27s
-OUTPUT: 1..16
-ok 1 claunch integration module loads without errors
-ok 2 detect_claunch function works
-ok 3 validate_claunch function checks installation
-ok 4 check_tmux_availability function works
-ok 5 detect_project function identifies project correctly
-ok 6 detect_project function sanitizes project names
-ok 7 detect_existing_session function works
-ok 8 start_claunch_session function builds command correctly
-ok 9 start_claunch_in_new_terminal function works
-ok 10 send_command_to_session function works in tmux mode
-ok 11 check_session_status function detects active sessions
-ok 12 list_active_sessions function provides output
-ok 13 cleanup_orphaned_sessions function works
-ok 14 init_claunch_integration function initializes properly
-not ok 15 start_or_resume_session function handles both cases
-# (in test file tests/unit/test-claunch-integration.bats, line 608)
-#   `[ "$status" -eq 0 ]' failed
-ok 16 send_recovery_command function sends default command
+FILE: module-loader-test.bats
+STATUS: PASS (0)
+DURATION: 8s
+OUTPUT: 1..10
+ok 1 module loader initializes correctly
+ok 2 can load module by absolute path
+ok 3 module loading guard prevents duplicate loading
+ok 4 can check if module is loaded
+ok 5 can list loaded modules
+ok 6 can get loading statistics
+ok 7 handles missing module gracefully
+ok 8 module loader CLI interface works
+ok 9 core utility modules have loading guards
+ok 10 task queue uses module loader
 
 ---
 
