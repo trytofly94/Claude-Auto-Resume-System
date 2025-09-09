@@ -693,8 +693,7 @@ schedule_task_retry() {
     load_task_queue_if_needed
     if declare -f retry_task >/dev/null 2>&1; then
         retry_task "$task_id"
-            return $?
-        fi
+        return $?
     fi
     
     log_warn "Task retry function not available - manual intervention may be required"

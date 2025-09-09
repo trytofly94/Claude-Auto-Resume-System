@@ -277,26 +277,33 @@ cleanup_test_environment() {
     if declare -f detect_project >/dev/null 2>&1; then
         # Create test project structure
         mkdir -p "$TEST_PROJECT_DIR/test-project"
-        cd "$TEST_PROJECT_DIR/test-project"
         
-        # Run function and capture variables to file for BATS compatibility
-        run bash -c "
-            source '$BATS_TEST_DIRNAME/../../src/claunch-integration.sh' 2>/dev/null || {
-                detect_project() {
-                    local working_dir=\"\${1:-\$(pwd)}\"
-                    PROJECT_NAME=\$(basename \"\$working_dir\")
-                    PROJECT_NAME=\${PROJECT_NAME//[^a-zA-Z0-9_-]/_}
-                    TMUX_SESSION_NAME=\"claude-auto-\${PROJECT_NAME}\"
-                }
-            }
-            detect_project '$(pwd)'
-            echo \"PROJECT_NAME='\$PROJECT_NAME'\" > '$TEST_VARS_FILE'
-            echo \"TMUX_SESSION_NAME='\$TMUX_SESSION_NAME'\" >> '$TEST_VARS_FILE'
-        "
+        # Test with simple script
+        cat > "$TEST_PROJECT_DIR/detect_test.sh" << 'EOF'
+#!/bin/bash
+set -e
+source "$1/src/claunch-integration.sh" 2>/dev/null || {
+    detect_project() {
+        local working_dir="${1:-$(pwd)}"
+        PROJECT_NAME=$(basename "$working_dir")
+        PROJECT_NAME=${PROJECT_NAME//[^a-zA-Z0-9_-]/_}
+        TMUX_SESSION_NAME="claude-auto-${PROJECT_NAME}"
+    }
+}
+detect_project "$2"
+echo "PROJECT_NAME='$PROJECT_NAME'"
+echo "TMUX_SESSION_NAME='$TMUX_SESSION_NAME'"
+EOF
+        
+        chmod +x "$TEST_PROJECT_DIR/detect_test.sh"
+        
+        # Run function and capture output
+        run "$TEST_PROJECT_DIR/detect_test.sh" "$BATS_TEST_DIRNAME/../.." "$TEST_PROJECT_DIR/test-project"
         [ "$status" -eq 0 ]
         
-        # Import variables from file
-        import_test_variables
+        # Extract variables from output
+        eval $(echo "$output" | grep "PROJECT_NAME=")
+        eval $(echo "$output" | grep "TMUX_SESSION_NAME=")
         
         # Verify project detection
         [ -n "$PROJECT_NAME" ]
@@ -312,34 +319,38 @@ cleanup_test_environment() {
         # Create project with special characters
         local test_dir_name="test-project@#\$%^&*()"
         mkdir -p "$TEST_PROJECT_DIR/$test_dir_name"
-        cd "$TEST_PROJECT_DIR/$test_dir_name"
         
-        # Run sanitization with debugging and file-based variable capture
-        run bash -c "
-            source '$BATS_TEST_DIRNAME/../../src/claunch-integration.sh' 2>/dev/null || {
-                detect_project() {
-                    local working_dir=\"\${1:-\$(pwd)}\"
-                    PROJECT_NAME=\$(basename \"\$working_dir\")
-                    PROJECT_NAME=\${PROJECT_NAME//[^a-zA-Z0-9_-]/_}
-                    TMUX_SESSION_NAME=\"claude-auto-\${PROJECT_NAME}\"
-                }
-            }
-            detect_project '$(pwd)'
-            echo \"DEBUG: Original dir: \$(basename '$(pwd)')\" >&2
-            echo \"DEBUG: Sanitized PROJECT_NAME: '\$PROJECT_NAME'\" >&2
-            echo \"PROJECT_NAME='\$PROJECT_NAME'\" > '$TEST_VARS_FILE'
-            # Test the actual regex used in the code
-            if [[ \"\$PROJECT_NAME\" =~ ^[a-zA-Z0-9_-]+\$ ]]; then
-                echo \"SANITIZATION_VALID=true\" >> '$TEST_VARS_FILE'
-            else
-                echo \"SANITIZATION_VALID=false\" >> '$TEST_VARS_FILE'
-                echo \"ACTUAL_VALUE='\$PROJECT_NAME'\" >> '$TEST_VARS_FILE'
-            fi
-        "
+        # Test with simple script
+        cat > "$TEST_PROJECT_DIR/sanitize_test.sh" << 'EOF'
+#!/bin/bash
+set -e
+source "$1/src/claunch-integration.sh" 2>/dev/null || {
+    detect_project() {
+        local working_dir="${1:-$(pwd)}"
+        PROJECT_NAME=$(basename "$working_dir")
+        PROJECT_NAME=${PROJECT_NAME//[^a-zA-Z0-9_-]/_}
+        TMUX_SESSION_NAME="claude-auto-${PROJECT_NAME}"
+    }
+}
+detect_project "$2"
+echo "PROJECT_NAME='$PROJECT_NAME'"
+# Test the actual regex used in the code
+if [[ "$PROJECT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "SANITIZATION_VALID=true"
+else
+    echo "SANITIZATION_VALID=false"
+fi
+EOF
+        
+        chmod +x "$TEST_PROJECT_DIR/sanitize_test.sh"
+        
+        # Run function and capture output
+        run "$TEST_PROJECT_DIR/sanitize_test.sh" "$BATS_TEST_DIRNAME/../.." "$TEST_PROJECT_DIR/$test_dir_name"
         [ "$status" -eq 0 ]
         
-        # Import test results
-        import_test_variables
+        # Extract variables from output
+        eval $(echo "$output" | grep "PROJECT_NAME=")
+        eval $(echo "$output" | grep "SANITIZATION_VALID=")
         
         # Debug output
         echo "Sanitized project name: '$PROJECT_NAME'"
@@ -560,7 +571,7 @@ cleanup_test_environment() {
         run list_active_sessions
         [ "$status" -eq 0 ]
         [ -n "$output" ]
-        [[ "$output" =~ "Active claunch Sessions" ]]
+        [[ "$output" =~ "Active Project-Aware Claude Sessions" ]]
         
         unset CLAUNCH_PATH
         unset -f claunch
@@ -595,6 +606,13 @@ cleanup_test_environment() {
 @test "start_or_resume_session function handles both cases" {
     if declare -f start_or_resume_session >/dev/null 2>&1; then
         export DRY_RUN=true
+        export USE_CLAUNCH=true
+        export CLAUNCH_PATH="/usr/local/bin/claunch"
+        
+        # Mock logging functions
+        log_info() { echo "[INFO] $*"; }
+        log_debug() { echo "[DEBUG] $*"; }
+        export -f log_info log_debug
         
         # Mock detect_existing_session to return false (no existing session)
         detect_existing_session() { return 1; }
@@ -604,11 +622,16 @@ cleanup_test_environment() {
         start_claunch_session() { echo "Started new session"; return 0; }
         export -f start_claunch_session
         
+        # Mock start_claunch_in_new_terminal
+        start_claunch_in_new_terminal() { echo "Started new terminal session"; return 0; }
+        export -f start_claunch_in_new_terminal
+        
         run start_or_resume_session "$(pwd)" false "continue"
         [ "$status" -eq 0 ]
-        [[ "$output" =~ "Starting new session" ]]
+        [[ "$output" =~ "Starting new claunch session" ]]
         
-        unset -f detect_existing_session start_claunch_session
+        unset -f detect_existing_session start_claunch_session start_claunch_in_new_terminal log_info log_debug
+        unset USE_CLAUNCH CLAUNCH_PATH
     else
         skip "start_or_resume_session function not implemented yet"
     fi

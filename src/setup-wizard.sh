@@ -11,6 +11,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ===============================================================================
+# CRITICAL: LOAD LOGGING MODULE FIRST (Issue #127)
+# ===============================================================================
+
+# Load logging utilities before any log calls
+if [[ -f "$SCRIPT_DIR/utils/logging.sh" ]]; then
+    source "$SCRIPT_DIR/utils/logging.sh"
+else
+    echo "ERROR: Cannot find logging utilities" >&2
+    exit 1
+fi
+
+# ===============================================================================
 # MODULAR ARCHITECTURE - LOAD WIZARD MODULES
 # ===============================================================================
 
@@ -18,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WIZARD_MODULES_DIR="$SCRIPT_DIR/wizard"
 
 if [[ -d "$WIZARD_MODULES_DIR" ]]; then
-    # Lade Wizard-Module wenn verfügbar
+    # Lade Wizard-Module wenn verfügbar (now logging is available)
     for module in config validation detection; do
         module_path="$WIZARD_MODULES_DIR/${module}.sh"
         if [[ -f "$module_path" ]]; then
@@ -186,14 +198,7 @@ validate_choice() {
 
 fi  # Ende der monolithischen Input-Validation-Funktionen
 
-# Lade Utility-Module
-if [[ -f "$SCRIPT_DIR/utils/logging.sh" ]]; then
-    source "$SCRIPT_DIR/utils/logging.sh"
-else
-    echo "ERROR: Cannot find logging utilities" >&2
-    exit 1
-fi
-
+# Load remaining utility modules (logging already loaded above)
 if [[ -f "$SCRIPT_DIR/session-manager.sh" ]]; then
     source "$SCRIPT_DIR/session-manager.sh"
 else

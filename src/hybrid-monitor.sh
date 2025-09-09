@@ -174,12 +174,14 @@ trap interrupt_handler INT TERM
 
 # Lade alle erforderlichen Module
 load_dependencies() {
-    log_debug "Loading dependencies from: $SCRIPT_DIR"
+    # Note: Cannot use log_debug yet - logging.sh not loaded
+    echo "[DEBUG] Loading dependencies from: $SCRIPT_DIR" >&2
     
-    # Lade Utility-Module in korrekter Reihenfolge
+    # CRITICAL: Load logging.sh FIRST so other modules can use logging functions
+    # Then load other utilities in dependency order
     local modules=(
-        "utils/config-loader.sh"
         "utils/logging.sh"
+        "utils/config-loader.sh"
         "utils/network.sh" 
         "utils/terminal.sh"
         "claunch-integration.sh"
@@ -205,14 +207,32 @@ load_dependencies() {
         export TASK_QUEUE_AVAILABLE=false
     fi
     
+    local logging_loaded=false
+    
     for module in "${modules[@]}"; do
         local module_path="$SCRIPT_DIR/$module"
         if [[ -f "$module_path" ]]; then
             # shellcheck source=/dev/null
             source "$module_path"
-            log_debug "Loaded module: $module"
+            
+            # After loading logging.sh, we can use log functions
+            if [[ "$module" == "utils/logging.sh" ]]; then
+                logging_loaded=true
+                log_debug "Logging module loaded, switching to structured logging"
+            fi
+            
+            # Use appropriate logging method
+            if [[ "$logging_loaded" == "true" ]]; then
+                log_debug "Loaded module: $module"
+            else
+                echo "[DEBUG] Loaded module: $module" >&2
+            fi
         else
-            log_warn "Module not found: $module_path"
+            if [[ "$logging_loaded" == "true" ]]; then
+                log_warn "Module not found: $module_path"
+            else
+                echo "[WARN] Module not found: $module_path" >&2
+            fi
         fi
     done
 }
@@ -633,20 +653,83 @@ check_usage_limits() {
                 return 2
             fi
             
-            # Prüfe Output auf Limit-Meldungen
-            if echo "$claude_output" | grep -q "Claude AI usage limit reached\|usage limit reached"; then
-                log_info "Usage limit detected via CLI check"
-                limit_detected=true
+            # Comprehensive usage limit pattern detection
+            local limit_patterns=(
+                "Claude AI usage limit reached"
+                "usage limit reached"
+                "rate limit"
+                "too many requests"
+                "please try again later"
+                "request limit exceeded"
+                "quota exceeded"
+                "temporarily unavailable"
+                "service temporarily overloaded"
+                "try again at [0-9]\+[ap]m"
+                "try again after [0-9]\+[ap]m"
+                "come back at [0-9]\+[ap]m"
+                "available again at [0-9]\+[ap]m"
+                "reset at [0-9]\+[ap]m"
+                "limit resets at [0-9]\+[ap]m"
+                "wait until [0-9]\+[ap]m"
+                "blocked until [0-9]\+[ap]m"
+            )
+            
+            local pattern_found=""
+            for pattern in "${limit_patterns[@]}"; do
+                if echo "$claude_output" | grep -iq "$pattern"; then
+                    pattern_found="$pattern"
+                    log_info "Usage limit detected via pattern: $pattern_found"
+                    limit_detected=true
+                    break
+                fi
+            done
+            
+            if [[ "$limit_detected" == "true" ]]; then
+                # Enhanced timestamp extraction for pm/am patterns
+                local extracted_timestamp=""
                 
-                # Extrahiere Timestamp falls vorhanden
-                local extracted_timestamp
-                extracted_timestamp=$(echo "$claude_output" | grep -o '[0-9]\{10,\}' | head -1 || echo "")
+                # Try to extract pm/am time patterns
+                local time_match
+                if time_match=$(echo "$claude_output" | grep -io "[0-9]\+[ap]m" | head -1); then
+                    log_debug "Extracted time pattern: $time_match"
+                    
+                    # Convert pm/am to 24h timestamp
+                    local hour_part="${time_match%[ap]m}"
+                    local ampm_part="${time_match: -2}"
+                    
+                    # Convert to 24h format
+                    if [[ "$ampm_part" == "pm" && "$hour_part" -ne 12 ]]; then
+                        hour_part=$((hour_part + 12))
+                    elif [[ "$ampm_part" == "am" && "$hour_part" -eq 12 ]]; then
+                        hour_part=0
+                    fi
+                    
+                    # Calculate next occurrence of this time today or tomorrow
+                    local target_time
+                    target_time=$(date -d "today ${hour_part}:00" +%s 2>/dev/null || date -j -f "%H:%M" "${hour_part}:00" +%s 2>/dev/null)
+                    local current_time=$(date +%s)
+                    
+                    if [[ $target_time -le $current_time ]]; then
+                        # If time has passed today, set for tomorrow
+                        target_time=$(date -d "tomorrow ${hour_part}:00" +%s 2>/dev/null || date -j -v+1d -f "%H:%M" "${hour_part}:00" +%s 2>/dev/null)
+                    fi
+                    
+                    extracted_timestamp="$target_time"
+                    log_debug "Calculated resume timestamp: $extracted_timestamp"
+                fi
+                
+                # Fallback: try to extract raw timestamp
+                if [[ -z "$extracted_timestamp" ]]; then
+                    extracted_timestamp=$(echo "$claude_output" | grep -o '[0-9]\{10,\}' | head -1 || echo "")
+                fi
                 
                 if [[ -n "$extracted_timestamp" && "$extracted_timestamp" =~ ^[0-9]+$ ]]; then
                     resume_timestamp="$extracted_timestamp"
+                    log_debug "Using extracted timestamp: $extracted_timestamp"
                 else
                     # Standard-Wartezeit falls kein Timestamp verfügbar
                     resume_timestamp=$(date -d "+${USAGE_LIMIT_COOLDOWN:-300} seconds" +%s 2>/dev/null || date -v+"${USAGE_LIMIT_COOLDOWN:-300}"S +%s 2>/dev/null || echo $(($(date +%s) + ${USAGE_LIMIT_COOLDOWN:-300})))
+                    log_debug "Using default cooldown: ${USAGE_LIMIT_COOLDOWN:-300}s"
                 fi
             fi
         else
@@ -1385,17 +1468,21 @@ parse_arguments() {
 # ===============================================================================
 
 main() {
-    log_info "Hybrid Claude Monitor v$VERSION starting up"
+    # Note: Cannot use logging functions yet - dependencies not loaded
+    echo "[INFO] Hybrid Claude Monitor v$VERSION starting up"
+    
+    # Parse Kommandozeilen-Argumente first (no dependencies needed)
+    parse_arguments "$@"
+    
+    # CRITICAL FIX: Load dependencies BEFORE trying to load configuration
+    # This ensures config-loader.sh is sourced before load_system_config() is called
+    load_dependencies
+    
+    # Now logging functions are available
     log_debug "Script directory: $SCRIPT_DIR"
     log_debug "Working directory: $WORKING_DIR"
     
-    # Parse Kommandozeilen-Argumente
-    parse_arguments "$@"
-    
-    # Lade Dependencies (muss vor load_configuration aufgerufen werden)
-    load_dependencies
-    
-    # Lade Konfiguration
+    # Load configuration (now dependencies are available)
     load_configuration
     
     # Handle Session Management Operations (these work even if task queue is unavailable)

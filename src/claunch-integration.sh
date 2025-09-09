@@ -47,6 +47,9 @@ if [[ -f "$SCRIPT_DIR/utils/terminal.sh" ]]; then
     source "$SCRIPT_DIR/utils/terminal.sh"
 fi
 
+# Session-Manager wird bei Bedarf von anderen Modulen geladen
+# um zirkuläre Dependencies zu vermeiden
+
 # Prüfe ob Kommando verfügbar ist
 has_command() {
     command -v "$1" >/dev/null 2>&1
@@ -302,15 +305,17 @@ detect_project() {
         log_debug "Generated project ID: $PROJECT_ID"
     else
         # Fallback if session-manager not available
-        log_warn "session-manager functions not available, using basic project detection"
-        PROJECT_ID=$(basename "$working_dir" | sed 's/[^a-zA-Z0-9-]//g')-$(date +%s | cut -c-6)
+        log_debug "session-manager functions not available, using basic project detection"
+        local basename_dir
+        basename_dir=$(basename "$working_dir")
+        PROJECT_ID=${basename_dir//[^a-zA-Z0-9-]/}-$(date +%s | cut -c-6)
     fi
     
     # Backward compatible project name (for legacy code)
     PROJECT_NAME=$(basename "$working_dir")
     PROJECT_NAME=${PROJECT_NAME//[^a-zA-Z0-9_-]/_}
     
-    log_info "Detected project: $PROJECT_NAME (ID: $PROJECT_ID)"
+    log_debug "Detected project: $PROJECT_NAME (ID: $PROJECT_ID)"
     
     # Create project-specific tmux session name
     TMUX_SESSION_NAME="${TMUX_SESSION_PREFIX}-${PROJECT_ID}"
