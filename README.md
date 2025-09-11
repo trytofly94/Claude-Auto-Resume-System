@@ -8,11 +8,13 @@ Intelligentes Automatisierungssystem für robustes Claude CLI Session-Management
 
 ## Features
 
+- 🤖 **Vollautomatisierte Task-Verarbeitung** - Automatische Abarbeitung aller ausstehenden Aufgaben ohne Benutzereingriff
 - 🔄 **Automatische Session-Wiederherstellung** nach Usage-Limits
-- ⏱️ **Intelligente Wartezeiten** mit exponentiellen Backoff-Strategien  
+- ⏱️ **Erweiterte Usage-Limit-Erkennung** - Robuste PM/AM-Mustererkennung ("blocked until 3pm", "try again at 9am")
+- 📊 **Live-Countdown-Anzeige** mit intelligenter Zeitstempel-Berechnung
 - 🖥️ **tmux-Integration** für persistente Terminal-Sessions
-- 📊 **Präzise Usage-Limit-Detection** mit Live-Countdown
 - 🛡️ **Fehlertolerante Wiederverbindung** bei Netzwerkproblemen
+- 🚀 **Unüberwachter Betrieb** - Kontinuierliches Monitoring ohne manuelle Eingriffe
 - 📝 **Strukturiertes Logging** für Debugging und Monitoring
 - 📋 **Task Queue System** für GitHub Issue-Management
 - 🔧 **Cross-Platform-Support** (macOS, Linux)
@@ -45,11 +47,14 @@ chmod +x src/*.sh scripts/*.sh
 ## Quick Start
 
 ```bash
-# Continuous Monitoring starten
+# Core Automation - Vollautomatisierte Task-Verarbeitung
+./src/hybrid-monitor.sh --queue-mode --continuous
+
+# Standard Continuous Monitoring
 ./src/hybrid-monitor.sh --continuous
 
-# Mit Konfiguration
-./src/hybrid-monitor.sh --continuous --config config/user.conf
+# Mit Debug-Ausgabe (empfohlen für erste Tests)
+./src/hybrid-monitor.sh --queue-mode --continuous --debug
 
 # Test-Modus (30 Sekunden)
 ./src/hybrid-monitor.sh --test-mode 30

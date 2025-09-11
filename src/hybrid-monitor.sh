@@ -499,19 +499,481 @@ process_task_queue() {
     local task_data
     task_data=$("${TASK_QUEUE_SCRIPT}" show "$next_task_id" 2>/dev/null)
     
-    # Placeholder für Phase 2 - aktuell nur logging
-    # TODO: Implement execute_single_task function in Phase 2
-    log_info "Task processing will be implemented in Phase 2: $next_task_id"
+    # Execute the task with enhanced error handling and progress monitoring
+    local execution_result
+    local completion_reason="normal"
     
-    # NOTE: When task execution is implemented, add context clearing here:
-    # if task_completed_successfully; then
-    #     execute_context_clearing "$task_data" "normal" "${MAIN_SESSION_ID:-}"
-    # elif usage_limit_hit; then
-    #     # Don't clear context for usage limit recovery
-    #     log_debug "Usage limit hit, preserving context for recovery"
-    # fi
+    if execute_single_task "$next_task_id" "$task_data"; then
+        execution_result="success"
+        log_info "Task $next_task_id completed successfully"
+        
+        # Update task status to completed
+        if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "completed" "Task completed successfully by automated processing"; then
+            log_warn "Failed to update task status to completed for $next_task_id"
+        fi
+        
+    else
+        execution_result="failed"
+        local exit_code=$?
+        
+        # Check if failure was due to usage limit
+        if [[ $exit_code -eq 42 ]]; then
+            completion_reason="usage_limit_recovery"
+            log_warn "Task $next_task_id paused due to usage limit - will resume automatically"
+            
+            # Update task status to in-progress (paused for usage limit)
+            if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "in_progress" "Task paused due to usage limit, will resume automatically"; then
+                log_warn "Failed to update task status for paused task $next_task_id"
+            fi
+            
+        else
+            completion_reason="error"
+            log_error "Task $next_task_id failed with exit code: $exit_code"
+            
+            # Update task status to error with details
+            local error_message="Task failed during automated processing (exit code: $exit_code)"
+            if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "error" "$error_message"; then
+                log_warn "Failed to update task status to error for $next_task_id"
+            fi
+        fi
+    fi
+    
+    # Context clearing decision logic
+    if should_clear_context "$task_data" "$completion_reason"; then
+        log_debug "Context clearing recommended for task $next_task_id (reason: $completion_reason)"
+        execute_context_clearing "$task_data" "$completion_reason" "${MAIN_SESSION_ID:-}"
+    else
+        log_debug "Context preservation recommended for task $next_task_id (reason: $completion_reason)"
+    fi
     
     return 0
+}
+
+# ===============================================================================
+# TASK EXECUTION ENGINE (Phase 2 Implementation)
+# ===============================================================================
+
+# Execute a single task with comprehensive error handling and progress monitoring
+execute_single_task() {
+    local task_id="$1"
+    local task_data="$2"
+    
+    if [[ -z "$task_id" || -z "$task_data" ]]; then
+        log_error "execute_single_task: task_id and task_data required"
+        return 1
+    fi
+    
+    log_info "Starting execution of task: $task_id"
+    
+    # Extract task details from JSON data
+    local task_type task_command task_description task_priority
+    if has_command jq; then
+        task_type=$(echo "$task_data" | jq -r '.type // "custom"')
+        task_command=$(echo "$task_data" | jq -r '.command // .description // ""')
+        task_description=$(echo "$task_data" | jq -r '.description // .command // ""')
+        task_priority=$(echo "$task_data" | jq -r '.priority // "normal"')
+    else
+        # Fallback parsing without jq
+        task_type="custom"
+        task_command=$(echo "$task_data" | grep -o '"command"[^,]*' | sed 's/"command"[^"]*"\([^"]*\)".*/\1/' || echo "")
+        task_description=$(echo "$task_data" | grep -o '"description"[^,]*' | sed 's/"description"[^"]*"\([^"]*\)".*/\1/' || echo "")
+        task_priority="normal"
+    fi
+    
+    log_debug "Task details: type=$task_type, priority=$task_priority"
+    log_debug "Task command/description: $task_command"
+    
+    # Update task status to in_progress
+    if ! "${TASK_QUEUE_SCRIPT}" update-status "$task_id" "in_progress" "Task execution started by automated processing"; then
+        log_warn "Failed to update task status to in_progress for $task_id"
+    fi
+    
+    # Ensure we have an active Claude session for task execution
+    local session_id="${MAIN_SESSION_ID:-}"
+    if [[ -z "$session_id" ]]; then
+        log_info "No active session found, starting new Claude session for task execution"
+        if ! start_or_continue_claude_session; then
+            log_error "Failed to start Claude session for task execution"
+            return 1
+        fi
+        session_id="${MAIN_SESSION_ID:-}"
+    fi
+    
+    if [[ -z "$session_id" ]]; then
+        log_error "No session available for task execution"
+        return 1
+    fi
+    
+    log_debug "Using session $session_id for task execution"
+    
+    # Execute task based on type
+    local execution_start_time=$(date +%s)
+    local execution_success=false
+    
+    case "$task_type" in
+        "github_issue")
+            execution_success=$(execute_github_issue_task "$session_id" "$task_id" "$task_data")
+            ;;
+        "github_pr")
+            execution_success=$(execute_github_pr_task "$session_id" "$task_id" "$task_data")
+            ;;
+        "custom")
+            execution_success=$(execute_custom_task "$session_id" "$task_id" "$task_data")
+            ;;
+        *)
+            log_warn "Unknown task type: $task_type, treating as custom task"
+            execution_success=$(execute_custom_task "$session_id" "$task_id" "$task_data")
+            ;;
+    esac
+    
+    local execution_end_time=$(date +%s)
+    local execution_duration=$((execution_end_time - execution_start_time))
+    
+    log_debug "Task execution completed in ${execution_duration}s"
+    
+    if [[ "$execution_success" == "true" ]]; then
+        log_info "Task $task_id executed successfully"
+        return 0
+    else
+        log_error "Task $task_id execution failed"
+        return 1
+    fi
+}
+
+# Execute GitHub issue task
+execute_github_issue_task() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_data="$3"
+    
+    local issue_number repo_url issue_url
+    if has_command jq; then
+        issue_number=$(echo "$task_data" | jq -r '.issue_number // ""')
+        repo_url=$(echo "$task_data" | jq -r '.repo_url // ""')
+        issue_url=$(echo "$task_data" | jq -r '.issue_url // ""')
+    else
+        issue_number=$(echo "$task_data" | grep -o '"issue_number"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        repo_url=""
+        issue_url=""
+    fi
+    
+    if [[ -z "$issue_number" ]]; then
+        log_error "GitHub issue task missing issue_number"
+        echo "false"
+        return 1
+    fi
+    
+    log_info "Executing GitHub issue task: #$issue_number"
+    
+    # Send command to Claude session to process the GitHub issue
+    local command="/dev $issue_number"
+    if ! execute_command_in_session "$session_id" "$command"; then
+        log_error "Failed to send GitHub issue command to session"
+        echo "false"
+        return 1
+    fi
+    
+    # Monitor task execution with enhanced usage limit detection
+    if monitor_task_execution "$session_id" "$task_id" "github_issue"; then
+        echo "true"
+        return 0
+    else
+        local exit_code=$?
+        echo "false"
+        return $exit_code
+    fi
+}
+
+# Execute GitHub PR task
+execute_github_pr_task() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_data="$3"
+    
+    local pr_number repo_url pr_url
+    if has_command jq; then
+        pr_number=$(echo "$task_data" | jq -r '.pr_number // ""')
+        repo_url=$(echo "$task_data" | jq -r '.repo_url // ""')
+        pr_url=$(echo "$task_data" | jq -r '.pr_url // ""')
+    else
+        pr_number=$(echo "$task_data" | grep -o '"pr_number"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        repo_url=""
+        pr_url=""
+    fi
+    
+    if [[ -z "$pr_number" ]]; then
+        log_error "GitHub PR task missing pr_number"
+        echo "false"
+        return 1
+    fi
+    
+    log_info "Executing GitHub PR task: #$pr_number"
+    
+    # Send command to Claude session to process the GitHub PR
+    local command="/dev pr:$pr_number"
+    if ! execute_command_in_session "$session_id" "$command"; then
+        log_error "Failed to send GitHub PR command to session"
+        echo "false"
+        return 1
+    fi
+    
+    # Monitor task execution with enhanced usage limit detection
+    if monitor_task_execution "$session_id" "$task_id" "github_pr"; then
+        echo "true"
+        return 0
+    else
+        local exit_code=$?
+        echo "false"
+        return $exit_code
+    fi
+}
+
+# Execute custom task
+execute_custom_task() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_data="$3"
+    
+    local command description
+    if has_command jq; then
+        command=$(echo "$task_data" | jq -r '.command // .description // ""')
+        description=$(echo "$task_data" | jq -r '.description // .command // ""')
+    else
+        command=$(echo "$task_data" | grep -o '"command"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        description=$(echo "$task_data" | grep -o '"description"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+    fi
+    
+    if [[ -z "$command" && -z "$description" ]]; then
+        log_error "Custom task missing both command and description"
+        echo "false"
+        return 1
+    fi
+    
+    local task_command="${command:-$description}"
+    log_info "Executing custom task: $task_command"
+    
+    # Send command to Claude session
+    if ! execute_command_in_session "$session_id" "$task_command"; then
+        log_error "Failed to send custom command to session"
+        echo "false"
+        return 1
+    fi
+    
+    # Monitor task execution with enhanced usage limit detection
+    if monitor_task_execution "$session_id" "$task_id" "custom"; then
+        echo "true"
+        return 0
+    else
+        local exit_code=$?
+        echo "false"
+        return $exit_code
+    fi
+}
+
+# Execute command in Claude session
+execute_command_in_session() {
+    local session_id="$1"
+    local command="$2"
+    
+    log_debug "Sending command to session $session_id: $command"
+    
+    # Use claunch to send command to session
+    if declare -f send_command_to_session >/dev/null 2>&1; then
+        if send_command_to_session "$session_id" "$command"; then
+            log_debug "Command sent successfully to session"
+            return 0
+        else
+            log_error "Failed to send command via session manager"
+            return 1
+        fi
+    fi
+    
+    # Fallback: direct claunch execution
+    if has_command claunch; then
+        if echo "$command" | claunch send "$session_id" 2>/dev/null; then
+            log_debug "Command sent via direct claunch"
+            return 0
+        else
+            log_error "Failed to send command via direct claunch"
+            return 1
+        fi
+    fi
+    
+    log_error "No method available to send command to session"
+    return 1
+}
+
+# Monitor task execution with enhanced usage limit detection and real-time progress
+monitor_task_execution() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_type="$3"
+    local max_wait_time="${4:-1800}"  # Default 30 minutes max
+    
+    log_debug "Monitoring execution of task $task_id (type: $task_type, max_wait: ${max_wait_time}s)"
+    
+    local start_time=$(date +%s)
+    local last_activity_time=$start_time
+    local check_interval=10  # Check every 10 seconds
+    local activity_timeout=300  # 5 minutes without activity = timeout
+    local consecutive_checks=0
+    local max_consecutive_checks=$((max_wait_time / check_interval))
+    
+    while [[ $consecutive_checks -lt $max_consecutive_checks ]]; do
+        ((consecutive_checks++))
+        local current_time=$(date +%s)
+        local elapsed_time=$((current_time - start_time))
+        
+        log_debug "Task monitoring cycle $consecutive_checks/$max_consecutive_checks (elapsed: ${elapsed_time}s)"
+        
+        # Get session output for analysis
+        local session_output
+        if session_output=$(get_session_output "$session_id" 2>/dev/null); then
+            
+            # Check for usage limit with enhanced detection
+            if detect_usage_limit_in_queue "$session_output" "$task_id"; then
+                log_warn "Usage limit detected during task execution - initiating pause"
+                
+                # Pause queue processing for usage limit
+                if pause_queue_for_usage_limit "" "$task_id" "time_specific_limit"; then
+                    log_info "Queue paused for usage limit, task will resume automatically"
+                    return 42  # Special exit code for usage limit
+                else
+                    log_error "Failed to pause queue for usage limit"
+                    return 1
+                fi
+            fi
+            
+            # Check for task completion indicators
+            if check_task_completion_indicators "$session_output" "$task_type"; then
+                log_info "Task completion detected for $task_id"
+                return 0
+            fi
+            
+            # Check for error indicators
+            if check_task_error_indicators "$session_output"; then
+                log_warn "Task error indicators detected for $task_id"
+                return 1
+            fi
+            
+            # Update last activity time if there's new content
+            if [[ -n "$session_output" ]]; then
+                last_activity_time=$current_time
+            fi
+        fi
+        
+        # Check for activity timeout
+        local time_since_activity=$((current_time - last_activity_time))
+        if [[ $time_since_activity -gt $activity_timeout ]]; then
+            log_warn "Task $task_id appears inactive (${time_since_activity}s without activity)"
+            return 1
+        fi
+        
+        # Real-time progress reporting
+        if [[ $((consecutive_checks % 6)) -eq 0 ]]; then  # Every 60 seconds
+            local remaining_time=$((max_wait_time - elapsed_time))
+            log_info "Task $task_id monitoring: ${elapsed_time}s elapsed, ${remaining_time}s remaining"
+        fi
+        
+        sleep $check_interval
+    done
+    
+    log_warn "Task execution monitoring timeout reached for $task_id"
+    return 1
+}
+
+# Check for task completion indicators in session output
+check_task_completion_indicators() {
+    local output="$1"
+    local task_type="$2"
+    
+    # Common completion patterns
+    local completion_patterns=(
+        "task.*completed"
+        "successfully.*finished"
+        "done.*processing"
+        "completed.*successfully"
+        "finished.*task"
+        "pull request.*created"
+        "commit.*created"
+        "issue.*resolved"
+        "implementation.*complete"
+    )
+    
+    # Task-type-specific patterns
+    case "$task_type" in
+        "github_issue")
+            completion_patterns+=(
+                "issue.*implemented"
+                "branch.*created"
+                "changes.*committed"
+            )
+            ;;
+        "github_pr")
+            completion_patterns+=(
+                "pr.*reviewed"
+                "pull request.*analyzed"
+                "merge.*ready"
+            )
+            ;;
+    esac
+    
+    # Check for completion patterns
+    for pattern in "${completion_patterns[@]}"; do
+        if echo "$output" | grep -qi "$pattern"; then
+            log_debug "Task completion pattern matched: $pattern"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Check for task error indicators in session output
+check_task_error_indicators() {
+    local output="$1"
+    
+    local error_patterns=(
+        "error.*occurred"
+        "failed.*to"
+        "could.*not"
+        "unable.*to"
+        "exception.*occurred"
+        "fatal.*error"
+        "command.*not.*found"
+        "permission.*denied"
+    )
+    
+    # Check for error patterns
+    for pattern in "${error_patterns[@]}"; do
+        if echo "$output" | grep -qi "$pattern"; then
+            log_debug "Task error pattern matched: $pattern"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Get session output for monitoring
+get_session_output() {
+    local session_id="$1"
+    local lines="${2:-100}"  # Increased default for better monitoring
+    
+    if declare -f get_session_recent_output >/dev/null 2>&1; then
+        get_session_recent_output "$session_id" "$lines"
+    elif has_command claunch; then
+        # Enhanced claunch output retrieval with error handling
+        if claunch logs "$session_id" --lines="$lines" 2>/dev/null; then
+            return 0
+        else
+            log_debug "Failed to get session output via claunch for session $session_id"
+            return 1
+        fi
+    else
+        log_debug "No method available to get session output"
+        return 1
+    fi
 }
 
 # ===============================================================================

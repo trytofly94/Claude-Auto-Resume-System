@@ -49,7 +49,7 @@ has_command() {
 # USAGE LIMIT DETECTION
 # ===============================================================================
 
-# Enhanced usage limit detection for queue processing
+# Enhanced usage limit detection for queue processing with time-specific handling
 detect_usage_limit_in_queue() {
     local session_output="$1"
     local task_id="${2:-}"
@@ -59,6 +59,21 @@ detect_usage_limit_in_queue() {
     fi
     
     log_debug "Checking for usage limit patterns in session output"
+    
+    # First check for time-specific usage limits (pm/am patterns)
+    local extracted_wait_time
+    if extracted_wait_time=$(extract_usage_limit_time_from_output "$session_output"); then
+        log_warn "Time-specific usage limit detected - blocked until specific time"
+        record_usage_limit_occurrence "$task_id" "time_specific_limit"
+        
+        if [[ -n "$task_id" ]]; then
+            create_usage_limit_checkpoint "$task_id"
+        fi
+        
+        # Store the extracted wait time for use in pause calculation
+        echo "WAIT_TIME=$extracted_wait_time" > "/tmp/usage-limit-wait-time.env"
+        return 0
+    fi
     
     # Enhanced usage limit patterns with case-insensitive matching
     local limit_patterns=(
@@ -70,6 +85,11 @@ detect_usage_limit_in_queue() {
         "quota exceeded"
         "temporarily unavailable"
         "service temporarily overloaded"
+        "blocked until"
+        "try again at"
+        "available.*at"
+        "retry at"
+        "wait until"
     )
     
     local limit_detected=false
@@ -157,6 +177,256 @@ EOF
 }
 
 # ===============================================================================
+# ENHANCED TIME-BASED USAGE LIMIT DETECTION
+# ===============================================================================
+
+# Extract specific wait time from usage limit messages
+extract_usage_limit_time_from_output() {
+    local output="$1"
+    
+    # Comprehensive time patterns for various formats
+    local time_patterns=(
+        # Standard am/pm formats
+        "blocked until ([0-9]{1,2})(am|pm)"                      # "blocked until 3pm"
+        "blocked until ([0-9]{1,2}):([0-9]{2})(am|pm)"           # "blocked until 3:30pm"
+        "try again at ([0-9]{1,2})(am|pm)"                       # "try again at 9am"
+        "try again at ([0-9]{1,2}):([0-9]{2})(am|pm)"            # "try again at 9:30am"
+        "available.*at ([0-9]{1,2})(am|pm)"                      # "available tomorrow at 2pm"
+        "available.*at ([0-9]{1,2}):([0-9]{2})(am|pm)"           # "available tomorrow at 2:30pm"
+        "retry at ([0-9]{1,2})(am|pm)"                           # "retry at 4pm"
+        "retry at ([0-9]{1,2}):([0-9]{2})(am|pm)"                # "retry at 4:30pm"
+        "wait until ([0-9]{1,2})(am|pm)"                         # "wait until 5pm"
+        "wait until ([0-9]{1,2}):([0-9]{2})(am|pm)"              # "wait until 5:30pm"
+        "tomorrow at ([0-9]{1,2})(am|pm)"                        # "tomorrow at 8am"
+        "tomorrow at ([0-9]{1,2}):([0-9]{2})(am|pm)"             # "tomorrow at 8:30am"
+        
+        # 24-hour formats
+        "blocked until ([0-9]{1,2}):([0-9]{2})"                   # "blocked until 15:30"
+        "try again at ([0-9]{1,2}):([0-9]{2})"                    # "try again at 21:00"
+        "retry at ([0-9]{1,2}):([0-9]{2})"                        # "retry at 14:45"
+        "wait until ([0-9]{1,2}):([0-9]{2})"                      # "wait until 20:15"
+        
+        # Natural language patterns
+        "usage limit.*([0-9]{1,2})(am|pm)"                       # "usage limit exceeded, try 3pm"
+        "please wait.*([0-9]{1,2})(am|pm)"                       # "please wait until 6pm"
+        "limit exceeded.*([0-9]{1,2})(am|pm)"                    # "limit exceeded, retry at 7am"
+    )
+    
+    log_debug "Analyzing output for time-specific usage limit patterns"
+    
+    # Check each pattern for matches
+    for pattern in "${time_patterns[@]}"; do
+        if echo "$output" | grep -qiE "$pattern"; then
+            log_debug "Matched time pattern: $pattern"
+            
+            # Extract the time components
+            local matched_line
+            matched_line=$(echo "$output" | grep -iE "$pattern" | head -1)
+            
+            local wait_seconds
+            if wait_seconds=$(calculate_wait_time_from_pattern "$matched_line" "$pattern"); then
+                log_info "Successfully extracted wait time: ${wait_seconds}s from pattern match"
+                echo "$wait_seconds"
+                return 0
+            else
+                log_warn "Failed to calculate wait time from matched pattern: $pattern"
+            fi
+        fi
+    done
+    
+    log_debug "No time-specific usage limit patterns found in output"
+    return 1
+}
+
+# Calculate wait time in seconds from matched time pattern
+calculate_wait_time_from_pattern() {
+    local matched_text="$1"
+    local pattern="$2"
+    
+    log_debug "Calculating wait time from: '$matched_text' (pattern: $pattern)"
+    
+    # Extract time components using various regex approaches
+    local hour minute period is_24hour=false is_tomorrow=false
+    
+    # Check if it's a tomorrow reference
+    if echo "$matched_text" | grep -qi "tomorrow"; then
+        is_tomorrow=true
+        log_debug "Tomorrow reference detected"
+    fi
+    
+    # Extract hour, minute, and am/pm period
+    if echo "$matched_text" | grep -qiE "([0-9]{1,2}):([0-9]{2})(am|pm)"; then
+        # Format with minutes and am/pm: "3:30pm"
+        hour=$(echo "$matched_text" | grep -oiE "([0-9]{1,2}):([0-9]{2})(am|pm)" | grep -oE "^[0-9]{1,2}")
+        minute=$(echo "$matched_text" | grep -oiE "([0-9]{1,2}):([0-9]{2})(am|pm)" | grep -oE ":[0-9]{2}" | tr -d ':')
+        period=$(echo "$matched_text" | grep -oiE "(am|pm)" | tr '[:upper:]' '[:lower:]')
+    elif echo "$matched_text" | grep -qiE "([0-9]{1,2})(am|pm)"; then
+        # Format without minutes and am/pm: "3pm"
+        hour=$(echo "$matched_text" | grep -oiE "([0-9]{1,2})(am|pm)" | grep -oE "^[0-9]{1,2}")
+        minute="00"
+        period=$(echo "$matched_text" | grep -oiE "(am|pm)" | tr '[:upper:]' '[:lower:]')
+    elif echo "$matched_text" | grep -qE "([0-9]{1,2}):([0-9]{2})" && ! echo "$matched_text" | grep -qiE "(am|pm)"; then
+        # 24-hour format: "15:30"
+        hour=$(echo "$matched_text" | grep -oE "([0-9]{1,2}):([0-9]{2})" | cut -d: -f1)
+        minute=$(echo "$matched_text" | grep -oE "([0-9]{1,2}):([0-9]{2})" | cut -d: -f2)
+        is_24hour=true
+    else
+        log_warn "Could not extract time components from: '$matched_text'"
+        return 1
+    fi
+    
+    # Validate extracted components
+    if [[ ! "$hour" =~ ^[0-9]+$ ]] || [[ ! "$minute" =~ ^[0-9]+$ ]]; then
+        log_warn "Invalid time components extracted: hour='$hour', minute='$minute'"
+        return 1
+    fi
+    
+    log_debug "Extracted time components: hour=$hour, minute=$minute, period=${period:-24h}, tomorrow=$is_tomorrow"
+    
+    # Convert to 24-hour format if needed
+    local target_hour="$hour"
+    if [[ "$is_24hour" == "false" ]]; then
+        if [[ "$period" == "pm" && "$hour" != "12" ]]; then
+            target_hour=$((hour + 12))
+        elif [[ "$period" == "am" && "$hour" == "12" ]]; then
+            target_hour="0"
+        fi
+    fi
+    
+    # Validate final hour
+    if [[ $target_hour -gt 23 || $target_hour -lt 0 ]]; then
+        log_warn "Invalid target hour: $target_hour"
+        return 1
+    fi
+    
+    # Calculate target timestamp
+    local current_time=$(date +%s)
+    local current_date
+    local target_date
+    
+    if [[ "$is_tomorrow" == "true" ]]; then
+        # Tomorrow at specified time
+        target_date=$(date -d "tomorrow" +%Y-%m-%d 2>/dev/null || date -v+1d +%Y-%m-%d 2>/dev/null)
+    else
+        # Today at specified time (but check if it's already past)
+        target_date=$(date +%Y-%m-%d)
+        
+        # Create target timestamp for today
+        local today_target_time
+        if has_command date && date -d "$target_date $target_hour:$minute:00" "+%s" >/dev/null 2>&1; then
+            today_target_time=$(date -d "$target_date $target_hour:$minute:00" +%s)
+        elif date -j -f "%Y-%m-%d %H:%M:%S" "$target_date $target_hour:$minute:00" "+%s" >/dev/null 2>&1; then
+            today_target_time=$(date -j -f "%Y-%m-%d %H:%M:%S" "$target_date $target_hour:$minute:00" "+%s")
+        else
+            log_warn "Could not create target timestamp for today"
+            return 1
+        fi
+        
+        # If the time has already passed today, assume tomorrow
+        if [[ $today_target_time -le $current_time ]]; then
+            log_debug "Target time has passed today, assuming tomorrow"
+            target_date=$(date -d "tomorrow" +%Y-%m-%d 2>/dev/null || date -v+1d +%Y-%m-%d 2>/dev/null)
+            is_tomorrow=true
+        fi
+    fi
+    
+    # Create final target timestamp
+    local target_timestamp
+    if has_command date && date -d "$target_date $target_hour:$minute:00" "+%s" >/dev/null 2>&1; then
+        target_timestamp=$(date -d "$target_date $target_hour:$minute:00" +%s)
+    elif date -j -f "%Y-%m-%d %H:%M:%S" "$target_date $target_hour:$minute:00" "+%s" >/dev/null 2>&1; then
+        target_timestamp=$(date -j -f "%Y-%m-%d %H:%M:%S" "$target_date $target_hour:$minute:00" "+%s")
+    else
+        log_error "Could not create final target timestamp"
+        return 1
+    fi
+    
+    # Calculate wait time in seconds
+    local wait_seconds=$((target_timestamp - current_time))
+    
+    # Ensure positive wait time
+    if [[ $wait_seconds -le 0 ]]; then
+        log_warn "Calculated wait time is negative or zero: ${wait_seconds}s - using minimum wait"
+        wait_seconds=300  # 5 minutes minimum
+    fi
+    
+    # Log the calculation details
+    local target_datetime
+    if has_command date; then
+        if date -d "@$target_timestamp" "+%Y-%m-%d %H:%M:%S" >/dev/null 2>&1; then
+            target_datetime=$(date -d "@$target_timestamp" "+%Y-%m-%d %H:%M:%S")
+        elif date -r "$target_timestamp" "+%Y-%m-%d %H:%M:%S" >/dev/null 2>&1; then
+            target_datetime=$(date -r "$target_timestamp" "+%Y-%m-%d %H:%M:%S")
+        else
+            target_datetime="unknown"
+        fi
+    else
+        target_datetime="unknown"
+    fi
+    
+    log_info "Wait time calculation: target=$target_datetime, wait_time=${wait_seconds}s ($(($wait_seconds/60))m)"
+    
+    echo "$wait_seconds"
+    return 0
+}
+
+# Enhanced countdown display with better progress indicators
+display_enhanced_usage_limit_countdown() {
+    local total_wait_time="$1"
+    local reason="${2:-usage limit}"
+    local start_time=$(date +%s)
+    local end_time=$((start_time + total_wait_time))
+    
+    log_info "Starting enhanced usage limit countdown display (reason: $reason)"
+    
+    while [[ $(date +%s) -lt $end_time ]]; do
+        local current_time=$(date +%s)
+        local remaining=$((end_time - current_time))
+        
+        if [[ $remaining -le 0 ]]; then
+            break
+        fi
+        
+        # Format remaining time
+        local hours=$((remaining / 3600))
+        local minutes=$(( (remaining % 3600) / 60 ))
+        local seconds=$((remaining % 60))
+        
+        local time_display=""
+        if [[ $hours -gt 0 ]]; then
+            time_display="${hours}h ${minutes}m ${seconds}s"
+        elif [[ $minutes -gt 0 ]]; then
+            time_display="${minutes}m ${seconds}s"
+        else
+            time_display="${seconds}s"
+        fi
+        
+        # Calculate progress percentage
+        local elapsed=$((current_time - start_time))
+        local progress_percent=$(( (elapsed * 100) / total_wait_time ))
+        
+        # Create progress bar
+        local bar_length=20
+        local filled_length=$(( (progress_percent * bar_length) / 100 ))
+        local bar=""
+        for ((i=0; i<bar_length; i++)); do
+            if [[ $i -lt $filled_length ]]; then
+                bar+="▓"
+            else
+                bar+="░"
+            fi
+        done
+        
+        # Display enhanced countdown with progress bar
+        printf "\r[USAGE LIMIT] %s [%s] %d%% - Resuming in: %s" "$reason" "$bar" "$progress_percent" "$time_display"
+        
+        sleep 5  # Update every 5 seconds for better responsiveness
+    done
+    
+    printf "\r[USAGE LIMIT] Wait period completed - resuming operations%*s\n" 50 ""
+}
+
+# ===============================================================================
 # USAGE LIMIT RESPONSE AND QUEUE MANAGEMENT
 # ===============================================================================
 
@@ -166,8 +436,20 @@ pause_queue_for_usage_limit() {
     local current_task_id="${2:-}"
     local detected_pattern="${3:-usage_limit}"
     
-    # Calculate intelligent wait time if not provided
-    if [[ -z "$estimated_wait_time" ]]; then
+    # Check for time-specific wait time from detection
+    local time_specific_wait=""
+    if [[ -f "/tmp/usage-limit-wait-time.env" ]]; then
+        source "/tmp/usage-limit-wait-time.env" 2>/dev/null || true
+        time_specific_wait="$WAIT_TIME"
+        rm -f "/tmp/usage-limit-wait-time.env"
+    fi
+    
+    # Use time-specific wait if available, otherwise calculate intelligent wait time
+    if [[ -n "$time_specific_wait" && "$time_specific_wait" =~ ^[0-9]+$ ]]; then
+        estimated_wait_time="$time_specific_wait"
+        detected_pattern="time_specific_limit"
+        log_info "Using time-specific wait period: ${estimated_wait_time}s (extracted from pm/am pattern)"
+    elif [[ -z "$estimated_wait_time" ]]; then
         estimated_wait_time=$(calculate_usage_limit_wait_time "$current_task_id" "$detected_pattern")
     fi
     
@@ -213,9 +495,9 @@ pause_queue_for_usage_limit() {
     # Create usage limit recovery marker
     create_usage_limit_recovery_marker "$estimated_wait_time" "$current_task_id" "$detected_pattern" "$resume_time"
     
-    # Start countdown display in background if terminal is available
+    # Start enhanced countdown display in background if terminal is available
     if [[ -t 1 ]]; then
-        display_usage_limit_countdown "$estimated_wait_time" &
+        display_enhanced_usage_limit_countdown "$estimated_wait_time" "$detected_pattern" &
         local countdown_pid=$!
         echo "$countdown_pid" > "/tmp/usage-limit-countdown.pid" 2>/dev/null || true
     fi

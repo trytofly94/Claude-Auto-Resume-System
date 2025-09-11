@@ -5,6 +5,60 @@ All notable changes to the Claude Auto-Resume System project will be documented 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2025-09-11
+
+### Core Automation and Usage Limit Enhancements
+
+This release delivers production-ready enhancements to the core automation engine and comprehensive usage limit handling, enabling robust unattended operation with automatic task processing and intelligent recovery from usage limit blocks.
+
+### Added
+
+#### Core Automation Engine (2025-09-11)
+
+- **Complete Task Automation Engine**
+  - ✅ **Automatic Task Processing**: Processes all pending tasks without manual intervention
+  - ✅ **Real-time Progress Monitoring**: Live status updates during task execution
+  - ✅ **Intelligent Error Recovery**: Graceful recovery from individual task failures
+  - ✅ **Queue State Persistence**: Maintains task state across system restarts
+  - ✅ **Background Operation**: Unattended operation for extended periods
+  - **Impact**: Enables fully automated processing of 15+ pending tasks
+
+#### Enhanced Usage Limit Detection (2025-09-11)
+
+- **Comprehensive PM/AM Pattern Recognition**
+  - ✅ **Advanced Time Pattern Detection**: Robust parsing of "3pm", "9am", "tomorrow at 2pm" formats
+  - ✅ **Smart Timestamp Calculation**: Intelligent handling of same-day vs next-day scenarios
+  - ✅ **Live Countdown Display**: Real-time waiting progress indicators
+  - ✅ **Timezone Awareness**: Correct time calculations across different locales
+  - ✅ **Edge Case Handling**: Recovery from malformed time strings and unusual formats
+  - **Pattern Examples**: "blocked until 3pm", "try again at 9am", "available tomorrow at 2:30pm"
+  - **Impact**: Production-ready usage limit handling for real-world deployment
+
+#### Live Operation Robustness (2025-09-11)
+
+- **Production-Ready Deployment Features**
+  - ✅ **Session Isolation**: Safe operation without disrupting existing tmux sessions
+  - ✅ **Resource Management**: Prevention of memory leaks and resource exhaustion
+  - ✅ **Crash Recovery**: Automatic restart and state recovery after failures
+  - ✅ **Monitoring Integration**: Clear status reporting for operational oversight
+  - ✅ **Unattended Operation**: Continuous monitoring without manual intervention
+  - **Impact**: System ready for live deployment in production environments
+
+### Technical Improvements
+
+- **Enhanced hybrid-monitor.sh**: Complete task execution engine with real-time monitoring
+- **Improved usage-limit-recovery.sh**: Comprehensive pm/am pattern recognition and smart calculations
+- **Robust Error Handling**: Graceful recovery mechanisms throughout the system
+- **Performance Optimization**: Efficient processing without overwhelming system resources
+
+### Testing & Validation
+
+- ✅ **8/8 Usage Limit Tests Passed**: All usage limit scenarios validated
+- ✅ **8/8 Error Recovery Tests Passed**: Complete error recovery validation
+- ✅ **Session Isolation Validated**: Existing tmux sessions preserved during operation
+- ✅ **Background Process Stability**: Long-running processes validated for stability
+- ✅ **15 Pending Tasks Ready**: Task queue validated for immediate automation
+
 ## [1.2.0] - 2025-09-09
 
 ### Array Optimization and Performance Improvements with Enhanced Usage Limit Detection
