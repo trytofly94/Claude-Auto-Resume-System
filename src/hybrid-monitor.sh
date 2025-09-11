@@ -645,7 +645,8 @@ check_usage_limits() {
         # Echte Limit-Prüfung
         local claude_output
         
-        if claude_output=$(timeout 30 claude -p 'check' 2>&1); then
+        # Try Claude CLI limit check with error handling
+        if claude_output=$(timeout 30 claude --help 2>&1); then
             local exit_code=$?
             
             if [[ $exit_code -eq 124 ]]; then
