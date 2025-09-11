@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "timestamp": "2025-09-09T15:07:40+02:00",
+  "timestamp": "2025-09-11T08:46:37+02:00",
   "tasks": [
     {
       "id": "custom-1757380364-8234",
@@ -31,6 +31,24 @@
       "created_at": "2025-09-01T06:02:51+02:00",
       "priority": "normal",
       "completion_marker": "TEST_CLI_MARKER_123",
+      "retry_count": 0
+    },
+    {
+      "id": "custom-1757571808-264",
+      "type": "custom",
+      "description": "Test merge functionality",
+      "status": "pending",
+      "created_at": "2025-09-11T08:23:28+02:00",
+      "priority": "normal",
+      "retry_count": 0
+    },
+    {
+      "id": "custom-1757573196-6938",
+      "type": "custom",
+      "description": "Test automation task",
+      "status": "pending",
+      "created_at": "2025-09-11T08:46:36+02:00",
+      "priority": "normal",
       "retry_count": 0
     },
     {
@@ -192,6 +210,36 @@
         }
       ],
       "results": {},
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "test-2",
+      "type": "custom",
+      "status": "pending",
+      "title": "Test task 2",
+      "description": "Testing monitoring",
+      "created_at": "2025-09-09T15:57:35Z",
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "test-3",
+      "type": "custom",
+      "status": "pending",
+      "title": "Test usage limit detection",
+      "description": "Testing pm/am patterns",
+      "created_at": "2025-09-09T15:57:40Z",
+      "retry_count": 0,
+      "priority": "normal"
+    },
+    {
+      "id": "test-1",
+      "type": "custom",
+      "status": "pending",
+      "title": "Test task 1",
+      "description": "Testing automation",
+      "created_at": "2025-09-09T15:57:30Z",
       "retry_count": 0,
       "priority": "normal"
     },
