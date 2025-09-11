@@ -1,1 +1,1 @@
-[2025-09-09T03:33:15+0200] [INFO] [hybrid-monitor] [session-manager.sh:init_session_manager():1618]:   Mode: claunch (tmux)
+[2025-09-11T13:57:56+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:main():1544]: Session manager initialized successfully
