@@ -41,10 +41,18 @@ declare -gA PROJECT_ID_CACHE 2>/dev/null || true
 declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
-# Use declare -gx pattern to prevent readonly variable conflicts
-declare -gx DEFAULT_SESSION_CLEANUP_AGE="${DEFAULT_SESSION_CLEANUP_AGE:-1800}"    # 30 minutes for stopped sessions
-declare -gx DEFAULT_ERROR_SESSION_CLEANUP_AGE="${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-900}"   # 15 minutes for error sessions
-declare -gx BATCH_OPERATION_THRESHOLD="${BATCH_OPERATION_THRESHOLD:-10}"     # Use batch operations when >=10 sessions
+# Use simple conditional assignment to avoid readonly conflicts
+if [[ -z "${DEFAULT_SESSION_CLEANUP_AGE:-}" ]]; then
+    DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
+fi
+
+if [[ -z "${DEFAULT_ERROR_SESSION_CLEANUP_AGE:-}" ]]; then
+    DEFAULT_ERROR_SESSION_CLEANUP_AGE=900   # 15 minutes for error sessions  
+fi
+
+if [[ -z "${BATCH_OPERATION_THRESHOLD:-}" ]]; then
+    BATCH_OPERATION_THRESHOLD=10     # Use batch operations when >=10 sessions
+fi
 
 # Project context cache to avoid repeated computation (moved to global for consistency)
 # declare -A PROJECT_CONTEXT_CACHE  # Moved to optimization section above
