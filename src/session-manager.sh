@@ -41,7 +41,7 @@ declare -gA PROJECT_ID_CACHE 2>/dev/null || true
 declare -gA PROJECT_CONTEXT_CACHE 2>/dev/null || true
 
 # Additional performance optimization constants (Issue #115)
-# Use simple conditional assignment to avoid readonly conflicts
+# Use proper guards to prevent multiple declarations without readonly conflicts
 if [[ -z "${DEFAULT_SESSION_CLEANUP_AGE:-}" ]]; then
     DEFAULT_SESSION_CLEANUP_AGE=1800  # 30 minutes for stopped sessions
 fi
