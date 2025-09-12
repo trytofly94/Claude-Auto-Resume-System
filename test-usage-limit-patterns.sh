@@ -61,8 +61,9 @@ for test_name in "${!TEST_CASES[@]}"; do
     echo "Testing: $test_name"
     echo "Input: ${TEST_CASES[$test_name]}"
     
-    # Test the enhanced extraction function
-    if wait_time=$(extract_usage_limit_time_enhanced "${TEST_CASES[$test_name]}"); then
+    # Test the enhanced extraction function (with debug)
+    echo "Debug: Testing '${TEST_CASES[$test_name]}'"
+    if wait_time=$(extract_usage_limit_time_enhanced "${TEST_CASES[$test_name]}" 2>&1); then
         if [[ -n "$wait_time" && "$wait_time" =~ ^[0-9]+$ ]]; then
             # Calculate human-readable time
             local hours=$((wait_time / 3600))
