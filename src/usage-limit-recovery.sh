@@ -187,8 +187,9 @@ extract_usage_limit_time_enhanced() {
     log_debug "Starting enhanced usage limit time extraction"
     
     # Comprehensive enhanced time patterns for various Claude CLI response formats
+    # Based on real-world Claude CLI usage limit scenarios
     local enhanced_patterns=(
-        # Basic am/pm formats with various wordings
+        # Basic am/pm formats with various wordings - expanded coverage
         "blocked until ([0-9]{1,2})\s*(am|pm)"
         "blocked until ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
         "try again at ([0-9]{1,2})\s*(am|pm)"
@@ -203,6 +204,28 @@ extract_usage_limit_time_enhanced() {
         "come back at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
         "limit resets at ([0-9]{1,2})\s*(am|pm)"
         "limit resets at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        
+        # Common variations observed in Claude CLI responses (ENHANCED)
+        "available at ([0-9]{1,2})\s*(am|pm)"
+        "available at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "come back at ([0-9]{1,2})\s*(am|pm)"
+        "come back at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)" 
+        "limit resets at ([0-9]{1,2})\s*(am|pm)"
+        "usage limit.*until ([0-9]{1,2})\s*(am|pm)"
+        "please wait until ([0-9]{1,2})\s*(am|pm)"
+        
+        # Early morning edge cases (2am, 3am scenarios) - CRITICAL
+        "blocked until ([0-9]{1,2})am"
+        "try again at ([0-9]{1,2})am"
+        "available at ([0-9]{1,2})am"
+        "come back at ([0-9]{1,2})am"
+        "limit resets at ([0-9]{1,2})am"
+        "wait until ([0-9]{1,2})am"
+        
+        # PM variations without 'until' keyword
+        "blocked ([0-9]{1,2})\s*(pm)"
+        "available ([0-9]{1,2})\s*(pm)"
+        "retry ([0-9]{1,2})\s*(pm)"
         
         # Tomorrow/next-day patterns
         "tomorrow at ([0-9]{1,2})\s*(am|pm)"
@@ -226,7 +249,7 @@ extract_usage_limit_time_enhanced() {
         "available in ([0-9]+)\s*hours?"
         "wait ([0-9]+)\s*hours?"
         
-        # Natural language and varied expressions
+        # Natural language and varied expressions - EXPANDED
         "usage limit.*until ([0-9]{1,2})\s*(am|pm)"
         "usage limit.*([0-9]{1,2})\s*(am|pm)"
         "please wait.*until ([0-9]{1,2})\s*(am|pm)"
@@ -236,6 +259,13 @@ extract_usage_limit_time_enhanced() {
         "rate limit.*until ([0-9]{1,2})\s*(am|pm)"
         "quota.*until ([0-9]{1,2})\s*(am|pm)"
         "service.*until ([0-9]{1,2})\s*(am|pm)"
+        
+        # Additional real-world patterns based on usage scenarios
+        "usage.*resets.*([0-9]{1,2})\s*(am|pm)"
+        "back.*([0-9]{1,2})\s*(am|pm)"
+        "after.*([0-9]{1,2})\s*(am|pm)"
+        "resume.*([0-9]{1,2})\s*(am|pm)"
+        "continue.*([0-9]{1,2})\s*(am|pm)"
     )
     
     log_debug "Analyzing output with ${#enhanced_patterns[@]} enhanced patterns"
@@ -300,6 +330,59 @@ calculate_wait_time_enhanced() {
     calculate_wait_time_from_pattern "$matched_text" "$pattern"
 }
 
+# Smart time boundary calculation with enhanced same-day vs next-day logic
+calculate_wait_until_time_enhanced() {
+    local target_hour_12="$1"   # e.g., "3"
+    local ampm="$2"             # e.g., "pm"
+    local target_minutes="${3:-0}"  # e.g., "30" for 3:30pm
+    
+    log_debug "Enhanced wait time calculation: ${target_hour_12}${ampm} (minutes: $target_minutes)"
+    
+    # Convert to 24-hour format
+    local target_hour_24
+    if [[ "$ampm" == "am" ]]; then
+        if [[ "$target_hour_12" -eq 12 ]]; then
+            target_hour_24=0  # 12am = 0:00
+        else
+            target_hour_24="$target_hour_12"
+        fi
+    else  # pm
+        if [[ "$target_hour_12" -eq 12 ]]; then
+            target_hour_24=12  # 12pm = 12:00
+        else
+            target_hour_24=$((target_hour_12 + 12))
+        fi
+    fi
+    
+    # Get current time components
+    local current_hour=$(date +%H)
+    local current_minutes=$(date +%M)
+    local current_total_minutes=$((current_hour * 60 + current_minutes))
+    local target_total_minutes=$((target_hour_24 * 60 + target_minutes))
+    
+    # Determine if target is today or tomorrow with enhanced logic
+    local wait_minutes
+    if [[ $target_total_minutes -gt $current_total_minutes ]]; then
+        # Target is later today
+        wait_minutes=$((target_total_minutes - current_total_minutes))
+        log_debug "Target ${target_hour_12}${ampm} is later today: ${wait_minutes} minutes"
+    else
+        # Target is tomorrow (add 24 hours)
+        wait_minutes=$((target_total_minutes + 1440 - current_total_minutes))
+        log_debug "Target ${target_hour_12}${ampm} is tomorrow: ${wait_minutes} minutes"
+    fi
+    
+    # Edge case handling for very close times (within 5 minutes)
+    if [[ $wait_minutes -lt 5 ]]; then
+        log_warn "Target time very close (${wait_minutes}m) - adding safety margin"
+        wait_minutes=5
+    fi
+    
+    local wait_seconds=$((wait_minutes * 60))
+    echo "$wait_seconds"
+    return 0
+}
+
 # Calculate wait time in seconds from matched time pattern (enhanced)
 calculate_wait_time_from_pattern() {
     local matched_text="$1"
@@ -316,16 +399,16 @@ calculate_wait_time_from_pattern() {
         log_debug "Tomorrow reference detected"
     fi
     
-    # Extract hour, minute, and am/pm period
-    if echo "$matched_text" | grep -qiE "([0-9]{1,2}):([0-9]{2})(am|pm)"; then
+    # Extract hour, minute, and am/pm period with enhanced regex
+    if echo "$matched_text" | grep -qiE "([0-9]{1,2}):([0-9]{2})\s*(am|pm)"; then
         # Format with minutes and am/pm: "3:30pm"
-        hour=$(echo "$matched_text" | grep -oiE "([0-9]{1,2}):([0-9]{2})(am|pm)" | grep -oE "^[0-9]{1,2}")
-        minute=$(echo "$matched_text" | grep -oiE "([0-9]{1,2}):([0-9]{2})(am|pm)" | grep -oE ":[0-9]{2}" | tr -d ':')
+        hour=$(echo "$matched_text" | grep -oiE "([0-9]{1,2}):([0-9]{2})\s*(am|pm)" | grep -oE "^[0-9]{1,2}")
+        minute=$(echo "$matched_text" | grep -oiE "([0-9]{1,2}):([0-9]{2})\s*(am|pm)" | grep -oE ":[0-9]{2}" | tr -d ':')
         period=$(echo "$matched_text" | grep -oiE "(am|pm)" | tr '[:upper:]' '[:lower:]')
-    elif echo "$matched_text" | grep -qiE "([0-9]{1,2})(am|pm)"; then
+    elif echo "$matched_text" | grep -qiE "([0-9]{1,2})\s*(am|pm)"; then
         # Format without minutes and am/pm: "3pm"
-        hour=$(echo "$matched_text" | grep -oiE "([0-9]{1,2})(am|pm)" | grep -oE "^[0-9]{1,2}")
-        minute="00"
+        hour=$(echo "$matched_text" | grep -oiE "([0-9]{1,2})\s*(am|pm)" | grep -oE "^[0-9]{1,2}")
+        minute="0"
         period=$(echo "$matched_text" | grep -oiE "(am|pm)" | tr '[:upper:]' '[:lower:]')
     elif echo "$matched_text" | grep -qE "([0-9]{1,2}):([0-9]{2})" && ! echo "$matched_text" | grep -qiE "(am|pm)"; then
         # 24-hour format: "15:30"
@@ -345,7 +428,23 @@ calculate_wait_time_from_pattern() {
     
     log_debug "Extracted time components: hour=$hour, minute=$minute, period=${period:-24h}, tomorrow=$is_tomorrow"
     
-    # Convert to 24-hour format if needed
+    # Use enhanced calculation for am/pm times
+    if [[ "$is_24hour" == "false" && -n "$period" ]]; then
+        if [[ "$is_tomorrow" == "true" ]]; then
+            # For tomorrow references, add 24 hours to the calculation
+            local wait_seconds
+            wait_seconds=$(calculate_wait_until_time_enhanced "$hour" "$period" "$minute")
+            wait_seconds=$((wait_seconds + 86400))  # Add 24 hours
+            echo "$wait_seconds"
+            return 0
+        else
+            # Use enhanced same-day/next-day logic
+            calculate_wait_until_time_enhanced "$hour" "$period" "$minute"
+            return $?
+        fi
+    fi
+    
+    # Fallback to original calculation for 24-hour format
     local target_hour="$hour"
     if [[ "$is_24hour" == "false" ]]; then
         if [[ "$period" == "pm" && "$hour" != "12" ]]; then
@@ -406,7 +505,7 @@ calculate_wait_time_from_pattern() {
     # Calculate wait time in seconds
     local wait_seconds=$((target_timestamp - current_time))
     
-    # Ensure positive wait time
+    # Ensure positive wait time with enhanced minimum
     if [[ $wait_seconds -le 0 ]]; then
         log_warn "Calculated wait time is negative or zero: ${wait_seconds}s - using minimum wait"
         wait_seconds=300  # 5 minutes minimum
@@ -426,7 +525,7 @@ calculate_wait_time_from_pattern() {
         target_datetime="unknown"
     fi
     
-    log_info "Wait time calculation: target=$target_datetime, wait_time=${wait_seconds}s ($(($wait_seconds/60))m)"
+    log_info "Enhanced wait time calculation: target=$target_datetime, wait_time=${wait_seconds}s ($(($wait_seconds/60))m)"
     
     echo "$wait_seconds"
     return 0
@@ -1252,7 +1351,107 @@ trap 'usage_limit_signal_handler EXIT' EXIT
 # MODULE INITIALIZATION
 # ===============================================================================
 
+# ===============================================================================
+# PATTERN TESTING AND VALIDATION
+# ===============================================================================
+
+# Test usage limit pattern recognition with comprehensive test cases
+test_usage_limit_patterns() {
+    echo "Testing enhanced usage limit pattern recognition..."
+    echo "=================================================="
+    
+    local test_cases=(
+        "blocked until 3pm"
+        "try again at 11am"  
+        "available at 4:30pm"
+        "come back at 2am"
+        "limit resets at 9am"
+        "usage limit reached, blocked until 5pm"
+        "please wait until 7:30am"
+        "retry at 12pm"
+        "available 6pm"
+        "blocked 1am"
+        "come back at 10:15pm"
+        "limit resets at 3:45am"
+        "usage limit until 8pm"
+        "available tomorrow at 9am"
+        "blocked until 12am"
+        "try again at 12pm"
+    )
+    
+    local total_tests=${#test_cases[@]}
+    local successful_tests=0
+    local failed_tests=0
+    
+    echo "Running $total_tests test cases..."
+    echo ""
+    
+    for test_case in "${test_cases[@]}"; do
+        echo "Testing: '$test_case'"
+        printf "  "
+        
+        if result=$(extract_usage_limit_time_enhanced "$test_case" 2>/dev/null); then
+            if [[ "$result" =~ ^[0-9]+$ ]] && [[ "$result" -gt 0 ]]; then
+                local hours=$((result / 3600))
+                local minutes=$(((result % 3600) / 60))
+                echo "✅ Detected: ${result}s wait time (${hours}h ${minutes}m)"
+                ((successful_tests++))
+            else
+                echo "❌ Invalid result: '$result'"
+                ((failed_tests++))
+            fi
+        else
+            echo "❌ Failed to detect usage limit"
+            ((failed_tests++))
+        fi
+        echo ""
+    done
+    
+    echo "=================================================="
+    echo "Pattern Testing Results:"
+    echo "  Total tests: $total_tests"
+    echo "  Successful: $successful_tests"
+    echo "  Failed: $failed_tests"
+    
+    local success_rate=$((successful_tests * 100 / total_tests))
+    echo "  Success rate: ${success_rate}%"
+    
+    if [[ $success_rate -ge 90 ]]; then
+        echo "  Status: ✅ EXCELLENT"
+        return 0
+    elif [[ $success_rate -ge 75 ]]; then
+        echo "  Status: ⚠️  GOOD"
+        return 0
+    else
+        echo "  Status: ❌ NEEDS IMPROVEMENT"
+        return 1
+    fi
+}
+
 # Auto-initialize if sourced
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     log_debug "Usage limit recovery module loaded"
+fi
+
+# Handle direct script execution for testing
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-}" in
+        "test-patterns")
+            test_usage_limit_patterns
+            exit $?
+            ;;
+        "test-patterns-debug")
+            DEBUG_MODE=true
+            test_usage_limit_patterns
+            exit $?
+            ;;
+        *)
+            echo "Usage: $0 {test-patterns|test-patterns-debug}"
+            echo ""
+            echo "Commands:"
+            echo "  test-patterns       Test usage limit pattern recognition"
+            echo "  test-patterns-debug Test patterns with debug output"
+            exit 1
+            ;;
+    esac
 fi
