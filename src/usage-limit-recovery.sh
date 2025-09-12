@@ -354,9 +354,13 @@ calculate_wait_until_time_enhanced() {
         fi
     fi
     
-    # Get current time components
-    local current_hour=$(date +%H)
-    local current_minutes=$(date +%M)
+    # Get current time components (remove leading zeros for arithmetic)
+    local current_hour=$(date +%H | sed 's/^0*//')
+    local current_minutes=$(date +%M | sed 's/^0*//')
+    # Handle case where sed removes all digits (e.g., "00" becomes "")
+    current_hour=${current_hour:-0}
+    current_minutes=${current_minutes:-0}
+    
     local current_total_minutes=$((current_hour * 60 + current_minutes))
     local target_total_minutes=$((target_hour_24 * 60 + target_minutes))
     
@@ -419,6 +423,13 @@ calculate_wait_time_from_pattern() {
         log_warn "Could not extract time components from: '$matched_text'"
         return 1
     fi
+    
+    # Remove leading zeros to prevent octal interpretation
+    hour=$(echo "$hour" | sed 's/^0*//')
+    minute=$(echo "$minute" | sed 's/^0*//')
+    # Handle case where sed removes all digits (e.g., "00" becomes "")
+    hour=${hour:-0}
+    minute=${minute:-0}
     
     # Validate extracted components
     if [[ ! "$hour" =~ ^[0-9]+$ ]] || [[ ! "$minute" =~ ^[0-9]+$ ]]; then
@@ -1435,6 +1446,21 @@ fi
 
 # Handle direct script execution for testing
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Initialize logging and utility functions for direct execution
+    if ! declare -f log_info >/dev/null 2>&1; then
+        log_debug() { [[ "${DEBUG_MODE:-false}" == "true" ]] && echo "[DEBUG] $*" >&2 || true; }
+        log_info() { echo "[INFO] $*" >&2; }
+        log_warn() { echo "[WARN] $*" >&2; }
+        log_error() { echo "[ERROR] $*" >&2; }
+    fi
+    
+    # Ensure has_command is available for direct execution
+    if ! declare -f has_command >/dev/null 2>&1; then
+        has_command() {
+            command -v "$1" >/dev/null 2>&1
+        }
+    fi
+    
     case "${1:-}" in
         "test-patterns")
             test_usage_limit_patterns

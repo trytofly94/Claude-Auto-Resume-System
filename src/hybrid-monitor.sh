@@ -475,9 +475,9 @@ handle_task_queue_operations() {
     return 0
 }
 
-# Enhanced task queue processing with usage limit integration
+# Enhanced task queue processing with comprehensive usage limit integration
 process_task_queue() {
-    log_debug "Starting enhanced task queue processing"
+    log_debug "Starting enhanced task queue processing with live usage limit handling"
     
     # Prüfe ob Queue verfügbar ist
     if [[ "${TASK_QUEUE_AVAILABLE:-false}" != "true" ]]; then
@@ -507,6 +507,13 @@ process_task_queue() {
     fi
     
     log_info "📋 Enhanced processing: $pending_tasks pending tasks found"
+    
+    # Check if enhanced usage limits are enabled
+    if [[ "${ENHANCED_USAGE_LIMITS:-false}" == "true" ]]; then
+        log_info "🚀 Starting live task processing with enhanced usage limit detection"
+        process_task_queue_with_live_limits
+        return $?
+    fi
     
     # Hole nächste Task - für Phase 1 nur ersten pending task identifizieren
     local next_task_id
@@ -587,6 +594,217 @@ process_task_queue() {
         log_debug "Context preservation recommended for task $next_task_id (reason: $completion_reason)"
     fi
     
+    return 0
+}
+
+# Enhanced task processing with live usage limit handling and intelligent recovery
+process_task_queue_with_live_limits() {
+    local total_tasks
+    total_tasks=$("${TASK_QUEUE_SCRIPT}" list --status=pending --count-only 2>/dev/null)
+    local processed=0
+    local usage_limit_encounters=0
+    
+    log_info "🚀 Starting live task processing: $total_tasks tasks pending"
+    
+    while [[ $processed -lt $total_tasks ]]; do
+        log_info "📋 Processing task $((processed + 1))/$total_tasks"
+        
+        # Get next pending task
+        local next_task_id
+        next_task_id=$("${TASK_QUEUE_SCRIPT}" list --status=pending --format=id-only --limit=1 2>/dev/null | head -1)
+        
+        if [[ -z "$next_task_id" ]]; then
+            log_warn "No more pending tasks available"
+            break
+        fi
+        
+        local task_data
+        task_data=$("${TASK_QUEUE_SCRIPT}" show "$next_task_id" 2>/dev/null)
+        
+        if [[ -z "$task_data" ]]; then
+            log_error "Could not retrieve task data for $next_task_id"
+            ((processed++))
+            continue
+        fi
+        
+        # Execute next pending task with enhanced monitoring
+        local task_output
+        local task_exit_code=0
+        log_info "⚙️ Executing task $next_task_id with enhanced usage limit detection"
+        
+        if ! task_output=$(execute_single_task_enhanced "$next_task_id" "$task_data" 2>&1); then
+            task_exit_code=$?
+        fi
+        
+        # Check for usage limit in task output using enhanced detection
+        if [[ $task_exit_code -ne 0 ]] && detect_usage_limit_in_output_enhanced "$task_output"; then
+            ((usage_limit_encounters++))
+            log_warn "⏰ Enhanced usage limit detected (encounter #$usage_limit_encounters)"
+            log_info "Task output that triggered detection: $(echo "$task_output" | head -3)"
+            
+            # Use enhanced usage limit handling with sourced function
+            if [[ -f "$SCRIPT_DIR/usage-limit-recovery.sh" ]]; then
+                source "$SCRIPT_DIR/usage-limit-recovery.sh" || true
+            fi
+            
+            if declare -f extract_usage_limit_time_enhanced >/dev/null 2>&1 && wait_time=$(extract_usage_limit_time_enhanced "$task_output"); then
+                log_info "⏳ Enhanced usage limit detection successful: ${wait_time}s wait"
+                display_usage_limit_countdown_enhanced "$wait_time" "usage limit (enhanced detection)"
+            else
+                log_warn "⏳ Falling back to standard usage limit handling"
+                if declare -f handle_usage_limit_scenario >/dev/null 2>&1 && handle_usage_limit_scenario "$task_output"; then
+                    log_info "✅ Standard usage limit handling completed"
+                else
+                    log_error "❌ Usage limit handling failed"
+                fi
+            fi
+            
+            # Don't increment processed count - retry the same task
+            continue
+        else
+            # Task completed successfully
+            ((processed++))
+            log_info "✅ Task $processed/$total_tasks completed successfully"
+        fi
+        
+        # Brief pause between tasks to prevent overwhelming system
+        sleep 2
+        
+        # Safety check for infinite loops
+        if [[ $usage_limit_encounters -gt 10 ]]; then
+            log_error "❌ Too many usage limit encounters ($usage_limit_encounters) - stopping processing"
+            break
+        fi
+    done
+    
+    log_info "🎉 Live task processing complete: $processed/$total_tasks tasks processed"
+    log_info "📊 Usage limit encounters: $usage_limit_encounters"
+    return 0
+}
+
+# Enhanced usage limit detection for task output
+detect_usage_limit_in_output_enhanced() {
+    local output="$1"
+    
+    if [[ -z "$output" ]]; then
+        return 1  # No output to check
+    fi
+    
+    log_debug "🔍 Enhanced usage limit detection in task output"
+    
+    # Load usage-limit-recovery module if not already loaded
+    if ! declare -f extract_usage_limit_time_enhanced >/dev/null 2>&1; then
+        if [[ -f "$SCRIPT_DIR/usage-limit-recovery.sh" ]]; then
+            source "$SCRIPT_DIR/usage-limit-recovery.sh" || return 1
+        else
+            log_error "Usage limit recovery module not found"
+            return 1
+        fi
+    fi
+    
+    # First try enhanced time-specific detection
+    if extract_usage_limit_time_enhanced "$output" >/dev/null 2>&1; then
+        log_info "✨ Enhanced time-specific usage limit detected"
+        return 0
+    fi
+    
+    # Fallback to standard detection patterns
+    local limit_patterns=(
+        "usage limit"
+        "rate limit"
+        "too many requests"
+        "please try again later"
+        "request limit exceeded"
+        "quota exceeded"
+        "temporarily unavailable"
+        "service temporarily overloaded"
+        "blocked until"
+        "try again at"
+        "available.*at"
+        "retry at"
+        "wait until"
+    )
+    
+    for pattern in "${limit_patterns[@]}"; do
+        if echo "$output" | grep -qi "$pattern"; then
+            log_info "📋 Standard usage limit pattern detected: '$pattern'"
+            return 0
+        fi
+    done
+    
+    return 1  # No usage limit detected
+}
+
+# Enhanced countdown display with live progress feedback
+display_usage_limit_countdown_enhanced() {
+    local total_wait_time="$1"
+    local reason="${2:-enhanced usage limit}"
+    local start_time=$(date +%s)
+    local end_time=$((start_time + total_wait_time))
+    
+    log_info "⏰ Starting enhanced usage limit countdown display (reason: $reason, duration: ${total_wait_time}s)"
+    
+    # Calculate ETA
+    local eta_timestamp
+    if has_command date; then
+        if date -d "@$end_time" "+%H:%M:%S" >/dev/null 2>&1; then
+            eta_timestamp=$(date -d "@$end_time" "+%H:%M:%S")
+        elif date -r "$end_time" "+%H:%M:%S" >/dev/null 2>&1; then
+            eta_timestamp=$(date -r "$end_time" "+%H:%M:%S")
+        else
+            eta_timestamp="unknown"
+        fi
+    else
+        eta_timestamp="unknown"
+    fi
+    
+    log_info "Usage limit will expire at: $eta_timestamp"
+    
+    local update_interval=60  # Update every minute
+    local last_minute_display=""
+    
+    while [[ $(date +%s) -lt $end_time ]]; do
+        local current_time=$(date +%s)
+        local remaining=$((end_time - current_time))
+        
+        if [[ $remaining -le 0 ]]; then
+            break
+        fi
+        
+        # Format remaining time
+        local hours=$((remaining / 3600))
+        local minutes=$(((remaining % 3600) / 60))
+        local seconds=$((remaining % 60))
+        
+        local time_display=""
+        if [[ $hours -gt 0 ]]; then
+            time_display="${hours}h ${minutes}m"
+        elif [[ $minutes -gt 0 ]]; then
+            time_display="${minutes}m ${seconds}s"
+        else
+            time_display="${seconds}s"
+        fi
+        
+        # Calculate progress percentage
+        local elapsed=$((current_time - start_time))
+        local progress_percent=$(( (elapsed * 100) / total_wait_time ))
+        
+        # Enhanced progress display with emojis for live operation
+        if [[ $remaining -le 300 ]]; then  # Last 5 minutes
+            if [[ "$last_minute_display" != "shown" ]]; then
+                log_info "🔥 Final 5 minutes countdown starting..."
+                last_minute_display="shown"
+            fi
+            update_interval=30  # Update every 30 seconds in final 5 minutes
+        fi
+        
+        # Display enhanced countdown with progress and ETA
+        log_info "⏳ $reason - ${time_display} remaining (${progress_percent}% complete, ETA: $eta_timestamp)"
+        
+        sleep "$update_interval"
+    done
+    
+    log_info "✅ Enhanced usage limit wait period completed - resuming live task processing"
     return 0
 }
 
