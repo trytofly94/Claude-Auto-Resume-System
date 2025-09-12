@@ -946,6 +946,133 @@ reset_usage_limit_statistics() {
     log_info "Usage limit statistics reset completed"
 }
 
+# Enhanced pause queue function with live countdown and smart recovery
+pause_queue_for_usage_limit_enhanced() {
+    local estimated_wait_time="${1:-}"
+    local current_task_id="${2:-}"
+    local detected_pattern="${3:-enhanced_usage_limit}"
+    
+    log_info "🎯 Starting enhanced usage limit handling for task: ${current_task_id:-system}"
+    
+    # Check for time-specific wait time from enhanced detection
+    local time_specific_wait=""
+    if [[ -f "/tmp/usage-limit-wait-time.env" ]]; then
+        source "/tmp/usage-limit-wait-time.env" 2>/dev/null || true
+        time_specific_wait="$WAIT_TIME"
+        rm -f "/tmp/usage-limit-wait-time.env"
+    fi
+    
+    # Use enhanced time-specific wait if available, otherwise calculate intelligent wait time
+    if [[ -n "$time_specific_wait" && "$time_specific_wait" =~ ^[0-9]+$ ]]; then
+        estimated_wait_time="$time_specific_wait"
+        detected_pattern="enhanced_time_specific_limit"
+        log_info "✨ Using enhanced time-specific wait period: ${estimated_wait_time}s (extracted from pm/am pattern)"
+    elif [[ -z "$estimated_wait_time" ]]; then
+        estimated_wait_time=$(calculate_usage_limit_wait_time "$current_task_id" "$detected_pattern")
+        log_info "🧮 Calculated intelligent wait time: ${estimated_wait_time}s"
+    fi
+    
+    log_warn "⏸️ Pausing queue for enhanced usage limit (estimated wait: ${estimated_wait_time}s, pattern: '$detected_pattern')"
+    
+    # Set enhanced usage limit active flag
+    USAGE_LIMIT_ACTIVE=true
+    USAGE_LIMIT_START_TIME=$(date +%s)
+    
+    # Enhanced pause queue with preservation of current state
+    if declare -f pause_task_queue >/dev/null 2>&1; then
+        pause_task_queue "enhanced_usage_limit"
+    else
+        log_warn "Queue pause function not available - manual queue management required"
+    fi
+    
+    # Create comprehensive system backup before waiting
+    if [[ -f "$SCRIPT_DIR/task-state-backup.sh" ]]; then
+        source "$SCRIPT_DIR/task-state-backup.sh"
+        if declare -f create_emergency_system_backup >/dev/null 2>&1; then
+            create_emergency_system_backup "enhanced_usage_limit_pause"
+        fi
+    fi
+    
+    # Calculate and display enhanced resume time
+    local resume_time=$(($(date +%s) + estimated_wait_time))
+    local resume_timestamp
+    
+    if has_command date; then
+        if date -d "@$resume_time" "+%Y-%m-%d %H:%M:%S" >/dev/null 2>&1; then
+            resume_timestamp=$(date -d "@$resume_time" "+%Y-%m-%d %H:%M:%S")
+        elif date -r "$resume_time" "+%Y-%m-%d %H:%M:%S" >/dev/null 2>&1; then
+            resume_timestamp=$(date -r "$resume_time" "+%Y-%m-%d %H:%M:%S")
+        else
+            resume_timestamp="unknown"
+        fi
+    else
+        resume_timestamp="unknown"
+    fi
+    
+    log_info "⏰ Enhanced queue will automatically resume at: $resume_timestamp"
+    
+    # Create enhanced usage limit recovery marker
+    create_enhanced_usage_limit_recovery_marker "$estimated_wait_time" "$current_task_id" "$detected_pattern" "$resume_time"
+    
+    # Start enhanced countdown display (foreground for live operation)
+    if [[ -t 1 ]] || [[ "${FORCE_COUNTDOWN_DISPLAY:-false}" == "true" ]]; then
+        display_enhanced_usage_limit_countdown "$estimated_wait_time" "$detected_pattern"
+    else
+        log_info "📊 Non-interactive mode: Enhanced waiting ${estimated_wait_time}s for usage limit to expire"
+        sleep "$estimated_wait_time"
+    fi
+    
+    # Validate recovery after wait period
+    if validate_usage_limit_recovery "$current_task_id"; then
+        log_info "✅ Enhanced usage limit recovery validated successfully"
+        return 0
+    else
+        log_warn "⚠️ Enhanced usage limit recovery validation failed - task may need manual intervention"
+        return 1
+    fi
+}
+
+# Create enhanced usage limit recovery marker with additional metadata
+create_enhanced_usage_limit_recovery_marker() {
+    local wait_time="$1"
+    local task_id="$2"
+    local pattern="$3"
+    local resume_time="$4"
+    
+    local task_queue_dir="${TASK_QUEUE_DIR:-queue}"
+    local recovery_file="$PROJECT_ROOT/$task_queue_dir/enhanced-usage-limit-pause.marker"
+    
+    # Ensure directory exists
+    mkdir -p "$(dirname "$recovery_file")" 2>/dev/null || return 1
+    
+    cat > "$recovery_file" << EOF
+{
+    "pause_time": $(date +%s),
+    "estimated_wait_time": $wait_time,
+    "estimated_resume_time": $resume_time,
+    "current_task_id": "$task_id",
+    "detected_pattern": "$pattern",
+    "pause_reason": "enhanced_usage_limit",
+    "occurrence_count": ${USAGE_LIMIT_COUNTS["${task_id}:${pattern}"]:-1},
+    "enhanced_features": {
+        "time_specific_detection": true,
+        "live_countdown": true,
+        "smart_recovery": true,
+        "pattern_learning": true
+    },
+    "system_info": {
+        "hostname": "$(hostname)",
+        "pid": $$,
+        "enhanced_version": "1.0.0",
+        "detection_timestamp": "$(date -Iseconds)"
+    }
+}
+EOF
+    
+    log_debug "Enhanced usage limit recovery marker created: $recovery_file"
+    return 0
+}
+
 # ===============================================================================
 # ENHANCED ERROR RECOVERY AND RESOURCE MANAGEMENT
 # ===============================================================================
