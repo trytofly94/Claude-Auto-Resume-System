@@ -15,6 +15,21 @@ INTERACTIVE_HISTORY_FILE="${HOME}/.claude-auto-resume-history"
 INTERACTIVE_MAX_HISTORY=1000
 
 # ===============================================================================
+# LOGGING FUNCTIONS
+# ===============================================================================
+
+# Load logging functions if available, or define fallback functions
+# NOTE: This must be defined early as many functions depend on logging
+if [[ -f "${SCRIPT_DIR:-}/utils/logging.sh" ]]; then
+    source "${SCRIPT_DIR}/utils/logging.sh"
+else
+    log_debug() { echo "[DEBUG] $*" >&2; }
+    log_info() { echo "[INFO] $*" >&2; }
+    log_warn() { echo "[WARN] $*" >&2; }
+    log_error() { echo "[ERROR] $*" >&2; }
+fi
+
+# ===============================================================================
 # INTERACTIVE SESSION MANAGEMENT
 # ===============================================================================
 
@@ -488,15 +503,7 @@ load_required_modules() {
     done
 }
 
-# Load logging functions if available
-if [[ -f "${SCRIPT_DIR:-}/utils/logging.sh" ]]; then
-    source "${SCRIPT_DIR}/utils/logging.sh"
-else
-    log_debug() { echo "[DEBUG] $*" >&2; }
-    log_info() { echo "[INFO] $*" >&2; }
-    log_warn() { echo "[WARN] $*" >&2; }
-    log_error() { echo "[ERROR] $*" >&2; }
-fi
+# NOTE: Logging functions moved to top of file to resolve dependency issues
 
 # ===============================================================================
 # MODULE INITIALIZATION
