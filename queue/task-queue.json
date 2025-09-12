@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "timestamp": "2025-09-11T14:23:19+02:00",
+  "timestamp": "2025-09-12T00:47:03+02:00",
   "tasks": [
     {
       "id": "custom-1757380364-8234",
@@ -159,6 +159,15 @@
       "priority": "normal"
     },
     {
+      "id": "custom-1757630823-7399",
+      "type": "custom",
+      "description": "Test automation task - focus on main functionality",
+      "status": "pending",
+      "created_at": "2025-09-12T00:47:03+02:00",
+      "priority": "normal",
+      "retry_count": 0
+    },
+    {
       "id": "custom-1756699298-947",
       "type": "custom",
       "description": "Test basic functionality",
@@ -251,6 +260,15 @@
       "created_at": "2025-09-09T15:57:30Z",
       "retry_count": 0,
       "priority": "normal"
+    },
+    {
+      "id": "custom-1757625161-8080",
+      "type": "custom",
+      "description": "Test task automation",
+      "status": "pending",
+      "created_at": "2025-09-11T23:12:41+02:00",
+      "priority": "normal",
+      "retry_count": 0
     },
     {
       "id": "workflow-test",

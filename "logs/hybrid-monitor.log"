@@ -1,1 +1,1 @@
-[2025-09-11T13:57:58+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:validate_system_requirements():325]: claunch validation completed successfully
+[2025-09-12T02:02:58+0200] [INFO] [hybrid-monitor] [hybrid-monitor.sh:continuous_monitoring_loop():1]: Hybrid monitor shutting down (exit code: 1)

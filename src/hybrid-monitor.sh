@@ -77,6 +77,7 @@ TEST_WAIT_SECONDS=30
 
 # Task Queue Mode Argumente
 QUEUE_MODE=false
+ENHANCED_USAGE_LIMITS=false
 ADD_ISSUE=""
 ADD_PR=""
 ADD_CUSTOM=""
@@ -198,6 +199,19 @@ load_dependencies() {
             log_debug "Task Queue script validated and functional"
             export TASK_QUEUE_AVAILABLE=true
             export TASK_QUEUE_SCRIPT="$task_queue_script"
+            
+            # Load Usage Limit Recovery Module for enhanced features
+            if [[ "${ENHANCED_USAGE_LIMITS:-false}" == "true" ]]; then
+                local usage_limit_script="$SCRIPT_DIR/usage-limit-recovery.sh"
+                if [[ -f "$usage_limit_script" && -r "$usage_limit_script" ]]; then
+                    source "$usage_limit_script"
+                    log_debug "Enhanced usage limit recovery module loaded"
+                    export ENHANCED_USAGE_LIMITS_AVAILABLE=true
+                else
+                    log_warn "Enhanced usage limits requested but module not available"
+                    export ENHANCED_USAGE_LIMITS_AVAILABLE=false
+                fi
+            fi
         else
             log_warn "Task Queue script exists but not functional"
             export TASK_QUEUE_AVAILABLE=false
@@ -461,9 +475,9 @@ handle_task_queue_operations() {
     return 0
 }
 
-# Verarbeite Task Queue (wird von continuous_monitoring_loop() aufgerufen)
+# Enhanced task queue processing with usage limit integration
 process_task_queue() {
-    log_debug "Checking task queue for pending tasks"
+    log_debug "Starting enhanced task queue processing"
     
     # Prüfe ob Queue verfügbar ist
     if [[ "${TASK_QUEUE_AVAILABLE:-false}" != "true" ]]; then
@@ -477,6 +491,13 @@ process_task_queue() {
         return 0
     fi
     
+    # Auto-resume queue if usage limit wait period is complete
+    if declare -f auto_resume_queue_if_ready >/dev/null 2>&1; then
+        if auto_resume_queue_if_ready; then
+            log_info "🔄 Queue automatically resumed after usage limit wait period"
+        fi
+    fi
+    
     # Prüfe auf pending tasks - verwende task-queue.sh list command
     local pending_tasks
     pending_tasks=$("${TASK_QUEUE_SCRIPT}" list --status=pending --count-only 2>/dev/null)
@@ -484,6 +505,8 @@ process_task_queue() {
         log_debug "No pending tasks in queue"
         return 0
     fi
+    
+    log_info "📋 Enhanced processing: $pending_tasks pending tasks found"
     
     # Hole nächste Task - für Phase 1 nur ersten pending task identifizieren
     local next_task_id
@@ -493,22 +516,38 @@ process_task_queue() {
         return 0
     fi
     
-    log_info "Found pending task for processing: $next_task_id"
+    log_info "🎯 Found pending task for enhanced processing: $next_task_id"
     
     # Get task data for context clearing decisions
     local task_data
     task_data=$("${TASK_QUEUE_SCRIPT}" show "$next_task_id" 2>/dev/null)
     
-    # Execute the task with enhanced error handling and progress monitoring
+    # Enhanced task metadata extraction
+    local task_type="unknown"
+    local task_priority="normal"
+    if [[ -n "$task_data" ]] && has_command jq; then
+        task_type=$(echo "$task_data" | jq -r '.type // "custom"' 2>/dev/null || echo "custom")
+        task_priority=$(echo "$task_data" | jq -r '.priority // "normal"' 2>/dev/null || echo "normal")
+    fi
+    
+    log_debug "Enhanced task details: ID=$next_task_id, Type=$task_type, Priority=$task_priority"
+    
+    # Execute the task with enhanced error handling, progress monitoring, and usage limit detection
     local execution_result
     local completion_reason="normal"
+    local start_time=$(date +%s)
     
-    if execute_single_task "$next_task_id" "$task_data"; then
+    log_info "🚀 Starting enhanced execution of task $next_task_id"
+    
+    if execute_single_task_enhanced "$next_task_id" "$task_data"; then
         execution_result="success"
-        log_info "Task $next_task_id completed successfully"
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        log_info "✅ Task $next_task_id completed successfully in ${duration}s"
         
-        # Update task status to completed
-        if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "completed" "Task completed successfully by automated processing"; then
+        # Update task status to completed with enhanced metadata
+        local completion_message="Task completed successfully by enhanced automated processing (duration: ${duration}s)"
+        if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "completed" "$completion_message"; then
             log_warn "Failed to update task status to completed for $next_task_id"
         fi
         
@@ -519,12 +558,14 @@ process_task_queue() {
         # Check if failure was due to usage limit
         if [[ $exit_code -eq 42 ]]; then
             completion_reason="usage_limit_recovery"
-            log_warn "Task $next_task_id paused due to usage limit - will resume automatically"
+            log_warn "Task $next_task_id paused due to usage limit - will resume automatically with enhanced recovery"
             
-            # Update task status to in-progress (paused for usage limit)
-            if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "in_progress" "Task paused due to usage limit, will resume automatically"; then
+            # Update task status to pending (so it will be retried after usage limit expires)
+            if ! "${TASK_QUEUE_SCRIPT}" update-status "$next_task_id" "pending" "Task paused due to usage limit, will resume automatically after wait period"; then
                 log_warn "Failed to update task status for paused task $next_task_id"
             fi
+            
+            log_info "🔄 Enhanced usage limit handling completed - task queued for automatic retry"
             
         else
             completion_reason="error"
@@ -638,6 +679,433 @@ execute_single_task() {
         log_error "Task $task_id execution failed"
         return 1
     fi
+}
+
+# Enhanced single task execution with usage limit integration
+execute_single_task_enhanced() {
+    local task_id="$1"
+    local task_data="$2"
+    
+    if [[ -z "$task_id" || -z "$task_data" ]]; then
+        log_error "execute_single_task_enhanced: task_id and task_data required"
+        return 1
+    fi
+    
+    log_info "🚀 Starting enhanced execution of task: $task_id"
+    
+    # Extract task details from JSON data with enhanced parsing
+    local task_type task_command task_description task_priority
+    if has_command jq; then
+        task_type=$(echo "$task_data" | jq -r '.type // "custom"' 2>/dev/null || echo "custom")
+        task_command=$(echo "$task_data" | jq -r '.command // .description // ""' 2>/dev/null || echo "")
+        task_description=$(echo "$task_data" | jq -r '.description // .command // ""' 2>/dev/null || echo "")
+        task_priority=$(echo "$task_data" | jq -r '.priority // "normal"' 2>/dev/null || echo "normal")
+    else
+        # Enhanced fallback parsing without jq
+        task_type="custom"
+        task_command=$(echo "$task_data" | grep -o '"command"[^,]*' | sed 's/"command"[^"]*"\([^"]*\)".*/\1/' || echo "")
+        task_description=$(echo "$task_data" | grep -o '"description"[^,]*' | sed 's/"description"[^"]*"\([^"]*\)".*/\1/' || echo "")
+        task_priority="normal"
+    fi
+    
+    log_debug "Enhanced task details: type=$task_type, priority=$task_priority"
+    log_debug "Enhanced task command/description: ${task_command:0:100}..."
+    
+    # Update task status to in_progress with enhanced metadata
+    local in_progress_message="Enhanced task execution started by automated processing (type: $task_type, priority: $task_priority)"
+    if ! "${TASK_QUEUE_SCRIPT}" update-status "$task_id" "in_progress" "$in_progress_message"; then
+        log_warn "Failed to update task status to in_progress for $task_id"
+    fi
+    
+    # Ensure we have an active Claude session for task execution
+    local session_id="${MAIN_SESSION_ID:-}"
+    if [[ -z "$session_id" ]]; then
+        log_info "🔍 No active session found, starting new Claude session for enhanced task execution"
+        if ! start_or_continue_claude_session; then
+            log_error "Failed to start Claude session for enhanced task execution"
+            return 1
+        fi
+        session_id="${MAIN_SESSION_ID:-}"
+    fi
+    
+    if [[ -z "$session_id" ]]; then
+        log_error "No session available for enhanced task execution"
+        return 1
+    fi
+    
+    log_debug "Using session $session_id for enhanced task execution"
+    
+    # Enhanced task execution with retry logic and usage limit handling
+    local execution_start_time=$(date +%s)
+    local execution_success=false
+    local max_retries=3
+    local retry_count=0
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        ((retry_count++))
+        
+        if [[ $retry_count -gt 1 ]]; then
+            log_info "🔄 Enhanced retry attempt $retry_count/$max_retries for task $task_id"
+            # Brief pause between retries
+            sleep 5
+        fi
+        
+        # Execute task based on type with enhanced monitoring
+        case "$task_type" in
+            "github_issue")
+                if execute_github_issue_task_enhanced "$session_id" "$task_id" "$task_data"; then
+                    execution_success=true
+                    break
+                fi
+                ;;
+            "github_pr")
+                if execute_github_pr_task_enhanced "$session_id" "$task_id" "$task_data"; then
+                    execution_success=true
+                    break
+                fi
+                ;;
+            "custom")
+                if execute_custom_task_enhanced "$session_id" "$task_id" "$task_data"; then
+                    execution_success=true
+                    break
+                fi
+                ;;
+            *)
+                log_warn "Unknown task type: $task_type, treating as enhanced custom task"
+                if execute_custom_task_enhanced "$session_id" "$task_id" "$task_data"; then
+                    execution_success=true
+                    break
+                fi
+                ;;
+        esac
+        
+        # Check if last attempt failed due to usage limit
+        local last_exit_code=$?
+        if [[ $last_exit_code -eq 42 ]]; then
+            log_info "⏰ Task execution paused due to usage limit - execution will be retried automatically"
+            # Don't count usage limit as a retry attempt
+            ((retry_count--))
+            return 42  # Propagate usage limit exit code
+        fi
+        
+        if [[ $retry_count -lt $max_retries ]]; then
+            log_warn "⚠️ Task execution attempt $retry_count failed, will retry"
+        fi
+    done
+    
+    local execution_end_time=$(date +%s)
+    local execution_duration=$((execution_end_time - execution_start_time))
+    
+    log_debug "Enhanced task execution completed in ${execution_duration}s (${retry_count} attempts)"
+    
+    if [[ "$execution_success" == "true" ]]; then
+        log_info "✅ Enhanced task $task_id executed successfully"
+        return 0
+    else
+        log_error "❌ Enhanced task $task_id execution failed after $retry_count attempts"
+        return 1
+    fi
+}
+
+# Enhanced GitHub issue task execution
+execute_github_issue_task_enhanced() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_data="$3"
+    
+    local issue_number repo_url issue_url
+    if has_command jq; then
+        issue_number=$(echo "$task_data" | jq -r '.issue_number // ""' 2>/dev/null || echo "")
+        repo_url=$(echo "$task_data" | jq -r '.repo_url // ""' 2>/dev/null || echo "")
+        issue_url=$(echo "$task_data" | jq -r '.issue_url // ""' 2>/dev/null || echo "")
+    else
+        issue_number=$(echo "$task_data" | grep -o '"issue_number"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        repo_url=""
+        issue_url=""
+    fi
+    
+    if [[ -z "$issue_number" ]]; then
+        log_error "Enhanced GitHub issue task missing issue_number"
+        return 1
+    fi
+    
+    log_info "🐛 Executing enhanced GitHub issue task: #$issue_number"
+    
+    # Send enhanced command to Claude session to process the GitHub issue
+    local command="/dev $issue_number"
+    if ! execute_command_in_session "$session_id" "$command"; then
+        log_error "Failed to send enhanced GitHub issue command to session"
+        return 1
+    fi
+    
+    # Monitor task execution with enhanced usage limit detection
+    if monitor_task_execution_enhanced "$session_id" "$task_id" "github_issue"; then
+        return 0
+    else
+        local exit_code=$?
+        return $exit_code
+    fi
+}
+
+# Enhanced GitHub PR task execution
+execute_github_pr_task_enhanced() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_data="$3"
+    
+    local pr_number repo_url pr_url
+    if has_command jq; then
+        pr_number=$(echo "$task_data" | jq -r '.pr_number // ""' 2>/dev/null || echo "")
+        repo_url=$(echo "$task_data" | jq -r '.repo_url // ""' 2>/dev/null || echo "")
+        pr_url=$(echo "$task_data" | jq -r '.pr_url // ""' 2>/dev/null || echo "")
+    else
+        pr_number=$(echo "$task_data" | grep -o '"pr_number"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        repo_url=""
+        pr_url=""
+    fi
+    
+    if [[ -z "$pr_number" ]]; then
+        log_error "Enhanced GitHub PR task missing pr_number"
+        return 1
+    fi
+    
+    log_info "🔀 Executing enhanced GitHub PR task: #$pr_number"
+    
+    # Send enhanced command to Claude session to process the GitHub PR
+    local command="/dev pr/$pr_number"
+    if ! execute_command_in_session "$session_id" "$command"; then
+        log_error "Failed to send enhanced GitHub PR command to session"
+        return 1
+    fi
+    
+    # Monitor task execution with enhanced usage limit detection
+    if monitor_task_execution_enhanced "$session_id" "$task_id" "github_pr"; then
+        return 0
+    else
+        local exit_code=$?
+        return $exit_code
+    fi
+}
+
+# Enhanced custom task execution
+execute_custom_task_enhanced() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_data="$3"
+    
+    local command description
+    if has_command jq; then
+        command=$(echo "$task_data" | jq -r '.command // .description // ""' 2>/dev/null || echo "")
+        description=$(echo "$task_data" | jq -r '.description // .command // ""' 2>/dev/null || echo "")
+    else
+        command=$(echo "$task_data" | grep -o '"command"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        description=$(echo "$task_data" | grep -o '"description"[^,]*' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+    fi
+    
+    if [[ -z "$command" && -z "$description" ]]; then
+        log_error "Enhanced custom task missing command or description"
+        return 1
+    fi
+    
+    local task_content="${command:-$description}"
+    log_info "⚙️ Executing enhanced custom task: ${task_content:0:50}..."
+    
+    # Send enhanced command to Claude session
+    if ! execute_command_in_session "$session_id" "$task_content"; then
+        log_error "Failed to send enhanced custom task command to session"
+        return 1
+    fi
+    
+    # Monitor task execution with enhanced usage limit detection
+    if monitor_task_execution_enhanced "$session_id" "$task_id" "custom"; then
+        return 0
+    else
+        local exit_code=$?
+        return $exit_code
+    fi
+}
+
+# Enhanced task execution monitoring with improved usage limit detection
+monitor_task_execution_enhanced() {
+    local session_id="$1"
+    local task_id="$2"
+    local task_type="$3"
+    local max_wait_time="${4:-1800}"  # Default 30 minutes max
+    
+    log_debug "🔍 Enhanced monitoring of task $task_id (type: $task_type, max_wait: ${max_wait_time}s)"
+    
+    local start_time=$(date +%s)
+    local last_activity_time=$start_time
+    local check_interval=8  # Check every 8 seconds for better responsiveness
+    local activity_timeout=300  # 5 minutes without activity = timeout
+    local consecutive_checks=0
+    local max_consecutive_checks=$((max_wait_time / check_interval))
+    local usage_limit_checks=0
+    
+    while [[ $consecutive_checks -lt $max_consecutive_checks ]]; do
+        ((consecutive_checks++))
+        local current_time=$(date +%s)
+        local elapsed_time=$((current_time - start_time))
+        
+        log_debug "Enhanced monitoring cycle $consecutive_checks/$max_consecutive_checks (elapsed: ${elapsed_time}s)"
+        
+        # Get session output for enhanced analysis
+        local session_output
+        if session_output=$(get_session_output "$session_id" 2>/dev/null); then
+            
+            # Enhanced usage limit detection with comprehensive pattern matching
+            if detect_usage_limit_in_queue "$session_output" "$task_id"; then
+                ((usage_limit_checks++))
+                log_warn "⏰ Enhanced usage limit detected during task execution (check #$usage_limit_checks)"
+                
+                # Use enhanced pause function with live countdown
+                if declare -f pause_queue_for_usage_limit_enhanced >/dev/null 2>&1; then
+                    if pause_queue_for_usage_limit_enhanced "" "$task_id" "enhanced_time_specific_limit"; then
+                        log_info "✅ Enhanced usage limit handling completed - task will resume automatically"
+                        return 42  # Special exit code for usage limit
+                    else
+                        log_error "Failed to execute enhanced usage limit handling"
+                        return 1
+                    fi
+                else
+                    # Fallback to standard handling
+                    if pause_queue_for_usage_limit "" "$task_id" "time_specific_limit"; then
+                        log_info "Standard usage limit handling completed - task will resume automatically"
+                        return 42
+                    else
+                        log_error "Failed to execute usage limit handling"
+                        return 1
+                    fi
+                fi
+            fi
+            
+            # Enhanced task completion detection
+            if check_task_completion_indicators_enhanced "$session_output" "$task_type"; then
+                log_info "✅ Enhanced task completion detected for $task_id"
+                return 0
+            fi
+            
+            # Enhanced error detection
+            if check_task_error_indicators_enhanced "$session_output"; then
+                log_warn "⚠️ Enhanced task error indicators detected for $task_id"
+                return 1
+            fi
+            
+            # Update last activity time if there's new content
+            if [[ -n "$session_output" ]]; then
+                last_activity_time=$current_time
+            fi
+        fi
+        
+        # Enhanced activity timeout detection
+        local time_since_activity=$((current_time - last_activity_time))
+        if [[ $time_since_activity -gt $activity_timeout ]]; then
+            log_warn "⏰ Enhanced task $task_id appears inactive (${time_since_activity}s without activity)"
+            return 1
+        fi
+        
+        # Enhanced real-time progress reporting
+        if [[ $((consecutive_checks % 8)) -eq 0 ]]; then  # Every 64 seconds
+            local remaining_time=$((max_wait_time - elapsed_time))
+            local progress_percent=$(( (elapsed_time * 100) / max_wait_time ))
+            log_info "📈 Enhanced task $task_id monitoring: ${elapsed_time}s elapsed, ${remaining_time}s remaining ($progress_percent%)"
+        fi
+        
+        sleep $check_interval
+    done
+    
+    log_warn "⏰ Enhanced task execution monitoring timeout reached for $task_id"
+    return 1
+}
+
+# Enhanced task completion detection
+check_task_completion_indicators_enhanced() {
+    local output="$1"
+    local task_type="$2"
+    
+    # Enhanced completion patterns with more comprehensive detection
+    local enhanced_completion_patterns=(
+        "task.*completed"
+        "successfully.*finished"
+        "done.*processing"
+        "completed.*successfully"
+        "finished.*task"
+        "pull request.*created"
+        "commit.*created"
+        "issue.*resolved"
+        "implementation.*complete"
+        "deployment.*successful"
+        "analysis.*complete"
+        "review.*finished"
+        "changes.*applied"
+        "ready.*for.*review"
+        "solution.*implemented"
+    )
+    
+    # Check enhanced patterns
+    for pattern in "${enhanced_completion_patterns[@]}"; do
+        if echo "$output" | grep -qi "$pattern"; then
+            log_debug "Enhanced completion pattern matched: $pattern"
+            return 0
+        fi
+    done
+    
+    # Task-type-specific enhanced patterns
+    case "$task_type" in
+        "github_issue")
+            if echo "$output" | grep -qiE "(issue.*closed|pr.*created|solution.*provided)"; then
+                return 0
+            fi
+            ;;
+        "github_pr")
+            if echo "$output" | grep -qiE "(pr.*reviewed|changes.*approved|merge.*ready)"; then
+                return 0
+            fi
+            ;;
+        "custom")
+            if echo "$output" | grep -qiE "(task.*done|objective.*achieved|request.*fulfilled)"; then
+                return 0
+            fi
+            ;;
+    esac
+    
+    return 1
+}
+
+# Enhanced task error detection
+check_task_error_indicators_enhanced() {
+    local output="$1"
+    
+    # Enhanced error patterns (excluding usage limit patterns)
+    local enhanced_error_patterns=(
+        "error.*occurred"
+        "failed.*to"
+        "cannot.*complete"
+        "unable.*to.*process"
+        "task.*failed"
+        "execution.*error"
+        "critical.*error"
+        "fatal.*error"
+        "invalid.*request"
+        "permission.*denied"
+        "access.*denied"
+        "not.*found"
+        "timeout.*exceeded"
+        "connection.*failed"
+    )
+    
+    # Check enhanced error patterns, but exclude usage limit patterns
+    for pattern in "${enhanced_error_patterns[@]}"; do
+        if echo "$output" | grep -qi "$pattern"; then
+            # Double-check this is not a usage limit message
+            if ! echo "$output" | grep -qiE "(usage limit|rate limit|blocked until|try again|wait until)"; then
+                log_debug "Enhanced error pattern matched: $pattern"
+                return 0
+            fi
+        fi
+    done
+    
+    return 1
 }
 
 # Execute GitHub issue task
@@ -832,14 +1300,14 @@ monitor_task_execution() {
             
             # Check for usage limit with enhanced detection
             if detect_usage_limit_in_queue "$session_output" "$task_id"; then
-                log_warn "Usage limit detected during task execution - initiating pause"
+                log_warn "Enhanced usage limit detected during task execution - initiating intelligent pause"
                 
-                # Pause queue processing for usage limit
-                if pause_queue_for_usage_limit "" "$task_id" "time_specific_limit"; then
-                    log_info "Queue paused for usage limit, task will resume automatically"
+                # Use enhanced pause function with live countdown
+                if pause_queue_for_usage_limit_enhanced "" "$task_id" "time_specific_limit_enhanced"; then
+                    log_info "Enhanced usage limit handling completed - task will resume automatically"
                     return 42  # Special exit code for usage limit
                 else
-                    log_error "Failed to pause queue for usage limit"
+                    log_error "Failed to execute enhanced usage limit handling"
                     return 1
                 fi
             fi
@@ -1348,6 +1816,7 @@ continuous_monitoring_loop() {
     log_info "  Use claunch: $USE_CLAUNCH"
     log_info "  Use new terminal: $USE_NEW_TERMINAL"
     log_info "  Task queue processing: ${TASK_QUEUE_PROCESSING:-false}"
+    log_info "  Enhanced usage limits: ${ENHANCED_USAGE_LIMITS:-false}"
     
     if [[ "${#CLAUDE_ARGS[@]}" -gt 0 ]]; then
         log_info "  Claude arguments: ${CLAUDE_ARGS[*]}"
@@ -1654,6 +2123,7 @@ OPTIONS:
 
 TASK QUEUE OPTIONS:
     --queue-mode             Enable task queue processing mode
+    --enhanced-usage-limits  Enable enhanced usage limit detection with live countdown
     --add-issue NUMBER       Add GitHub issue to task queue
     --add-pr NUMBER          Add GitHub PR to task queue  
     --add-custom "TASK"      Add custom task to queue
@@ -1794,6 +2264,10 @@ parse_arguments() {
                 ;;
             --queue-mode)
                 QUEUE_MODE=true
+                shift
+                ;;
+            --enhanced-usage-limits)
+                ENHANCED_USAGE_LIMITS=true
                 shift
                 ;;
             --add-issue)

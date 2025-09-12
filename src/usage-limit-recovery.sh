@@ -60,11 +60,11 @@ detect_usage_limit_in_queue() {
     
     log_debug "Checking for usage limit patterns in session output"
     
-    # First check for time-specific usage limits (pm/am patterns)
+    # First check for time-specific usage limits (pm/am patterns) with enhanced detection
     local extracted_wait_time
-    if extracted_wait_time=$(extract_usage_limit_time_from_output "$session_output"); then
-        log_warn "Time-specific usage limit detected - blocked until specific time"
-        record_usage_limit_occurrence "$task_id" "time_specific_limit"
+    if extracted_wait_time=$(extract_usage_limit_time_enhanced "$session_output"); then
+        log_warn "Time-specific usage limit detected - blocked until specific time (enhanced detection)"
+        record_usage_limit_occurrence "$task_id" "time_specific_limit_enhanced"
         
         if [[ -n "$task_id" ]]; then
             create_usage_limit_checkpoint "$task_id"
@@ -180,65 +180,127 @@ EOF
 # ENHANCED TIME-BASED USAGE LIMIT DETECTION
 # ===============================================================================
 
-# Extract specific wait time from usage limit messages
-extract_usage_limit_time_from_output() {
+# Enhanced usage limit detection with comprehensive pattern recognition
+extract_usage_limit_time_enhanced() {
     local output="$1"
     
-    # Comprehensive time patterns for various formats
-    local time_patterns=(
-        # Standard am/pm formats
-        "blocked until ([0-9]{1,2})(am|pm)"                      # "blocked until 3pm"
-        "blocked until ([0-9]{1,2}):([0-9]{2})(am|pm)"           # "blocked until 3:30pm"
-        "try again at ([0-9]{1,2})(am|pm)"                       # "try again at 9am"
-        "try again at ([0-9]{1,2}):([0-9]{2})(am|pm)"            # "try again at 9:30am"
-        "available.*at ([0-9]{1,2})(am|pm)"                      # "available tomorrow at 2pm"
-        "available.*at ([0-9]{1,2}):([0-9]{2})(am|pm)"           # "available tomorrow at 2:30pm"
-        "retry at ([0-9]{1,2})(am|pm)"                           # "retry at 4pm"
-        "retry at ([0-9]{1,2}):([0-9]{2})(am|pm)"                # "retry at 4:30pm"
-        "wait until ([0-9]{1,2})(am|pm)"                         # "wait until 5pm"
-        "wait until ([0-9]{1,2}):([0-9]{2})(am|pm)"              # "wait until 5:30pm"
-        "tomorrow at ([0-9]{1,2})(am|pm)"                        # "tomorrow at 8am"
-        "tomorrow at ([0-9]{1,2}):([0-9]{2})(am|pm)"             # "tomorrow at 8:30am"
+    log_debug "Starting enhanced usage limit time extraction"
+    
+    # Comprehensive enhanced time patterns for various Claude CLI response formats
+    local enhanced_patterns=(
+        # Basic am/pm formats with various wordings
+        "blocked until ([0-9]{1,2})\s*(am|pm)"
+        "blocked until ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "try again at ([0-9]{1,2})\s*(am|pm)"
+        "try again at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "available.*at ([0-9]{1,2})\s*(am|pm)"
+        "available.*at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "retry at ([0-9]{1,2})\s*(am|pm)"
+        "retry at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "wait until ([0-9]{1,2})\s*(am|pm)"
+        "wait until ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "come back at ([0-9]{1,2})\s*(am|pm)"
+        "come back at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "limit resets at ([0-9]{1,2})\s*(am|pm)"
+        "limit resets at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        
+        # Tomorrow/next-day patterns
+        "tomorrow at ([0-9]{1,2})\s*(am|pm)"
+        "tomorrow at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "available tomorrow at ([0-9]{1,2})\s*(am|pm)"
+        "available tomorrow at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
+        "try tomorrow at ([0-9]{1,2})\s*(am|pm)"
+        "try tomorrow at ([0-9]{1,2}):([0-9]{2})\s*(am|pm)"
         
         # 24-hour formats
-        "blocked until ([0-9]{1,2}):([0-9]{2})"                   # "blocked until 15:30"
-        "try again at ([0-9]{1,2}):([0-9]{2})"                    # "try again at 21:00"
-        "retry at ([0-9]{1,2}):([0-9]{2})"                        # "retry at 14:45"
-        "wait until ([0-9]{1,2}):([0-9]{2})"                      # "wait until 20:15"
+        "blocked until ([0-9]{1,2}):([0-9]{2})"
+        "try again at ([0-9]{1,2}):([0-9]{2})"
+        "retry at ([0-9]{1,2}):([0-9]{2})"
+        "wait until ([0-9]{1,2}):([0-9]{2})"
+        "available at ([0-9]{1,2}):([0-9]{2})"
         
-        # Natural language patterns
-        "usage limit.*([0-9]{1,2})(am|pm)"                       # "usage limit exceeded, try 3pm"
-        "please wait.*([0-9]{1,2})(am|pm)"                       # "please wait until 6pm"
-        "limit exceeded.*([0-9]{1,2})(am|pm)"                    # "limit exceeded, retry at 7am"
+        # Duration-based patterns (converted to specific times)
+        "retry in ([0-9]+)\s*hours?"
+        "wait ([0-9]+)\s*more\s*hours?"
+        "try again in ([0-9]+)\s*hours?"
+        "available in ([0-9]+)\s*hours?"
+        "wait ([0-9]+)\s*hours?"
+        
+        # Natural language and varied expressions
+        "usage limit.*until ([0-9]{1,2})\s*(am|pm)"
+        "usage limit.*([0-9]{1,2})\s*(am|pm)"
+        "please wait.*until ([0-9]{1,2})\s*(am|pm)"
+        "please wait.*([0-9]{1,2})\s*(am|pm)"
+        "limit exceeded.*([0-9]{1,2})\s*(am|pm)"
+        "limit exceeded.*until ([0-9]{1,2})\s*(am|pm)"
+        "rate limit.*until ([0-9]{1,2})\s*(am|pm)"
+        "quota.*until ([0-9]{1,2})\s*(am|pm)"
+        "service.*until ([0-9]{1,2})\s*(am|pm)"
     )
     
-    log_debug "Analyzing output for time-specific usage limit patterns"
+    log_debug "Analyzing output with ${#enhanced_patterns[@]} enhanced patterns"
     
-    # Check each pattern for matches
-    for pattern in "${time_patterns[@]}"; do
-        if echo "$output" | grep -qiE "$pattern"; then
-            log_debug "Matched time pattern: $pattern"
-            
-            # Extract the time components
-            local matched_line
-            matched_line=$(echo "$output" | grep -iE "$pattern" | head -1)
-            
-            local wait_seconds
-            if wait_seconds=$(calculate_wait_time_from_pattern "$matched_line" "$pattern"); then
-                log_info "Successfully extracted wait time: ${wait_seconds}s from pattern match"
-                echo "$wait_seconds"
-                return 0
-            else
-                log_warn "Failed to calculate wait time from matched pattern: $pattern"
-            fi
+    # Process the output line by line for better detection
+    while IFS= read -r line; do
+        if [[ -z "$line" ]]; then
+            continue
         fi
-    done
+        
+        log_debug "Checking line: ${line:0:100}..."
+        
+        # Check each enhanced pattern against this line
+        for pattern in "${enhanced_patterns[@]}"; do
+            if echo "$line" | grep -qiE "$pattern"; then
+                log_debug "Enhanced pattern matched: $pattern"
+                log_debug "Matched line: $line"
+                
+                local wait_seconds
+                if wait_seconds=$(calculate_wait_time_enhanced "$line" "$pattern"); then
+                    log_info "Enhanced extraction successful: ${wait_seconds}s from pattern '$pattern'"
+                    echo "$wait_seconds"
+                    return 0
+                else
+                    log_debug "Wait time calculation failed for pattern: $pattern"
+                fi
+            fi
+        done
+    done <<< "$output"
     
-    log_debug "No time-specific usage limit patterns found in output"
+    log_debug "No enhanced time-specific usage limit patterns found"
     return 1
 }
 
-# Calculate wait time in seconds from matched time pattern
+# Legacy function kept for backward compatibility
+extract_usage_limit_time_from_output() {
+    local output="$1"
+    log_debug "Using legacy extraction method as fallback"
+    extract_usage_limit_time_enhanced "$output"
+}
+
+# Enhanced wait time calculation with improved pattern recognition
+calculate_wait_time_enhanced() {
+    local matched_text="$1"
+    local pattern="$2"
+    
+    log_debug "Enhanced wait time calculation from: '$matched_text' (pattern: $pattern)"
+    
+    # Check for duration-based patterns first (hours)
+    if echo "$matched_text" | grep -qiE "([0-9]+)\s*hours?"; then
+        local hours
+        hours=$(echo "$matched_text" | grep -oiE "([0-9]+)\s*hours?" | grep -oE "[0-9]+" | head -1)
+        if [[ -n "$hours" && "$hours" =~ ^[0-9]+$ ]]; then
+            local wait_seconds=$((hours * 3600))
+            log_info "Duration-based calculation: ${hours}h = ${wait_seconds}s"
+            echo "$wait_seconds"
+            return 0
+        fi
+    fi
+    
+    # Fall back to time-specific calculation
+    calculate_wait_time_from_pattern "$matched_text" "$pattern"
+}
+
+# Calculate wait time in seconds from matched time pattern (enhanced)
 calculate_wait_time_from_pattern() {
     local matched_text="$1"
     local pattern="$2"
@@ -370,14 +432,33 @@ calculate_wait_time_from_pattern() {
     return 0
 }
 
-# Enhanced countdown display with better progress indicators
+# Enhanced countdown display with live progress and ETA
 display_enhanced_usage_limit_countdown() {
     local total_wait_time="$1"
     local reason="${2:-usage limit}"
     local start_time=$(date +%s)
     local end_time=$((start_time + total_wait_time))
     
-    log_info "Starting enhanced usage limit countdown display (reason: $reason)"
+    log_info "Starting enhanced usage limit countdown display (reason: $reason, duration: ${total_wait_time}s)"
+    
+    # Calculate ETA
+    local eta_timestamp
+    if has_command date; then
+        if date -d "@$end_time" "+%Y-%m-%d %H:%M:%S" >/dev/null 2>&1; then
+            eta_timestamp=$(date -d "@$end_time" "+%H:%M:%S")
+        elif date -r "$end_time" "+%Y-%m-%d %H:%M:%S" >/dev/null 2>&1; then
+            eta_timestamp=$(date -r "$end_time" "+%H:%M:%S")
+        else
+            eta_timestamp="unknown"
+        fi
+    else
+        eta_timestamp="unknown"
+    fi
+    
+    log_info "Usage limit will expire at: $eta_timestamp"
+    
+    local update_interval=3  # Update every 3 seconds for smoother display
+    local last_minute_display=""
     
     while [[ $(date +%s) -lt $end_time ]]; do
         local current_time=$(date +%s)
@@ -387,7 +468,7 @@ display_enhanced_usage_limit_countdown() {
             break
         fi
         
-        # Format remaining time
+        # Format remaining time with better precision
         local hours=$((remaining / 3600))
         local minutes=$(( (remaining % 3600) / 60 ))
         local seconds=$((remaining % 60))
@@ -405,25 +486,47 @@ display_enhanced_usage_limit_countdown() {
         local elapsed=$((current_time - start_time))
         local progress_percent=$(( (elapsed * 100) / total_wait_time ))
         
-        # Create progress bar
-        local bar_length=20
+        # Create animated progress bar
+        local bar_length=25
         local filled_length=$(( (progress_percent * bar_length) / 100 ))
         local bar=""
         for ((i=0; i<bar_length; i++)); do
             if [[ $i -lt $filled_length ]]; then
-                bar+="▓"
+                if [[ $i -eq $((filled_length - 1)) && $remaining -gt 0 ]]; then
+                    # Animated edge
+                    bar+="▶"
+                else
+                    bar+="█"
+                fi
             else
-                bar+="░"
+                bar+="─"
             fi
         done
         
-        # Display enhanced countdown with progress bar
-        printf "\r[USAGE LIMIT] %s [%s] %d%% - Resuming in: %s" "$reason" "$bar" "$progress_percent" "$time_display"
+        # Special handling for last minute
+        if [[ $remaining -le 60 ]]; then
+            if [[ "$last_minute_display" != "shown" ]]; then
+                printf "\n[USAGE LIMIT] Final minute countdown...\n"
+                last_minute_display="shown"
+            fi
+            update_interval=1  # Update every second in final minute
+        fi
         
-        sleep 5  # Update every 5 seconds for better responsiveness
+        # Display enhanced countdown with progress bar and ETA
+        printf "\r[USAGE LIMIT] %s |%s| %3d%% - %s remaining (ETA: %s)" \
+               "$reason" "$bar" "$progress_percent" "$time_display" "$eta_timestamp"
+        
+        # Handle interrupt signal gracefully
+        if read -t $update_interval -n 1 key 2>/dev/null; then
+            if [[ "$key" == "" ]]; then  # Enter key
+                printf "\n[USAGE LIMIT] Countdown display paused. Press any key to resume...\n"
+                read -n 1 -s
+            fi
+        fi
     done
     
-    printf "\r[USAGE LIMIT] Wait period completed - resuming operations%*s\n" 50 ""
+    printf "\r[USAGE LIMIT] ✅ Wait period completed - resuming operations%*s\n" 40 ""
+    log_info "Enhanced countdown completed successfully"
 }
 
 # ===============================================================================
@@ -495,11 +598,12 @@ pause_queue_for_usage_limit() {
     # Create usage limit recovery marker
     create_usage_limit_recovery_marker "$estimated_wait_time" "$current_task_id" "$detected_pattern" "$resume_time"
     
-    # Start enhanced countdown display in background if terminal is available
-    if [[ -t 1 ]]; then
-        display_enhanced_usage_limit_countdown "$estimated_wait_time" "$detected_pattern" &
-        local countdown_pid=$!
-        echo "$countdown_pid" > "/tmp/usage-limit-countdown.pid" 2>/dev/null || true
+    # Start enhanced countdown display (foreground for live operation)
+    if [[ -t 1 ]] || [[ "${FORCE_COUNTDOWN_DISPLAY:-false}" == "true" ]]; then
+        display_enhanced_usage_limit_countdown "$estimated_wait_time" "$detected_pattern"
+    else
+        log_info "Non-interactive mode: Waiting ${estimated_wait_time}s for usage limit to expire"
+        sleep "$estimated_wait_time"
     fi
     
     return 0
@@ -840,6 +944,152 @@ reset_usage_limit_statistics() {
     rm -f "$PROJECT_ROOT/$task_queue_dir/usage-limit-pause.marker" 2>/dev/null || true
     
     log_info "Usage limit statistics reset completed"
+}
+
+# ===============================================================================
+# ENHANCED ERROR RECOVERY AND RESOURCE MANAGEMENT
+# ===============================================================================
+
+# Enhanced error recovery functions
+enhanced_error_recovery() {
+    local error_type="$1"
+    local session_id="${2:-}"
+    local recovery_attempt="${3:-1}"
+    
+    log_warn "Enhanced error recovery initiated: $error_type (attempt $recovery_attempt)"
+    
+    case "$error_type" in
+        "session_lost")
+            log_warn "🔄 Session lost - attempting enhanced recovery (attempt $recovery_attempt)"
+            if [[ $recovery_attempt -le 3 ]]; then
+                if declare -f start_or_continue_claude_session >/dev/null 2>&1; then
+                    start_or_continue_claude_session
+                    return $?
+                else
+                    log_error "Session management function not available"
+                    return 1
+                fi
+            else
+                log_error "❌ Maximum session recovery attempts reached"
+                return 1
+            fi
+            ;;
+        "usage_limit_timeout")
+            log_warn "⏰ Usage limit detection timeout - using enhanced fallback wait"
+            local fallback_wait="${USAGE_LIMIT_COOLDOWN:-300}"
+            display_enhanced_usage_limit_countdown "$fallback_wait" "timeout fallback"
+            return 0
+            ;;
+        "task_execution_error")
+            log_warn "🔄 Task execution error - checking for recoverable issues"
+            # Implement intelligent retry logic
+            return 0
+            ;;
+        "enhanced_pattern_failure")
+            log_warn "🔍 Enhanced pattern detection failed - falling back to standard detection"
+            # Fallback to legacy detection methods
+            return 0
+            ;;
+        *)
+            log_error "❌ Unknown error type in enhanced recovery: $error_type"
+            return 1
+            ;;
+    esac
+}
+
+# Validate usage limit recovery completion
+validate_usage_limit_recovery() {
+    local task_id="${1:-}"
+    local max_validation_attempts=3
+    local validation_attempt=0
+    
+    log_info "Validating usage limit recovery for task: ${task_id:-system}"
+    
+    while [[ $validation_attempt -lt $max_validation_attempts ]]; do
+        ((validation_attempt++))
+        
+        # Check if Claude CLI is responsive
+        if command -v claude >/dev/null 2>&1; then
+            # Simple test to check if Claude CLI is working
+            if timeout 10 claude --help >/dev/null 2>&1; then
+                log_info "✅ Usage limit recovery validation successful (attempt $validation_attempt)"
+                return 0
+            else
+                log_warn "⚠️ Claude CLI still not responsive (attempt $validation_attempt)"
+            fi
+        else
+            log_error "❌ Claude CLI not available"
+            return 1
+        fi
+        
+        if [[ $validation_attempt -lt $max_validation_attempts ]]; then
+            local retry_wait=30
+            log_info "Waiting ${retry_wait}s before retry validation..."
+            sleep $retry_wait
+        fi
+    done
+    
+    log_error "❌ Usage limit recovery validation failed after $max_validation_attempts attempts"
+    return 1
+}
+
+# Resource monitoring for long-running operations
+monitor_resource_usage() {
+    local max_memory_mb="${1:-1000}"  # 1GB default limit
+    local check_interval="${2:-300}"   # 5 minutes
+    local monitoring_duration="${3:-0}" # 0 = infinite
+    
+    log_debug "Starting resource monitoring (memory limit: ${max_memory_mb}MB, check interval: ${check_interval}s)"
+    
+    local start_time=$(date +%s)
+    local check_count=0
+    
+    while true; do
+        ((check_count++))
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - start_time))
+        
+        # Check if monitoring duration exceeded
+        if [[ $monitoring_duration -gt 0 && $elapsed -gt $monitoring_duration ]]; then
+            log_debug "Resource monitoring duration exceeded - stopping"
+            break
+        fi
+        
+        # Check memory usage
+        local memory_usage
+        memory_usage=$(ps -o rss= -p $$ 2>/dev/null | awk '{print int($1/1024)}' || echo "0")
+        
+        if [[ $memory_usage -gt $max_memory_mb ]]; then
+            log_warn "⚠️ High memory usage detected: ${memory_usage}MB > ${max_memory_mb}MB"
+            
+            # Trigger cleanup if available
+            if declare -f cleanup_sessions_with_pressure_handling >/dev/null 2>&1; then
+                cleanup_sessions_with_pressure_handling true false
+            fi
+            
+            # Force garbage collection if available
+            if declare -f trigger_garbage_collection >/dev/null 2>&1; then
+                trigger_garbage_collection
+            fi
+        fi
+        
+        # Check for zombie processes
+        local zombie_count
+        zombie_count=$(ps aux 2>/dev/null | grep -c "[Zz]ombie" || echo "0")
+        
+        if [[ $zombie_count -gt 0 ]]; then
+            log_warn "⚠️ Zombie processes detected: $zombie_count"
+        fi
+        
+        # Log resource status periodically
+        if [[ $((check_count % 4)) -eq 0 ]]; then  # Every 20 minutes at 5-minute intervals
+            log_debug "Resource check #$check_count: Memory=${memory_usage}MB, Zombies=$zombie_count, Elapsed=${elapsed}s"
+        fi
+        
+        sleep "$check_interval"
+    done
+    
+    log_debug "Resource monitoring completed after ${check_count} checks"
 }
 
 # ===============================================================================

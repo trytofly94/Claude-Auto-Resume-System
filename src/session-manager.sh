@@ -7,6 +7,12 @@
 
 set -euo pipefail
 
+# Source guard to prevent multiple loading
+if [[ -n "${_SESSION_MANAGER_LOADED:-}" ]]; then
+    return 0
+fi
+readonly _SESSION_MANAGER_LOADED=1
+
 # ===============================================================================
 # GLOBALE VARIABLEN UND KONSTANTEN
 # ===============================================================================
