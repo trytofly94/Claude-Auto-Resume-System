@@ -121,6 +121,23 @@ coverage/
 *.coverage
 .nyc_output/
 
+# Test-Scripts und -Reports (ROOT VERZEICHNIS!)
+test-*.sh
+test_*.sh
+*TEST_REPORT*.md
+*COVERAGE*.md
+*COMPATIBILITY*.md
+benchmark-*.sh
+debug_*.sh
+deploy-*.sh
+production-*.sh
+test-*.json
+test-*.log
+test-*.txt
+*-test-*.json
+*-test-*.log
+hanging-*.txt
+
 # Debug-Dumps
 core.*
 *.dmp

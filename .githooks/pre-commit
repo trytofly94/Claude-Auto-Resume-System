@@ -1,0 +1,28 @@
+#!/bin/bash
+# Pre-commit hook - Prevents committing unwanted files
+# Claude Auto-Resume Project
+
+echo "🔍 Running pre-commit checks..."
+
+# Check for test artifacts in root directory
+test_files=$(find . -maxdepth 1 -name "test-*.sh" -o -name "test_*.sh" -o -name "*TEST_REPORT*.md" -o -name "benchmark-*.sh" -o -name "debug_*.sh")
+if [ -n "$test_files" ]; then
+    echo "❌ Found test artifacts in root directory:"
+    echo "$test_files"
+    echo ""
+    echo "Run 'make deep-clean' to clean up before committing."
+    exit 1
+fi
+
+# Check for log files being committed
+log_files=$(git diff --cached --name-only | grep -E "\.(log|tmp|temp)$")
+if [ -n "$log_files" ]; then
+    echo "❌ Found log/temp files being committed:"
+    echo "$log_files"
+    echo ""
+    echo "Run 'make git-unstage-logs' to unstage them."
+    exit 1
+fi
+
+echo "✅ Pre-commit checks passed"
+exit 0

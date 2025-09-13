@@ -58,6 +58,19 @@ clean: ## Clean temporary files and logs
 	@find . -name "*.temp" -delete || true
 	@echo "✅ Cleanup complete"
 
+deep-clean: ## Deep clean: remove all test artifacts and reports from root
+	@echo "🗑️ Deep cleaning project root..."
+	@rm -f test-*.sh test_*.sh benchmark-*.sh debug_*.sh deploy-*.sh production-*.sh || true
+	@rm -f *TEST_REPORT*.md *COVERAGE*.md *COMPATIBILITY*.md *CHECKLIST*.md || true
+	@rm -f test-*.json test-*.log test-*.txt *-test-*.* hanging-*.txt || true
+	@rm -f *.log monitor-*.log || true
+	@echo "✅ Deep cleanup complete"
+
+auto-clean: ## Auto-clean after each development session
+	@make clean
+	@make git-unstage-logs
+	@make deep-clean
+
 setup: ## Run initial project setup
 	@echo "⚙️ Running project setup..."
 	@scripts/setup.sh

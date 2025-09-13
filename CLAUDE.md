@@ -218,6 +218,26 @@ test: add unit tests for usage limit detection
 - **Dokumentation**: Inline-Kommentare für komplexe Logik
 - **Error-Handling**: Robuste Fehlerbehandlung mit Logging
 
+### ❗ WICHTIG: Verzeichnis-Organisation (Anti-Zumüllung)
+
+#### Verboten im Root-Verzeichnis:
+- `test-*.sh`, `test_*.sh` → gehören in `tests/`
+- `*TEST_REPORT*.md`, `*COVERAGE*.md` → gehören in `docs/reports/` oder werden gelöscht
+- `benchmark-*.sh`, `debug_*.sh` → gehören in `scripts/`
+- `*.log`, `*.tmp`, `*.json` (außer configs) → gehören in entsprechende Verzeichnisse
+
+#### Automatische Bereinigung verwenden:
+```bash
+make auto-clean           # Nach jeder Entwicklungssession
+make deep-clean          # Vor wichtigen Commits
+make pre-commit          # Vor jedem Commit (mit Validation)
+```
+
+#### Pre-commit Hook aktivieren:
+```bash
+git config core.hooksPath .githooks
+```
+
 ## 7. Agenten-spezifische Anweisungen
 
 ### Für planner-Agent
