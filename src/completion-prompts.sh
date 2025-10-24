@@ -281,7 +281,7 @@ extract_completion_marker() {
 # CONFIGURATION AND UTILITIES
 # ===============================================================================
 
-# Load completion detection configuration
+# Load completion detection configuration (Issue #114)
 load_completion_config() {
     # Default configuration
     SMART_COMPLETION_ENABLED="${SMART_COMPLETION_ENABLED:-true}"
@@ -289,9 +289,23 @@ load_completion_config() {
     CUSTOM_PATTERN_TIMEOUT="${CUSTOM_PATTERN_TIMEOUT:-300}"
     FALLBACK_CONFIRMATION_ENABLED="${FALLBACK_CONFIRMATION_ENABLED:-true}"
     
-    # Load from config file if available
-    if [[ -f "$CLAUDE_CONFIG_DIR/default.conf" ]]; then
-        source "$CLAUDE_CONFIG_DIR/default.conf"
+    # Use centralized configuration loader if available
+    if declare -f load_system_config >/dev/null 2>&1; then
+        # Config should already be loaded by main process, but ensure it's loaded
+        if [[ -z "${SYSTEM_CONFIG_LOADED:-}" ]]; then
+            load_system_config || log_warn "Failed to load centralized config"
+        fi
+        
+        # Get configuration values using centralized getter
+        SMART_COMPLETION_ENABLED="$(get_config "SMART_COMPLETION_ENABLED" "${SMART_COMPLETION_ENABLED:-true}")"
+        COMPLETION_CONFIDENCE_THRESHOLD="$(get_config "COMPLETION_CONFIDENCE_THRESHOLD" "${COMPLETION_CONFIDENCE_THRESHOLD:-0.8}")"
+        CUSTOM_PATTERN_TIMEOUT="$(get_config "CUSTOM_PATTERN_TIMEOUT" "${CUSTOM_PATTERN_TIMEOUT:-300}")"
+        FALLBACK_CONFIRMATION_ENABLED="$(get_config "FALLBACK_CONFIRMATION_ENABLED" "${FALLBACK_CONFIRMATION_ENABLED:-true}")"
+    else
+        # Fallback: Load from config file if available
+        if [[ -f "$CLAUDE_CONFIG_DIR/default.conf" ]]; then
+            source "$CLAUDE_CONFIG_DIR/default.conf"
+        fi
     fi
 }
 

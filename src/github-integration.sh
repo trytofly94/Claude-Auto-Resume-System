@@ -107,17 +107,47 @@ else
     log_error() { echo "[ERROR] $*" >&2; }
 fi
 
-# Lade Konfiguration
-if [[ -f "$PROJECT_ROOT/config/default.conf" ]]; then
-    # Source config with proper error handling
-    if ! source "$PROJECT_ROOT/config/default.conf" 2>/dev/null; then
-        log_warn "Failed to source config file, using default values"
+# Load centralized configuration loader (Issue #114)
+if [[ -f "$SCRIPT_DIR/utils/config-loader.sh" ]]; then
+    source "$SCRIPT_DIR/utils/config-loader.sh"
+    # Load configuration using centralized loader
+    load_system_config || log_warn "Failed to load centralized configuration, using defaults"
+    
+    # Get GitHub-specific configuration values using centralized getter
+    GITHUB_INTEGRATION_ENABLED="$(get_config "GITHUB_INTEGRATION_ENABLED" "${GITHUB_INTEGRATION_ENABLED:-true}")"
+    GITHUB_AUTO_COMMENT="$(get_config "GITHUB_AUTO_COMMENT" "${GITHUB_AUTO_COMMENT:-true}")"
+    GITHUB_STATUS_UPDATES="$(get_config "GITHUB_STATUS_UPDATES" "${GITHUB_STATUS_UPDATES:-true}")"
+    GITHUB_COMPLETION_NOTIFICATIONS="$(get_config "GITHUB_COMPLETION_NOTIFICATIONS" "${GITHUB_COMPLETION_NOTIFICATIONS:-true}")"
+    GITHUB_API_TIMEOUT="$(get_config "GITHUB_API_TIMEOUT" "${GITHUB_API_TIMEOUT:-30}")"
+    GITHUB_RETRY_ATTEMPTS="$(get_config "GITHUB_RETRY_ATTEMPTS" "${GITHUB_RETRY_ATTEMPTS:-3}")"
+    GITHUB_RETRY_DELAY="$(get_config "GITHUB_RETRY_DELAY" "${GITHUB_RETRY_DELAY:-10}")"
+    GITHUB_API_CACHE_TTL="$(get_config "GITHUB_API_CACHE_TTL" "${GITHUB_API_CACHE_TTL:-300}")"
+    GITHUB_PROGRESS_UPDATES_INTERVAL="$(get_config "GITHUB_PROGRESS_UPDATES_INTERVAL" "${GITHUB_PROGRESS_UPDATES_INTERVAL:-300}")"
+    GITHUB_MAX_COMMENT_LENGTH="$(get_config "GITHUB_MAX_COMMENT_LENGTH" "${GITHUB_MAX_COMMENT_LENGTH:-65000}")"
+    GITHUB_USE_COLLAPSIBLE_SECTIONS="$(get_config "GITHUB_USE_COLLAPSIBLE_SECTIONS" "${GITHUB_USE_COLLAPSIBLE_SECTIONS:-true}")"
+    GITHUB_PROGRESS_BACKUP_ENABLED="$(get_config "GITHUB_PROGRESS_BACKUP_ENABLED" "${GITHUB_PROGRESS_BACKUP_ENABLED:-true}")"
+    GITHUB_BACKUP_RETENTION_HOURS="$(get_config "GITHUB_BACKUP_RETENTION_HOURS" "${GITHUB_BACKUP_RETENTION_HOURS:-72}")"
+    GITHUB_BACKUP_COMPRESSION="$(get_config "GITHUB_BACKUP_COMPRESSION" "${GITHUB_BACKUP_COMPRESSION:-true}")"
+else
+    # Fallback: Lade Konfiguration direkt
+    if [[ -f "$PROJECT_ROOT/config/default.conf" ]]; then
+        # Source config with proper error handling
+        if ! source "$PROJECT_ROOT/config/default.conf" 2>/dev/null; then
+            log_warn "Failed to source config file, using default values"
+        fi
     fi
+    log_warn "Centralized config loader not available, using fallback method"
 fi
 
-# Prüfe ob Kommando verfügbar ist
+# Prüfe ob Kommando verfügbar ist (Issue #114 - Use cached version)
 has_command() {
-    command -v "$1" >/dev/null 2>&1
+    # Use cached command check if available from config-loader
+    if declare -f has_command_cached >/dev/null 2>&1; then
+        has_command_cached "$1"
+    else
+        # Fallback to direct check
+        command -v "$1" >/dev/null 2>&1
+    fi
 }
 
 # Prüfe Dependencies für GitHub Integration

@@ -2,6 +2,14 @@
 
 set -euo pipefail
 
+# Initialize fallback logging functions first (Issue #114)
+if ! declare -f log_info >/dev/null 2>&1; then
+    log_debug() { [[ "${DEBUG_MODE:-false}" == "true" ]] && echo "[DEBUG] $*" >&2 || true; }
+    log_info() { echo "[INFO] $*" >&2; }
+    log_warn() { echo "[WARN] $*" >&2; }
+    log_error() { echo "[ERROR] $*" >&2; }
+fi
+
 # Global configuration storage
 declare -gA SYSTEM_CONFIG
 declare -g SYSTEM_CONFIG_LOADED=""
@@ -443,10 +451,3 @@ dump_config() {
     get_cached_capabilities
 }
 
-# Initialize fallback logging if main logging not available
-if ! declare -f log_info >/dev/null 2>&1; then
-    log_debug() { [[ "${DEBUG_MODE:-false}" == "true" ]] && echo "[DEBUG] $*" >&2 || true; }
-    log_info() { echo "[INFO] $*" >&2; }
-    log_warn() { echo "[WARN] $*" >&2; }
-    log_error() { echo "[ERROR] $*" >&2; }
-fi
