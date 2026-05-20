@@ -1242,16 +1242,6 @@ detect_usage_limit() {
         fi
     fi
     
-    # Alternative: Teste Claude CLI direkt
-    local test_output
-    if test_output=$(timeout "$HEALTH_CHECK_TIMEOUT" claude -p 'check' 2>&1); then
-        if echo "$test_output" | grep -q "Claude AI usage limit reached\|usage limit reached"; then
-            log_info "Usage limit detected via direct CLI test"
-            update_session_state "$session_id" "$SESSION_STATE_USAGE_LIMITED" "usage limit detected via CLI"
-            return 0
-        fi
-    fi
-    
     return 1
 }
 
