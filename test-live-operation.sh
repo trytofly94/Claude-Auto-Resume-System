@@ -10,6 +10,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 
+# tmux sandbox — route every tmux call to a throwaway server, never the user's
+# default socket. TMUX wins over TMUX_TMPDIR, so it MUST be unset (otherwise
+# running this inside the user's tmux would spawn/kill on their live socket).
+# Note: the "existing sessions" warning below will see the (empty) private
+# socket rather than the user's real sessions — that is the intended isolation.
+unset TMUX
+export TMUX_TMPDIR="/tmp/auto-resume-livetest-$$"
+mkdir -p "$TMUX_TMPDIR"
+# Tear down the private tmux server + socket dir on exit (guarded).
+trap '[[ "$TMUX_TMPDIR" == /tmp/auto-resume-livetest-* ]] && { tmux kill-server 2>/dev/null || true; rm -rf "$TMUX_TMPDIR"; }' EXIT
+
 # Color codes for better output
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'

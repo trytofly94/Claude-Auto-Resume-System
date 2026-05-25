@@ -19,9 +19,24 @@
 load '../test_helper'
 
 setup() {
+    # ---------------------------------------------------------------------------
+    # tmux sandbox — route EVERY tmux child to a throwaway server, NEVER the
+    # user's default socket. This e2e suite (unlike the unit suites) does NOT
+    # install the tmux mock, so simulate_session_failure() and the spawned
+    # hybrid-monitor.sh make REAL tmux calls. Without this sandbox, the
+    # `grep claude | kill-session` helper below would match and kill the user's
+    # live cc-managed `claude-*` sessions.
+    #
+    # CRITICAL: the TMUX env var WINS over TMUX_TMPDIR when tmux resolves the
+    # "current" server/session. If this suite runs inside the user's tmux,
+    # TMUX_TMPDIR alone is bypassed — TMUX MUST be unset too.
+    unset TMUX
+    export TMUX_TMPDIR="/tmp/auto-resume-e2e-$$"
+    mkdir -p "$TMUX_TMPDIR"
+
     # Load test environment
     setup_test_environment
-    
+
     # Set up test-specific configuration
     export TASK_QUEUE_ENABLED=true
     export GITHUB_AUTO_COMMENT=true
@@ -64,6 +79,13 @@ teardown() {
     
     # Clean up any test sessions
     cleanup_test_sessions
+
+    # Tear down the isolated tmux server + socket dir. Guarded so we only ever
+    # kill the private server and rm the private dir, never the default socket.
+    if [[ "$TMUX_TMPDIR" == /tmp/auto-resume-e2e-* ]]; then
+        tmux kill-server 2>/dev/null || true
+        rm -rf "$TMUX_TMPDIR"
+    fi
 }
 
 setup_test_github_repo() {
@@ -103,8 +125,13 @@ simulate_session_failure() {
     # Simulate Claude session failure for testing recovery
     log_debug "Simulating session failure for recovery testing"
     
-    # Kill any active tmux sessions with "claude" in the name
-    tmux list-sessions 2>/dev/null | grep claude | cut -d: -f1 | xargs -I {} tmux kill-session -t {} 2>/dev/null || true
+    # Kill only THIS suite's auto-resume sessions. Scoped to the `claude-auto`
+    # prefix that hybrid-monitor.sh / claunch-integration use (TMUX_SESSION_PREFIX
+    # defaults to claude-auto / claude-auto-resume). Defense-in-depth: even if the
+    # private TMUX_TMPDIR socket were ever bypassed and this hit the default socket,
+    # an anchored `claude-auto` pattern can NOT match the user's live cc sessions,
+    # which are named `claude-<project>` (e.g. claude-aldi) without the -auto infix.
+    tmux list-sessions 2>/dev/null | grep '^claude-auto' | cut -d: -f1 | xargs -I {} tmux kill-session -t {} 2>/dev/null || true
     
     # Create a failure marker for the hybrid monitor to detect
     touch "$TEST_QUEUE_DIR/simulate_failure"

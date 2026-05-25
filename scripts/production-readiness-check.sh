@@ -19,6 +19,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# tmux sandbox — route every tmux call to a throwaway server, never the user's
+# default socket. TMUX wins over TMUX_TMPDIR, so it MUST be unset (otherwise
+# running this inside the user's tmux would spawn/kill on their live socket).
+unset TMUX
+export TMUX_TMPDIR="/tmp/auto-resume-prodcheck-$$"
+mkdir -p "$TMUX_TMPDIR"
+# Tear down the private tmux server + socket dir on exit (guarded).
+trap '[[ "$TMUX_TMPDIR" == /tmp/auto-resume-prodcheck-* ]] && { tmux kill-server 2>/dev/null || true; rm -rf "$TMUX_TMPDIR"; }' EXIT
+
 # Source logging utilities
 if [[ -f "$PROJECT_ROOT/src/utils/logging.sh" ]]; then
     source "$PROJECT_ROOT/src/utils/logging.sh"
